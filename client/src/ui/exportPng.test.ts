@@ -210,6 +210,16 @@ describe('composeExportLayers', () => {
     expect(stops.length).toBeGreaterThan(4);
   });
 
+  it('exports the independent volume strip below the plot and before the time axis', () => {
+    const { canvas, ctx } = fakeOutCanvas();
+    const layers = { ...baseLayers(), volume: layer(1118, 44) };
+    composeExportLayers(layers, { createCanvas: () => canvas });
+    expect(canvas.height).toBe(672 + 44 + 21);
+    const draws = ctx.calls.filter(c => c.op === 'drawImage').map(c => c.args);
+    expect(draws).toContainEqual([layers.volume, 0, 672]);
+    expect(draws).toContainEqual([layers.timeAxis, 0, 716]);
+  });
+
   it('keeps the footer honest when there is no meta (notes only)', () => {
     const { canvas, ctx } = fakeOutCanvas();
     const out = composeExportLayers(baseLayers(), {

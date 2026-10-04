@@ -661,8 +661,15 @@ class CryptoFeed:
         return {}
 
     def _default_connector(self, sink: Sink) -> Connector:
-        conn = make_connector(
-            self.exchange,
+        # Binance's bare @depth stream defaults to one batch per second.
+        # Request its fastest common spot/futures cadence via the public
+        # subscription seam; upstream still owns resync and sequence checks.
+        from flowmap_server.feeds.binance import RealtimeBinanceConnector
+
+        factory = RealtimeBinanceConnector if self.exchange == "binance" else make_connector
+        args = () if self.exchange == "binance" else (self.exchange,)
+        conn = factory(
+            *args,
             symbols=[self._connector_symbol],
             channels=self._channels(),
             out=sink,

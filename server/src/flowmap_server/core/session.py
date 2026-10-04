@@ -116,7 +116,7 @@ HISTORY_MAX_COLS = 256  # per-HistoryRequest clamp
 LAG_DROP_NS = 2_000_000_000  # oldest-unsent column age that triggers drops
 NONCOL_CAP = 1000  # bounded non-column queue (latest-wins)
 GRACE_S = 60.0  # teardown grace after last detach
-FLUSH_INTERVAL_NS = 50_000_000  # right-edge partial re-send cadence (20 Hz)
+FLUSH_INTERVAL_NS = 16_000_000  # forming-column refresh (~60 Hz; no fabricated ticks)
 REC_FLUSH_COLS = 64  # recording flush cadence (finalized columns)
 _BACKOFF_CAP_S = 30.0
 # Recording flush-failure retry (cooldown with exponential backoff). One
@@ -1064,7 +1064,7 @@ class Session:
                 self._close_recording()
 
     async def _partial_flusher(self) -> None:
-        """Clock-driven right-edge flush (FLUSH_INTERVAL_NS, 20 Hz default).
+        """Clock-driven right-edge flush (FLUSH_INTERVAL_NS, ~60 Hz default).
 
         ``_consume`` only flushed partials while it was draining feed events,
         so a quiet or bursty feed (equity keyless polls every 10 s; sim/crypto

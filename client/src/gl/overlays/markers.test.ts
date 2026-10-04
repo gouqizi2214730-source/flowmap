@@ -318,4 +318,39 @@ describe('Markers seam knot anchoring (F22, F9-L1)', () => {
     expect(textCalls).toHaveLength(1);
     expect(textCalls[0].label).toBe('SEAM ×2');
   });
+
+  it('renders intelligence markers (capitol, defense_contract, clinical)', () => {
+    const m = new Markers();
+    m.add({
+      type: 7 as any,
+      ts_ns: 100n,
+      kind: 'capitol',
+      price: 150,
+      text: 'Senate trade',
+      size: null,
+    });
+    m.add({
+      type: 7 as any,
+      ts_ns: 200n,
+      kind: 'defense_contract',
+      price: 155,
+      text: 'DoD award',
+      size: null,
+    });
+    m.add({
+      type: 7 as any,
+      ts_ns: 300n,
+      kind: 'clinical',
+      price: 160,
+      text: 'FDA Phase 3',
+      size: null,
+    });
+
+    const { frame, textCalls } = makeFrame();
+    m.draw(frame);
+
+    expect(textCalls.some((c) => c.label.includes('🏛️ CAPITOL'))).toBe(true);
+    expect(textCalls.some((c) => c.label.includes('🛡️ DOD'))).toBe(true);
+    expect(textCalls.some((c) => c.label.includes('🧪 FDA'))).toBe(true);
+  });
 });

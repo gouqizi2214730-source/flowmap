@@ -114,6 +114,18 @@ describe('OverlayManager (fake GL + recording 2D)', () => {
     expect(harness.rec(timeCanvas).clears).toHaveLength(1);
   });
 
+  it('clears and disposes the independent volume canvas with the chart', () => {
+    const volume = (manager as unknown as { volumeText: { canvas: HTMLCanvasElement } }).volumeText.canvas;
+    expect(volume.className).toBe('overlay-volume');
+    expect(volume.style.pointerEvents).toBe('none');
+    manager.clearInk();
+    expect(harness.rec(volume).clears).toHaveLength(1);
+    expect(volume.isConnected).toBe(true);
+    manager.dispose();
+    expect(volume.isConnected).toBe(false);
+    expect(textCanvas.isConnected).toBe(false);
+  });
+
   it('draw() clears text + gutters with axes OFF (S3 C-4 ghost labels/pill)', () => {
     const ctx = drawCtx();
     manager.setVisibility({

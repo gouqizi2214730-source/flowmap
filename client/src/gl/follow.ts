@@ -19,23 +19,20 @@
  *    dominance ratio) means a deliberately horizontal drag provably keeps price
  *    tracking while a 3 px twitch releases nothing.
  *
- *  - **Recentring targets the FULL tracked row, not the deadband edge.** Easing
- *    only to the edge re-triggers on the very next column (price keeps drifting)
- *    and produces a continuous crawl; targeting the centre buys
- *    `PRICE_DEADBAND_FRACTION/2` of the span as hysteresis before the next
- *    recentre can fire.
+ *  - **Tracking starts only outside the viewport.** An escaped price returns
+ *    to a padded edge, preserving the visible history and the user's zoom.
+ *    The padding supplies hysteresis; ordinary in-frame movement is left alone.
  */
 
 import type { HeatmapView } from './heatmap';
 import { KILL_BOTH, KILL_NONE, KILL_PRICE, KILL_TIME, type FollowKill } from './camera';
 
 /**
- * Fraction of the viewport height treated as "price is still comfortably on
- * screen". 0.6 = the middle 60%; once the tracked row leaves it, the view
- * recentres. Below ~0.4 the view chases every tick; above ~0.8 price reaches the
- * edge of the screen before anything happens.
+ * Full visible viewport: no automatic camera move while price is on screen.
  */
-export const PRICE_DEADBAND_FRACTION = 0.6;
+export const PRICE_DEADBAND_FRACTION = 1;
+/** Bring an escaped price 10% inside the edge without discarding the history. */
+export const PRICE_RETURN_PADDING = 0.1;
 
 /**
  * Exponential time constant (ms) for the recentre glide. ~90 ms reads as a
@@ -109,10 +106,14 @@ export function priceFollowTarget(
   rowCenter: number,
   rowSpan: number,
   tracked: number | null,
+  continuing = false,
 ): number | null {
   if (tracked === null || !Number.isFinite(tracked) || !(rowSpan > 0)) return null;
   const half = (rowSpan * PRICE_DEADBAND_FRACTION) / 2;
-  return Math.abs(tracked - rowCenter) <= half ? null : tracked;
+  const innerHalf = rowSpan * (0.5 - PRICE_RETURN_PADDING);
+  const delta = tracked - rowCenter;
+  if (Math.abs(delta) <= (continuing ? innerHalf : half)) return null;
+  return tracked - Math.sign(delta) * innerHalf;
 }
 
 /**
@@ -142,4 +143,76 @@ export function colsBehind(view: HeatmapView, newestSeq: number): number {
   const right = view.colOffset + view.colScale;
   const behind = newestSeq + 1 - right;
   return behind > 0 ? behind : 0;
+}
+
+/**
+ * The constant-velocity reserve: in steady flow the drawn edge trails the
+ * logical follow frame by up to two intervals in steady flow. The spare
+ * interval absorbs ordinary delivery jitter without letting the scroll stop.
+ */
+export const TIME_GLIDE_STEADY_LAG = 2;
+
+/**
+ * Runaway guard only (columns). Real feeds arrive in BURSTS — a Binance L2
+ * queue flushes 2-4 finalized columns at once, and a backpressured dev proxy
+ * can deliver 30+ after a stall — and the lag must absorb the WHOLE burst,
+ * because every clamped column becomes an instant forward jump of the display
+ * (the "perde perde" wave; measured 2026-09-20 on live BTCUSDT: multi-column
+ * leaps within single frames). Between bursts the excess drains smoothly
+ * (TIME_GLIDE_CATCHUP_MS) at ~lag/1.2 s, so on a steady feed the trail sits at
+ * the steady reserve and the cap is never reached; after a big burst the view
+ * sweeps back to the live edge in about a second instead of teleporting.
+ */
+export const TIME_GLIDE_MAX_LAG = 24;
+
+/** Time constant for draining burst backlog above the steady reserve (ms). */
+export const TIME_GLIDE_CATCHUP_MS = 1200;
+
+/** The glide is converged below this residual (columns); the view snaps exact. */
+export const TIME_GLIDE_SETTLE_EPS = 0.002;
+
+/**
+ * One frame of the live-edge scroll — CONSTANT-VELOCITY catch-up.
+ *
+ * The logical follow frame still pins the right edge a whole column past
+ * `newestSeq` the moment a column lands; the drawn view trails that edge by
+ * `lag` columns and consumes the trail at EXACTLY the column arrival rate:
+ *
+ *   lag -= dt / interval              (advance `dt/interval` of a column)
+ *   lag -= excess × drain(dt)         (burst backlog above the reserve drains
+ *                                      smoothly — never as a display jump)
+ *   lag += arrivals                   (a landed column must not teleport the
+ *                                      display forward; it lengthens the trail)
+ *   clamp to [0, TIME_GLIDE_MAX_LAG]
+ *
+ * so on a steady feed the map moves at a perfectly even `1 column per
+ * interval` with no slide-then-freeze tail, and on a bursty real feed the
+ * burst is absorbed into the trail and drained — the two failure modes that
+ * read as stepped "curtain" motion. Pure; unit-tested (follow.test.ts).
+ *
+ * `intervalMs` is the epoch's column duration. Packet jitter must not alter the
+ * time-axis velocity. A delay longer than the reserve can still exhaust the
+ * available data; the camera then waits instead of inventing new columns.
+ */
+export function stepLiveEdgeLag(
+  lag: number,
+  arrivals: number,
+  dtMs: number,
+  intervalMs: number,
+): number {
+  const interval = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : 250;
+  let next = lag - dtMs / interval;
+  const excess = next - TIME_GLIDE_STEADY_LAG;
+  if (excess > 0) {
+    next -= excess * (1 - Math.exp(-dtMs / TIME_GLIDE_CATCHUP_MS));
+  }
+  next += Math.max(0, arrivals);
+  // Per-frame reduction bound: while the measured interval re-converges after
+  // a cadence change the computed consumption briefly outruns the data rate;
+  // capping the reduction at 1 column keeps every single-frame screen move
+  // within ~one column no matter what the EMA is doing.
+  if (lag - next > 1) next = lag - 1;
+  if (next < 0) next = 0;
+  if (next > TIME_GLIDE_MAX_LAG) next = TIME_GLIDE_MAX_LAG;
+  return next;
 }

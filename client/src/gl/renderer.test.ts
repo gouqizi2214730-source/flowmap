@@ -843,6 +843,7 @@ describe('Renderer (fake GL harness)', () => {
       axes: false,
       price: false,
       volume: false, // F26 lane's strip: an explicit off, or anyVisible stays true
+      gex: false,
     });
     (r as unknown as { drawOverlays(): void }).drawOverlays();
     expect(inkSpy).toHaveBeenCalledTimes(1);
@@ -1026,4 +1027,187 @@ describe('Renderer (fake GL harness)', () => {
     expect(priv(r).forcedRemapFrom).toBeNull();
     spy.mockRestore();
   });
+
+  it('publishes one coherent camera view when price and time glide together', () => {
+    const { r, store, canvas } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 800 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    const ep = (store.state.epochs as Map<number, { rows: number }>).get(0)!;
+    ep.rows = 128;
+    for (let seq = 0; seq < 400; seq++) store.emit(makeCol(seq, true, 128));
+    r.setPriceFollow('track');
+    (r as unknown as { controller: { zoomTimeAtFraction(f: number, x: number): void } })
+      .controller.zoomTimeAtFraction(0.5, 1);
+    r.setFollowTime(true);
+    const internal = r as unknown as {
+      camera: { setPriceFrame(bottom: number, span: number): void };
+      trackedRowN: number | null;
+      liveLag: number;
+      glideWasFollowing: boolean;
+      glideLastTs: number;
+      priceStepTs: number;
+    };
+    internal.camera.setPriceFrame(30, 20);
+    internal.trackedRowN = 80;
+    internal.liveLag = 1;
+    internal.glideWasFollowing = true;
+    internal.glideLastTs = 100;
+    internal.priceStepTs = 100;
+    // Establish the eased view without starting the vertical glide.
+    internal.trackedRowN = 40;
+    pump(116);
+    const before = r.viewSnapshot;
+    internal.trackedRowN = 80;
+    const views: typeof before[] = [];
+    const off = r.onViewChanged(() => views.push(r.viewSnapshot));
+    pump(132);
+    expect(views).toHaveLength(1);
+    expect(views[0].rowOffset).toBeGreaterThan(before.rowOffset);
+    expect(views[0].colOffset - before.colOffset).toBeGreaterThan(0);
+    expect(views[0].colOffset - before.colOffset).toBeLessThan(1);
+    off();
+  });
+
+  it('retargets an in-flight price glide when the price reverses', () => {
+    const { r, store, canvas } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 800 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    (store.state.epochs as Map<number, { rows: number }>).get(0)!.rows = 128;
+    for (let seq = 0; seq < 400; seq++) store.emit(makeCol(seq, true, 128));
+    r.setPriceFollow('track');
+    const internal = r as unknown as {
+      camera: { setPriceFrame(bottom: number, span: number): void };
+      trackedRowN: number | null;
+      priceStepTs: number;
+    };
+    internal.camera.setPriceFrame(30, 20);
+    internal.trackedRowN = 80;
+    internal.priceStepTs = 100;
+    pump(116);
+    const high = r.viewSnapshot.rowOffset;
+    internal.trackedRowN = 20;
+    pump(132);
+    expect(r.viewSnapshot.rowOffset).toBeLessThan(high);
+  });
+
+  it('tracks the visible last price instead of an old book midpoint', () => {
+    const { r, store, canvas } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 800 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    (store.state.epochs as Map<number, { rows: number }>).get(0)!.rows = 128;
+    for (let seq = 0; seq < 400; seq++) store.emit(makeCol(seq, true, 128));
+    r.setPriceFollow('track');
+    const internal = r as unknown as {
+      camera: { setPriceFrame(bottom: number, span: number): void };
+      trackedRowN: number | null;
+      priceStepTs: number;
+    };
+    internal.camera.setPriceFrame(30, 20);
+    internal.trackedRowN = 80;
+    internal.priceStepTs = 100;
+    const bar = (price: number): void => store.emit({
+      type: MsgType.BAR_COL, epoch: 0, col_seq: 399,
+      t0_ns: 399n * BigInt(DT_NS), o: price, h: price, l: price, c: price,
+      vol_buy: 0, vol_sell: 0, cvd_cum: 0, vwap_num_cum: 0, vwap_den_cum: 0,
+    });
+    // p0=100, tick=0.5: price 120 is row 40, safely in the frame.
+    bar(120);
+    pump(116);
+    expect(r.viewSnapshot.rowOffset).toBe(30);
+    // The book midpoint is now inside, but the actual price exits above.
+    internal.trackedRowN = 40;
+    bar(140);
+    pump(132);
+    expect(r.viewSnapshot.rowOffset).toBeGreaterThan(30);
+  });
+
+  it('holds both camera axes while the user inspects past-only history', () => {
+    const { r, store, canvas } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 800 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    (store.state.epochs as Map<number, { rows: number }>).get(0)!.rows = 128;
+    for (let seq = 0; seq < 400; seq++) store.emit(makeCol(seq, true, 128));
+    r.setPriceFollow('track');
+    r.setViewForTest(0, 100, 30, 20);
+    r.setFollowTime(false);
+    r.setPriceFollow('track');
+    const internal = r as unknown as { trackedRowN: number | null };
+    internal.trackedRowN = 80;
+    pump(100);
+    const before = r.viewSnapshot;
+    store.emit(makeCol(400, true, 128));
+    internal.trackedRowN = 90;
+    pump(116);
+    expect(r.viewSnapshot).toEqual(before);
+    expect(r.priceFollow).toBe('track');
+  });
+
+  // --- eased live-edge scroll: bursts must absorb, never jump ------------------
+
+  it('keeps scrolling through a late column every four seconds', () => {
+    const { r, store, canvas } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 200, configurable: true });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600, configurable: true });
+    (store.state.epochs as Map<number, { dt_ns: number }>).get(0)!.dt_ns = 250_000_000;
+    for (let seq = 0; seq < 250; seq++) store.emit(makeCol(seq, true));
+    let next = 1;
+    let previous = 0;
+    let holds = 0;
+    for (let frame = 0; frame < 2400; frame++) {
+      const elapsed = frame * 1000 / 60;
+      while (elapsed >= next * 250 + (next % 16 === 0 ? 150 : 0)) {
+        store.emit(makeCol(249 + next++, true));
+      }
+      pump(100 + elapsed);
+      const x = r.viewSnapshot.colOffset;
+      if (frame > 300 && x - previous < 0.00001) holds++;
+      previous = x;
+    }
+    expect(holds, 'clock motion must not stop during ordinary 150ms arrival jitter').toBe(0);
+  });
+
+  it('advances the drawn view smoothly through bursty arrivals (no perde-perde jumps)', () => {
+    const { r, store, canvas } = makeRenderer();
+    // jsdom reports clientWidth 0, which degenerates the follow frame into
+    // fill-the-whole-window mode; give the canvas a real viewport width so the
+    // steady-state follow frame (right edge at newest+1) is exercised.
+    Object.defineProperty(canvas, 'clientWidth', { value: 800, configurable: true });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600, configurable: true });
+    let ts = 0;
+    let seq = 0;
+    const stepFrame = (ms: number): number => {
+      ts += ms;
+      pump(ts);
+      return r.viewSnapshot.colOffset;
+    };
+    // Warm up PAST the fill phase: the follow frame pins the right edge only
+    // once the resident count exceeds the visible span (~800/4 ≈ 196 px).
+    for (let i = 0; i < 1400; i++) {
+      if (i % 4 === 0) store.emit(makeCol(seq++, true));
+      stepFrame(16.7);
+    }
+    // Bursty real-feed pattern: 0,0,3,0,2,0,1 arrivals per 250 ms interval.
+    let prev = r.viewSnapshot.colOffset;
+    let maxJump = 0;
+    let advanced = 0;
+    const pattern = [0, 0, 3, 0, 2, 0, 1];
+    for (let interval = 0; interval < 24; interval++) {
+      const arrivals = pattern[interval % pattern.length];
+      for (let k = 0; k < arrivals; k++) store.emit(makeCol(seq++, true));
+      for (let f = 0; f < 15; f++) {
+        const now = stepFrame(16.7);
+        const jump = now - prev;
+        if (jump > maxJump) maxJump = jump;
+        if (jump > 0) advanced += jump;
+        prev = now;
+      }
+    }
+    // Steady state: the drawn view advances at the data rate with NO frame
+    // jumping more than a fraction of a column (a clamped burst used to lurch
+    // 2-3 columns at once — the "perde perde" regression).
+    expect(maxJump).toBeLessThan(1);
+    // And over the window it still advanced at the arrival rate (not stalled).
+    expect(advanced).toBeGreaterThan(10);
+  });
+
 });

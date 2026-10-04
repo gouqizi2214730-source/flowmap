@@ -12,7 +12,7 @@ in ``finally`` (no task leaks):
   message must never kill a healthy stream. A dispatch error is likewise
   logged and swallowed; the receive loop only exits on a real disconnect
   or a deliberate refusal close;
-- **flush loop**: every 50 ms (20 Hz, within §6.2's 10–30 Hz band) drains
+- **flush loop**: every 16 ms (~60 Hz, for smooth live presentation) drains
   the ClientTx queue up to 256 KiB and sends each drained frame as one
   binary WS message;
 - **ping loop**: ~1 Hz ``Ping{server_send_ns}`` (§6.1 — the only clock/
@@ -51,7 +51,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-FLUSH_INTERVAL_S = 0.05  # 20 Hz drain cadence
+FLUSH_INTERVAL_S = 0.016  # ~60 Hz; do not hold live ticks in 50 ms batches
 FLUSH_MAX_BYTES = 256 * 1024
 PING_INTERVAL_S = 1.0
 # A send that cannot complete within this window means the peer is gone or

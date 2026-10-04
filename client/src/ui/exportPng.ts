@@ -132,6 +132,8 @@ export interface ExportLayers {
   gl: HTMLCanvasElement;
   /** The over-heatmap 2D ink layer (price line / gridlines / badges). */
   ink?: HTMLCanvasElement | null;
+  /** Opaque volume strip beneath the price chart. */
+  volume?: HTMLCanvasElement | null;
   /** Right-hand price gutter (labels + last-price pill). */
   priceAxis?: HTMLCanvasElement | null;
   /** Bottom time gutter. */
@@ -215,6 +217,10 @@ export function collectExportLayers(
   return {
     gl,
     ink: doc.querySelector<HTMLCanvasElement>('canvas.overlay-text'),
+    volume: (() => {
+      const canvas = doc.querySelector<HTMLCanvasElement>('canvas.overlay-volume');
+      return canvas?.style.display === 'none' ? null : canvas;
+    })(),
     priceAxis: doc.querySelector<HTMLCanvasElement>('.price-axis canvas'),
     timeAxis: doc.querySelector<HTMLCanvasElement>('.time-axis canvas'),
     dpr: gl.clientWidth > 0 ? gl.width / Math.max(1, gl.clientWidth) : undefined,
@@ -312,11 +318,13 @@ export function composeExportLayers(
 
   const glW = gl.width;
   const glH = gl.height;
+  const volumeH = layers?.volume?.height ?? 0;
+  const chartH = glH + volumeH;
   const pW = layers?.priceAxis?.width ?? 0;
   const tH = layers?.timeAxis?.height ?? 0;
   const footerH = opts.meta || (opts.notes && opts.notes.length > 0) ? Math.round(20 * dpr) : 0;
   const W = glW + pW;
-  const H = glH + tH + footerH;
+  const H = chartH + tH + footerH;
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext('2d');
@@ -335,10 +343,11 @@ export function composeExportLayers(
   ctx.drawImage(gl, 0, 0);
   const ink = layers?.ink;
   if (ink && ink.width > 0 && ink.height > 0) ctx.drawImage(ink, 0, 0);
+  if (layers?.volume && volumeH > 0) ctx.drawImage(layers.volume, 0, glH);
   const priceAxis = layers?.priceAxis;
   if (priceAxis && pW > 0) ctx.drawImage(priceAxis, glW, 0);
   const timeAxis = layers?.timeAxis;
-  if (timeAxis && tH > 0) ctx.drawImage(timeAxis, 0, glH);
+  if (timeAxis && tH > 0) ctx.drawImage(timeAxis, 0, chartH);
 
   // 3) Hairlines where the gutters meet the chart (the CSS borders are not on
   //    the canvases; without them a light theme's gutters look detached).
@@ -347,13 +356,13 @@ export function composeExportLayers(
   if (pW > 0) {
     ctx.beginPath();
     ctx.moveTo(glW + 0.5, 0);
-    ctx.lineTo(glW + 0.5, glH + tH);
+    ctx.lineTo(glW + 0.5, chartH + tH);
     ctx.stroke();
   }
   if (tH > 0) {
     ctx.beginPath();
-    ctx.moveTo(0, glH + 0.5);
-    ctx.lineTo(W, glH + 0.5);
+    ctx.moveTo(0, chartH + 0.5);
+    ctx.lineTo(W, chartH + 0.5);
     ctx.stroke();
   }
 
@@ -369,7 +378,7 @@ export function composeExportLayers(
   // 6) Provenance footer: identity always, honesty caveats when the state has
   //    any (QA13 H2 — the caveats MUST travel with the artifact).
   if (footerH > 0) {
-    const y0 = glH + tH;
+    const y0 = chartH + tH;
     ctx.fillStyle = chrome.plateBg;
     ctx.fillRect(0, y0, W, footerH);
     ctx.strokeStyle = chrome.plateBorder;

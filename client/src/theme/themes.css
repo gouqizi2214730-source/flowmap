@@ -101,13 +101,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(0, 0, 0, 0.5);
-  --shadow-drop: 0 12px 40px rgba(0, 0, 0, 0.6);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.42);
+  --shadow-drop: 0 2px 6px rgba(0, 0, 0, 0.4), 0 18px 48px rgba(0, 0, 0, 0.5);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -117,6 +117,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
@@ -196,13 +198,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(40, 36, 24, 0.18);
-  --shadow-drop: 0 12px 40px rgba(40, 36, 24, 0.22);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(40, 36, 24, 0.14), 0 6px 20px rgba(40, 36, 24, 0.16);
+  --shadow-drop: 0 2px 6px rgba(40, 36, 24, 0.14), 0 18px 48px rgba(40, 36, 24, 0.2);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -212,6 +214,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
@@ -289,13 +293,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(0, 0, 0, 0.3);
-  --shadow-drop: 0 12px 40px rgba(0, 0, 0, 0.35);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.24), 0 6px 20px rgba(0, 0, 0, 0.26);
+  --shadow-drop: 0 2px 6px rgba(0, 0, 0, 0.24), 0 18px 48px rgba(0, 0, 0, 0.3);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -305,6 +309,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
@@ -384,13 +390,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(0, 0, 0, 0.5);
-  --shadow-drop: 0 12px 40px rgba(0, 0, 0, 0.6);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.42);
+  --shadow-drop: 0 2px 6px rgba(0, 0, 0, 0.4), 0 18px 48px rgba(0, 0, 0, 0.5);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -400,6 +406,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
@@ -481,13 +489,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(0, 0, 0, 0.5);
-  --shadow-drop: 0 12px 40px rgba(0, 0, 0, 0.6);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.4), 0 6px 20px rgba(0, 0, 0, 0.42);
+  --shadow-drop: 0 2px 6px rgba(0, 0, 0, 0.4), 0 18px 48px rgba(0, 0, 0, 0.5);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -497,6 +505,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
@@ -578,13 +588,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(40, 36, 24, 0.18);
-  --shadow-drop: 0 12px 40px rgba(40, 36, 24, 0.22);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(40, 36, 24, 0.14), 0 6px 20px rgba(40, 36, 24, 0.16);
+  --shadow-drop: 0 2px 6px rgba(40, 36, 24, 0.14), 0 18px 48px rgba(40, 36, 24, 0.2);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -594,6 +604,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 
@@ -674,13 +686,13 @@
   --sp-6: 24px;
 
   /* --- radii / elevation / motion --- */
-  --r-1: 3px;
-  --r-2: 4px;
-  --r-3: 6px;
-  --shadow-pop: 0 4px 18px rgba(0, 0, 0, 0.8);
-  --shadow-drop: 0 12px 40px rgba(0, 0, 0, 0.9);
-  --t-fast: 0.12s ease;
-  --t-med: 0.2s ease;
+  --r-1: 4px;
+  --r-2: 6px;
+  --r-3: 8px;
+  --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.7), 0 6px 20px rgba(0, 0, 0, 0.72);
+  --shadow-drop: 0 2px 6px rgba(0, 0, 0, 0.7), 0 18px 48px rgba(0, 0, 0, 0.8);
+  --t-fast: 0.15s cubic-bezier(0.25, 0.1, 0.25, 1);
+  --t-med: 0.22s cubic-bezier(0.25, 0.1, 0.25, 1);
 
   /* --- layout rails --- */
   --topbar-h: 44px;
@@ -690,6 +702,8 @@
   --time-axis-h: 22px;
 
   /* --- fonts --- */
+  --font-ui: 'Inter', 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', system-ui, 'Helvetica Neue', Arial, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas,
     'Liberation Mono', monospace;
 

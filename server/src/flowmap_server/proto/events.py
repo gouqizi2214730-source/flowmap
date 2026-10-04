@@ -35,7 +35,8 @@ SIDE_SRC_INFERRED = 1
 SIDE_SRC_NA = 2
 
 MarkerKind = Literal[
-    "liquidation", "halt", "luld", "gap", "session_break", "large_lot", "iceberg", "info"
+    "liquidation", "halt", "luld", "gap", "session_break", "large_lot", "iceberg", "info",
+    "capitol", "defense_contract", "clinical"
 ]
 FeedState = Literal["live", "degraded", "closed", "reconnecting"]
 StreamMode = Literal["live", "replay"]
@@ -227,3 +228,32 @@ class HistoryResponse(msgspec.Struct):
     bar_cols: list[BarColumn]
     markers: list[Marker]
     big_trades: list[Trade]
+
+
+class GexLevelUpdate(msgspec.Struct):
+    symbol: str
+    spot_price: float
+    gamma_flip: float
+    call_wall: float
+    put_wall: float
+    net_gex: float
+
+
+class MarketIntelligence(msgspec.Struct):
+    ts_ns: int
+    kind: str
+    symbol: str
+    headline: str
+    amount_usd: float | None = None
+    detail: str = ""
+    source: str = ""
+
+
+class MacroStressUpdate(msgspec.Struct):
+    ts_ns: int
+    sofr: float
+    hy_spread: float
+    yield_10y2y: float
+    stress_score: float
+    status: str
+

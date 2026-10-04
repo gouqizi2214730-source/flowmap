@@ -32,6 +32,7 @@ import {
 } from '../watchlist/store';
 import { loadRecents } from './recents';
 import { fmtPct, fmtPrice, sparkDirection, sparkPath } from './spark';
+import { useIntelligenceStore } from '../state/intelligenceStore';
 import '../watchlist/watchlist.css';
 
 /**
@@ -131,6 +132,9 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
 
   // Empty state suggestions: recents are a shortcut, NOT auto-favorites.
   const recents = useMemo(() => (empty ? loadRecents(browserStorage()) : []), [empty]);
+
+  const talentMap = useIntelligenceStore((s) => s.talent);
+  const corporateJets = useIntelligenceStore((s) => s.corporateJets);
 
   const addActive = useCallback(() => {
     addToWatchlist(activeKey);
@@ -259,6 +263,33 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
                 >
                   {quoteChangeText(q)}
                 </span>
+                {(() => {
+                  const s = symbolOf(key).toUpperCase();
+                  const t = talentMap[s];
+                  const jet = corporateJets.some((j) => j.symbol === s && j.isMaHub);
+                  return (
+                    <>
+                      {t && (
+                        <span
+                          className={`watchlist__chip watchlist__talent is-${t.talentDeltaPct >= 0 ? 'pos' : 'neg'}`}
+                          title={`Talent Velocity: ${t.talentDeltaPct >= 0 ? '+' : ''}${t.talentDeltaPct.toFixed(1)}% R&D Openings (${t.rdOpenings} listings)`}
+                          data-testid={`watchlist-talent-${key}`}
+                        >
+                          {t.talentDeltaPct >= 0 ? '+' : ''}{t.talentDeltaPct.toFixed(0)}%
+                        </span>
+                      )}
+                      {jet && (
+                        <span
+                          className="watchlist__chip watchlist__jet"
+                          title="Executive Jet Transit Alert: Corporate jet telemetry active in M&A/Finance Hub"
+                          data-testid={`watchlist-jet-${key}`}
+                        >
+                          ✈️
+                        </span>
+                      )}
+                    </>
+                  );
+                })()}
                 {unreachable ? (
                   <span
                     className="watchlist__chip watchlist__chip--na"

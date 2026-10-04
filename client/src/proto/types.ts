@@ -33,6 +33,9 @@ export enum MsgType {
   STATUS = 0x08,
   PING = 0x09,
   HISTORY_RESP = 0x0a,
+  GEX_UPDATE = 0x20,
+  MARKET_INTELLIGENCE = 0x21,
+  MACRO_STRESS = 0x22,
   SUBSCRIBE = 0x40,
   UNSUBSCRIBE = 0x41,
   SEEK = 0x42,
@@ -65,7 +68,10 @@ export type MarkerKind =
   | 'session_break'
   | 'large_lot'
   | 'iceberg'
-  | 'info';
+  | 'info'
+  | 'capitol'
+  | 'defense_contract'
+  | 'clinical';
 export type FeedState = 'live' | 'degraded' | 'closed' | 'reconnecting';
 export type StreamMode = 'live' | 'replay';
 
@@ -252,6 +258,37 @@ export interface HistoryRequest {
   n_cols: number;
 }
 
+export interface GexLevelUpdate {
+  type: MsgType.GEX_UPDATE;
+  symbol: string;
+  spot_price: number;
+  gamma_flip: number;
+  call_wall: number;
+  put_wall: number;
+  net_gex: number;
+}
+
+export interface MarketIntelligence {
+  type: MsgType.MARKET_INTELLIGENCE;
+  ts_ns: bigint;
+  kind: string;
+  symbol: string;
+  headline: string;
+  amount_usd?: number | null;
+  detail: string;
+  source: string;
+}
+
+export interface MacroStressUpdate {
+  type: MsgType.MACRO_STRESS;
+  ts_ns: bigint;
+  sofr: number;
+  hy_spread: number;
+  yield_10y2y: number;
+  stress_score: number;
+  status: string;
+}
+
 /** Any decodable message. Discriminated on `type`. */
 export type Msg =
   | DepthColumn
@@ -271,4 +308,8 @@ export type Msg =
   | SetSpeed
   | Pause
   | Resume
-  | HistoryRequest;
+  | HistoryRequest
+  | GexLevelUpdate
+  | MarketIntelligence
+  | MacroStressUpdate;
+

@@ -10,6 +10,8 @@ import {
   PRICE_GLIDE_TAU_MS,
   panFollowKill,
   priceFollowTarget,
+  stepLiveEdgeLag,
+  TIME_GLIDE_MAX_LAG,
   trackedRow,
 } from './follow';
 import type { HeatmapView } from './heatmap';
@@ -87,24 +89,33 @@ describe('trackedRow — "where is the price" from one column', () => {
 describe('priceFollowTarget — the deadband', () => {
   const CENTER = 256;
   const SPAN = 120;
-  const halfBand = (SPAN * PRICE_DEADBAND_FRACTION) / 2; // 36
+  const halfBand = (SPAN * PRICE_DEADBAND_FRACTION) / 2;
 
-  it('does not move while price sits inside the middle 60%', () => {
+  it('does not move anywhere inside the visible frame, including its edges', () => {
     expect(priceFollowTarget(CENTER, SPAN, CENTER)).toBeNull();
     expect(priceFollowTarget(CENTER, SPAN, CENTER + halfBand - 0.01)).toBeNull();
     expect(priceFollowTarget(CENTER, SPAN, CENTER - halfBand + 0.01)).toBeNull();
+    expect(priceFollowTarget(CENTER, SPAN, CENTER + halfBand)).toBeNull();
+    expect(priceFollowTarget(CENTER, SPAN, CENTER - halfBand)).toBeNull();
   });
 
-  it('targets the FULL tracked row once price escapes, not the band edge', () => {
-    // Targeting the edge would re-trigger on the very next column (crawl).
-    expect(priceFollowTarget(CENTER, SPAN, CENTER + halfBand + 5)).toBe(CENTER + halfBand + 5);
-    expect(priceFollowTarget(CENTER, SPAN, 10)).toBe(10);
+  it('moves only enough to bring an escaped price 10% inside the frame', () => {
+    expect(priceFollowTarget(CENTER, SPAN, CENTER + halfBand + 5)).toBe(CENTER + 17);
+    expect(priceFollowTarget(CENTER, SPAN, 10)).toBe(58);
   });
 
   it('gives no target without a tracked row or a usable span', () => {
     expect(priceFollowTarget(CENTER, SPAN, null)).toBeNull();
     expect(priceFollowTarget(CENTER, SPAN, Number.NaN)).toBeNull();
     expect(priceFollowTarget(CENTER, 0, 999)).toBeNull();
+  });
+
+  it('finishes an escaped-price recovery inside the padding without retriggering', () => {
+    const price = CENTER + 55;
+    expect(priceFollowTarget(CENTER, SPAN, price)).toBeNull();
+    const target = priceFollowTarget(CENTER, SPAN, price, true);
+    expect(target).toBe(CENTER + 7);
+    expect(priceFollowTarget(target!, SPAN, price, true)).toBeNull();
   });
 });
 
@@ -176,5 +187,66 @@ describe('go-live re-arm (camera.follow) — the contract the Go Live chip relie
     expect(v.colOffset + v.colScale).toBe(1600); // right edge = newest + 1
     expect(out.rowSpan).toBe(30); // user's price zoom preserved
     expect(out.followPrice).toBe('track'); // price follow mode preserved
+  });
+});
+
+describe('stepLiveEdgeLag — the constant-velocity live-edge scroll', () => {
+  const INTERVAL = 250; // one column per 250 ms (crypto/sim cadence)
+
+  it('advances at exactly one column per interval, in equal frame steps', () => {
+    // Sustained feed, 60 fps: every frame consumes dt/interval of a column and
+    // every arrival adds one — the lag sawtooths with a CONSTANT step size,
+    // which is the whole smoothness contract (no slide-then-freeze).
+    let lag = 1;
+    const steps: number[] = [];
+    for (let i = 0; i < 120; i++) {
+      const arrivals = i % 15 === 14 ? 1 : 0; // one column per 250 ms at 60 fps
+      const before = lag;
+      lag = stepLiveEdgeLag(lag, arrivals, 16.7, INTERVAL);
+      steps.push(+(before - lag).toFixed(4));
+    }
+    const moving = steps.filter((s) => s > 0);
+    const maxDev = Math.max(...moving.map((s) => Math.abs(s - 16.7 / INTERVAL)));
+    expect(maxDev).toBeLessThan(0.015); // every advancing frame moves the same
+  });
+
+  it('never stalls between arrivals on a slow cadence (1 s equity grid)', () => {
+    // With a 1 s interval the lag is consumed over the full second — the edge
+    // is still moving just before the next column lands.
+    let lag = 1;
+    for (let i = 0; i < 58; i++) lag = stepLiveEdgeLag(lag, 0, 16.7, 1000);
+    expect(lag).toBeGreaterThan(0.02); // ~1 - 970/1000 still pending
+    lag = stepLiveEdgeLag(lag, 1, 16.7, 1000); // the column lands, lag refills
+    expect(lag).toBeLessThan(1.05); // steady reserve (sub-pixel overshoot ok)
+  });
+
+  it('is display-continuous at the arrival instant: lag grows by the arrivals', () => {
+    // Below the cap the lag grows by EXACTLY the arrival count (the display
+    // edge must not move at the instant a column lands).
+    const before = stepLiveEdgeLag(0.4, 0, 16.7, INTERVAL);
+    const after = stepLiveEdgeLag(before, 0.5, 0, INTERVAL);
+    expect(after - before).toBeCloseTo(0.5, 5);
+  });
+
+  it('clamps to [0, maxLag]: a burst never trails more than one column', () => {
+    expect(stepLiveEdgeLag(0, 500, 16.7, INTERVAL)).toBe(TIME_GLIDE_MAX_LAG);
+    expect(stepLiveEdgeLag(0.2, 0, 10_000, INTERVAL)).toBe(0); // idle gap drains
+    expect(stepLiveEdgeLag(-3, 0, 16.7, INTERVAL)).toBe(0);
+  });
+
+  it('survives a poisoned interval via the 250 ms fallback', () => {
+    expect(stepLiveEdgeLag(0.5, 0, 250, Number.NaN)).toBe(0);
+    expect(stepLiveEdgeLag(0.5, 0, 125, 0)).toBeCloseTo(0, 5);
+  });
+
+  it('is frame-rate independent over the same elapsed time', () => {
+    // Same 500 ms, same two arrivals, split across 30 fps and 120 fps frames.
+    // Frame quantization of the arrival phase bounds the divergence at
+    // ~dt/interval per boundary (0.13 at 30 fps / 250 ms) — well under a pixel.
+    let at30 = 0;
+    for (let i = 0; i < 15; i++) at30 = stepLiveEdgeLag(at30, i === 0 || i === 8 ? 1 : 0, 33.4, INTERVAL);
+    let at120 = 0;
+    for (let i = 0; i < 60; i++) at120 = stepLiveEdgeLag(at120, i === 0 || i === 30 ? 1 : 0, 8.35, INTERVAL);
+    expect(Math.abs(at30 - at120)).toBeLessThan(0.15);
   });
 });

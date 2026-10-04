@@ -32,7 +32,12 @@ function noop() {
 
 function topbar(
   streamClock: string | null = null,
-  exportProps: { onExportPng?: () => void; exportNotice?: string | null; onDismissExportNotice?: () => void } = {},
+  exportProps: {
+    onExportPng?: () => void;
+    exportNotice?: string | null;
+    onDismissExportNotice?: () => void;
+    onToggleIntel?: () => void;
+  } = {},
 ): JSX.Element {
   return (
     <TopBar
@@ -42,6 +47,7 @@ function topbar(
       railVisible={false}
       onToggleRail={noop}
       onOpenSettings={noop}
+      onToggleIntel={exportProps.onToggleIntel}
       onExportPng={exportProps.onExportPng ?? noop}
       exportNotice={exportProps.exportNotice ?? null}
       onDismissExportNotice={exportProps.onDismissExportNotice ?? noop}
@@ -330,5 +336,23 @@ describe('TopBar i18n shell (C7)', () => {
     expect(container.querySelector('[data-testid="replay-unavailable"]')!.textContent).toBe(
       'Kayıt yok — tekrar oynatma kullanılamıyor',
     );
+  });
+
+  it('renders institutional stress ticker and triggers onToggleIntel', () => {
+    const onToggleIntel = vi.fn();
+    const { container } = render(topbar(null, { onToggleIntel }));
+
+    const ticker = container.querySelector('[data-testid="institutional-stress-ticker"]');
+    expect(ticker).not.toBeNull();
+    expect(ticker!.textContent).toContain('SOFR');
+    expect(ticker!.textContent).toContain('HY OAS');
+    expect(ticker!.textContent).toContain('10Y-2Y');
+
+    const intelBtn = container.querySelector('[data-testid="intel-toggle"]');
+    expect(intelBtn).not.toBeNull();
+    act(() => {
+      intelBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onToggleIntel).toHaveBeenCalledTimes(1);
   });
 });

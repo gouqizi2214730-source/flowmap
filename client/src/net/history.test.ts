@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { HistoryLoader, type HistoryLoaderDeps } from './history';
+import { HistoryLoader, pageColsForRows, HISTORY_PAGE_COLS, type HistoryLoaderDeps } from './history';
 import type { ResidentRange } from '../gl/tileRing';
 import { MODE_L2, MsgType, type DepthColumn, type HistoryResponse, type Marker } from '../proto/types';
 
@@ -604,5 +604,28 @@ describe('HistoryLoader — page seam honesty (QA3 C-1)', () => {
     await flush();
     expect(h.loader.requestCount).toBe(2); // scroll-back works on the new grid
     expect(h.requests[1].before_t).toBe(26_000_000_000n); // new anchor, not the old
+  });
+});
+
+describe('pageColsForRows — per-request frame budget (vite proxy WS ceilings)', () => {
+  it('sizes the page so one response frame stays under the byte budget', () => {
+    // A column is rows × 2 channels × 4 bytes on the wire.
+    // 2 MB budget / (4096 × 8 B) = 64 columns.
+    expect(pageColsForRows(4096)).toBe(64);
+    // 2 MB / (2048 × 8 B) = 128 columns.
+    expect(pageColsForRows(2048)).toBe(128);
+  });
+
+  it('clamps to the wire page ceiling and a progress floor', () => {
+    // Tiny grid: the budget would allow more than the wire ceiling.
+    expect(pageColsForRows(64)).toBe(HISTORY_PAGE_COLS);
+    // Poisoned row counts still make progress (16 columns) instead of hanging.
+    expect(pageColsForRows(0)).toBe(HISTORY_PAGE_COLS);
+    expect(pageColsForRows(Number.NaN)).toBe(HISTORY_PAGE_COLS);
+    expect(pageColsForRows(1_000_000)).toBe(16);
+  });
+
+  it('honours a custom budget', () => {
+    expect(pageColsForRows(2048, 1 * 1024 * 1024)).toBe(64);
   });
 });

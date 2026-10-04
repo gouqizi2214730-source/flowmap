@@ -2,7 +2,7 @@
  * Candle store (campaign 3, lane CG) — module-scoped bridge between the live
  * trade stream and the candle synth, following the bookStore pattern exactly:
  * high-frequency stream data lives OUTSIDE React; panels ask for a memoized
- * snapshot and get throttled (~10 Hz) change notifications.
+ * snapshot and get coalesced (~60 Hz) change notifications.
  *
  * Responsibilities:
  *  - Subscribe ONCE to `useFlowMapStore.onStream` and feed every TRADE into
@@ -27,6 +27,7 @@
 import type { StreamMsg } from '../net/connection';
 import { MsgType, type DepthColumn, type Trade } from '../proto/types';
 import { useFlowMapStore } from '../state/store';
+import { LIVE_UPDATE_MS } from '../state/cadence';
 import { createCandleSynth, type Candle, type CandleSynth, type SynthStats } from './synth';
 
 /** Column⇄time affine for the current epoch (mirrors gl/overlays/coords.TimeMap). */
@@ -108,7 +109,7 @@ function bump(): void {
   version += 1;
   cached = null;
   if (listeners.size === 0 || flushTimer !== null) return;
-  flushTimer = setTimeout(flush, 100);
+  flushTimer = setTimeout(flush, LIVE_UPDATE_MS);
 }
 
 function flush(): void {

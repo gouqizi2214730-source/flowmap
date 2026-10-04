@@ -54,6 +54,7 @@
 
 .crosshair__tag {
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   letter-spacing: 0.06em;
   color: var(--chart-ink-dim, #93a1b4);
 }
@@ -93,6 +94,7 @@
 
 .crosshair__val {
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   text-align: right;
 }
 

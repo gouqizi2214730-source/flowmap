@@ -26,6 +26,8 @@ import { DomLadder } from './ui/DomLadder';
 import { DrawToolbar } from './ui/DrawToolbar';
 import { IndicatorOverlayCanvas } from './ui/IndicatorOverlayCanvas';
 import { IndicatorPicker } from './ui/IndicatorPicker';
+import { IntelligenceDrawer } from './ui/IntelligenceDrawer';
+import { useIntelligenceStore } from './state/intelligenceStore';
 import { isHelpToggle } from './ui/keysheet';
 import { LiveControls } from './ui/LiveControls';
 import { HeatLegend } from './ui/HeatLegend';
@@ -180,6 +182,9 @@ export function App() {
     loadSettings(typeof window !== 'undefined' ? window.localStorage : null),
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const intelDrawerOpen = useIntelligenceStore((s) => s.drawerOpen);
+  const setIntelDrawerOpen = useIntelligenceStore((s) => s.setDrawerOpen);
+  const toggleIntelDrawer = useIntelligenceStore((s) => s.toggleDrawer);
   // The `?` shortcuts overlay (ui/ShortcutsOverlay) — a small modal listing the
   // same keysheet the settings drawer renders.
   const [helpOpen, setHelpOpen] = useState(false);
@@ -562,6 +567,7 @@ export function App() {
       onTogglePriceFollow: onTogglePriceFollowKey,
       onPriceAutoFit: onPriceAutoFitKey,
       onGoLive: onGoLive,
+      onToggleIntel: toggleIntelDrawer,
     });
   }, []);
 
@@ -799,6 +805,7 @@ export function App() {
         railVisible={settings.railVisible}
         onToggleRail={toggleRail}
         onOpenSettings={() => setSettingsOpen(true)}
+        onToggleIntel={toggleIntelDrawer}
         onExportPng={exportPng}
         exportNotice={exportNotice}
         onDismissExportNotice={dismissExportNotice}
@@ -807,7 +814,7 @@ export function App() {
 
       <div className="workspace">
         <div className={`stage${settings.overlays.cvd ? ' stage--cvd' : ''}`}>
-          <div className="stage__viewport" ref={stageViewportRef}>
+          <div className={`stage__viewport${settings.overlays.volume ? ' stage__viewport--volume' : ''}`} ref={stageViewportRef}>
             <canvas id="gl" ref={canvasRef} className="gl-canvas" />
             {glError && (
               <div className="gl-fallback" role="alert" data-testid="gl-fallback">
@@ -885,6 +892,13 @@ export function App() {
           settings={settings}
           onChange={applyPatch}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {intelDrawerOpen && (
+        <IntelligenceDrawer
+          activeSymbol={activeSymbol}
+          onClose={() => setIntelDrawerOpen(false)}
         />
       )}
 

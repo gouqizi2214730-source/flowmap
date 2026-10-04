@@ -127,7 +127,8 @@ export function IndicatorOverlayCanvas({
 
     const scheduleNext = (painted: boolean): void => {
       idleStep = painted ? 0 : Math.min(idleStep + 1, 8);
-      const wait = painted ? 0 : Math.min(IDLE_MAX_MS, 2 ** idleStep);
+      const maxWait = useFlowMapStore.getState().subscription?.mode === 'live' ? 16 : IDLE_MAX_MS;
+      const wait = painted ? 0 : Math.min(maxWait, 2 ** idleStep);
       if (wait === 0) raf = requestAnimationFrame(draw);
       else pollTimer = window.setTimeout(() => { raf = requestAnimationFrame(draw); }, wait);
     };

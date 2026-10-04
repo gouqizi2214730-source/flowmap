@@ -78,6 +78,10 @@ import {
   PRICE_GLIDE_TAU_MS,
   PRICE_SNAP_ROWS,
   priceFollowTarget,
+  stepLiveEdgeLag,
+  TIME_GLIDE_MAX_LAG,
+  TIME_GLIDE_STEADY_LAG,
+  TIME_GLIDE_SETTLE_EPS,
   trackedRow,
 } from './follow';
 import { ViewportNormalizer } from './normalize';
@@ -88,7 +92,13 @@ import {
   attachGestures,
   type CameraController,
 } from '../input/gestures';
-import { HistoryLoader } from '../net/history';
+import {
+  HistoryLoader,
+  pageColsForRows,
+  HISTORY_DEV_FRAME_BUDGET_BYTES,
+  HISTORY_FRAME_BUDGET_BYTES,
+} from '../net/history';
+import { serverOrigin } from '../net/serverBase';
 import type { StreamMsg } from '../net/connection';
 import type { FlowMapState } from '../state/store';
 import {
@@ -97,6 +107,7 @@ import {
   MsgType,
   type DepthColumn,
   type EpochParams,
+  type GexLevelUpdate,
 } from '../proto/types';
 import { OverlayManager, type OverlayDrawContext } from './overlays/manager';
 import type { OverlayVisibility } from './overlays/frame';
@@ -429,8 +440,6 @@ export class Renderer {
   private forcedRemapFrom: PriceMap | null = null;
   /** Armed recentre target (rows); null while price sits inside the deadband. */
   private priceTarget: number | null = null;
-  /** True once the glide has settled, so a stalled ease stops re-dirtying. */
-  private priceStalled = false;
   /** Timestamp of the last price-follow step, for the frame-rate-independent ease. */
   private priceStepTs = 0;
   /** Memoized price auto-fit: the extent union is only re-scanned when the
@@ -462,6 +471,23 @@ export class Renderer {
   private viewMoved = false;
   private running = true;
   private rafId = 0;
+
+  // --- eased live-edge scroll (time-follow smoothness) ---------------------------
+  // The logical follow frame (applyTimeFollowFrame) still pins the right edge a
+  // whole column past newestSeq the moment a column lands; the DRAWN view trails
+  // it by `liveLag` columns, decayed every frame (gl/follow.ts stepLiveEdgeLag),
+  // so the chart scrolls continuously instead of jumping once per column. This
+  // is uniforms-only — no column is re-uploaded, and every consumer that draws
+  // from `this.view` (heatmap, overlays, axes, timeline minimap) glides in sync.
+  /** Current drawn lag behind the logical follow frame, in columns (0 = exact). */
+  private liveLag = 0;
+  /** newestSeq the arrival count was last stepped against (per-frame delta). */
+  private lagBaseSeq = -1;
+  /** rAF timestamp of the previous glide step (0 = first frame). */
+  private glideLastTs = 0;
+  /** followTime state at the previous glide step — a false→true re-arm (GO
+   *  LIVE / Space / chip) snaps today and must not ALSO carry a stale lag. */
+  private glideWasFollowing = false;
 
   /** Last resize() inputs; a ResizeObserver callback that didn't change the CSS
    *  box or the DPR is a no-op (no refit, no redraw, no backfill probe). */
@@ -606,9 +632,16 @@ export class Renderer {
    * CP1: is the newest resident column inside the current view? This is the
    * condition `stepPriceFollow` gates on — when it is false (scrolled back),
    * TRACK cannot act, so the UI must not present it as armed (survey S1/D1).
+   *
+   * Read from the LOGICAL camera frame, not the eased draw view: the eased edge
+   * trails by up to TIME_GLIDE_MAX_LAG columns while gliding, and a whole-column
+   * visibility contract answered "sometimes" mid-glide would strobe the TRK·WAIT
+   * chip. Follow policy is about where the camera IS pinned, not where the
+   * presentation is still catching up.
    */
   get liveEdgeVisible(): boolean {
-    return this.newestSeq >= 0 && isColVisible(this.view, this.newestSeq);
+    if (this.newestSeq < 0) return false;
+    return isColVisible(this.camera.toView(), this.newestSeq);
   }
 
   /** A copy of the current view uniforms. Diagnostics / e2e. */
@@ -726,6 +759,15 @@ export class Renderer {
   setBubbleMinSize(minSize: number): void {
     this.overlays.setBubbleMinSize(minSize);
     this.dirty = true;
+  }
+
+  setGex(gex: GexLevelUpdate | null): void {
+    this.overlays.setGex(gex);
+    this.dirty = true;
+  }
+
+  getGex(): GexLevelUpdate | null {
+    return this.overlays.getGex();
   }
 
   /** Heatmap display gamma (§8.3 Contrast setting). Applied live + remembered
@@ -1065,8 +1107,14 @@ export class Renderer {
     this.trackedEpoch = null;
     this.priceEpoch = null;
     this.priceTarget = null;
-    this.priceStalled = false;
     this.priceFitMemo = null;
+    // The eased live-edge scroll restarts clean: a new session's first follow
+    // frame is the default window, and a stale lag from the old session's
+    // arrival cadence would just slide the fresh view for no reason.
+    this.liveLag = 0;
+    this.lagBaseSeq = -1;
+    this.glideLastTs = 0;
+    this.glideWasFollowing = false;
     this.overlayAnchorSeq = -1;
     this.overlayAnchorT0Ns = 0n;
     this.overlayAnchorEpoch = 0;
@@ -1125,6 +1173,13 @@ export class Renderer {
     this.newestSeq = -1;
     this.trackedRowN = null;
     this.trackedEpoch = null;
+    // Same rationale as resetForSession: the eased live-edge scroll restarts
+    // clean with the session's cursors (col_seq restarts below the old
+    // high-water, so lagBaseSeq must follow or arrivals would mis-count).
+    this.liveLag = 0;
+    this.lagBaseSeq = -1;
+    this.glideLastTs = 0;
+    this.glideWasFollowing = false;
     // R1-M2: a same-numbered epoch replacement (the server grid always starts
     // at epoch 0 and Hello overwrites the params) skips the numeric remap, so
     // the camera would be silently reinterpreted through the new affine. Cache
@@ -1133,7 +1188,6 @@ export class Renderer {
     this.forcedRemapFrom = this.lastPriceMapCache;
     this.priceEpoch = null;
     this.priceTarget = null;
-    this.priceStalled = false;
     this.priceFitMemo = null;
     this.overlayAnchorSeq = -1;
     this.overlayAnchorT0Ns = 0n;
@@ -1232,7 +1286,6 @@ export class Renderer {
         // live edge and let the loader probe again on the next pan.
         this.history?.reset();
         this.priceTarget = null;
-        this.priceStalled = false;
         this.priceFitMemo = null;
         this.updateView();
         this.dirty = true;
@@ -1245,6 +1298,7 @@ export class Renderer {
   setFollowTime(on: boolean): void {
     this.wantFollowTime = on;
     this.camera.setFollowTime(on);
+    if (!on) this.releaseLiveGlide();
     // Releasing time promotes a fitted price axis to 'track' (camera.applyKill),
     // so remember whatever the camera settled on.
     this.wantPriceFollow = this.camera.followPrice;
@@ -1259,7 +1313,6 @@ export class Renderer {
     this.wantPriceFollow = mode;
     this.camera.setPriceFollow(mode);
     this.priceTarget = null;
-    this.priceStalled = false;
     this.priceFitMemo = null;
     this.updateView();
     this.view = this.camera.toView();
@@ -1268,10 +1321,18 @@ export class Renderer {
 
   /** A user gesture changed the camera: recompute uniforms, request a redraw. */
   private onCameraChanged(): void {
+    if (!this.camera.followTime) this.releaseLiveGlide();
     this.view = this.camera.toView();
     this.dirty = true;
     this.viewMoved = true;
     this.notifyViewChanged();
+  }
+
+  /** Manual history navigation owns the exact frame; discard the live trail. */
+  private releaseLiveGlide(): void {
+    this.liveLag = 0;
+    this.lagBaseSeq = this.newestSeq;
+    this.glideWasFollowing = false;
   }
 
   // --- stream handling ----------------------------------------------------------
@@ -1302,6 +1363,9 @@ export class Renderer {
           break;
         case MsgType.MARKER:
           this.overlays.onMarker(msg);
+          break;
+        case MsgType.GEX_UPDATE:
+          this.overlays.onGex(msg);
           break;
         default:
           return;
@@ -1719,7 +1783,6 @@ export class Renderer {
     this.trackedEpoch = null;
     this.priceEpoch = null;
     this.priceTarget = null;
-    this.priceStalled = false;
     this.priceFitMemo = null;
 
     this.createRing(rows);
@@ -1748,6 +1811,21 @@ export class Renderer {
       residentRange: () => this.ring?.residentRange() ?? null,
       budgetCols: () => this.ring?.budgetCols ?? 0,
       dtNs: () => this.currentDtNs(),
+      // Page size rides the grid height AND the transport: one HistoryResponse
+      // frame is n_cols × rows × 8 bytes, and the vite dev ws proxy silently
+      // drops multi-MB messages under live traffic — see net/history
+      // pageColsForRows. Direct transports (injected Tauri origin) keep the
+      // full wire page; same-origin dev rides small, latency-bound pages.
+      rows: () => this.ring?.rows ?? 0,
+      maxPageCols: () =>
+      // DIRECT transport (injected origin: Tauri, and dev since the vite
+      // config injects it): the pipe verified clean at multi-MB frames, so
+      // ride the full 2 MB budget — 64-column pages at 4096 rows fill a
+      // scrolled-back window in a few sweeps instead of window-shaped chunks.
+      // Same-origin fallback (no injection) keeps the small-page ceiling.
+        serverOrigin() !== null
+          ? pageColsForRows(this.ring?.rows ?? 0, HISTORY_FRAME_BUDGET_BYTES)
+          : pageColsForRows(this.ring?.rows ?? 0, HISTORY_DEV_FRAME_BUDGET_BYTES),
       onSpliced: (resp) => {
         // Backfilled bars carry the CLOSE (price line) and cumulative CVD for the
         // scrolled-back region. Without routing them through the same sink as live
@@ -1836,6 +1914,26 @@ export class Renderer {
     if (this.camera.followTime) this.applyTimeFollowFrame();
     if (this.camera.followPrice === 'fit') this.applyPriceFitFrame();
     this.view = this.camera.toView();
+    // Re-apply the CURRENT eased lag (without stepping the dynamics — frame()
+    // owns the step) so the change-notify never carries the un-eased logical
+    // frame: this.view is otherwise jumped +1 column at this arrival, and
+    // consumers riding the seam (the timeline minimap) read forward-then-
+    // backward stepping at the column cadence.
+    // Absorb THIS arrival into the lag at zero-dt (the frame's glide step
+    // still owns consumption): the notify view is then display-continuous —
+    // the +1 column of logical advance is exactly cancelled by the longer trail.
+    if (
+      this.camera.followTime &&
+      this.liveGlideActive() &&
+      this.newestSeq > this.lagBaseSeq
+    ) {
+      const a = Math.min(this.newestSeq - this.lagBaseSeq, 8);
+      this.lagBaseSeq = this.newestSeq;
+      this.liveLag = Math.min(this.liveLag + a, TIME_GLIDE_MAX_LAG);
+    }
+    if (this.liveLag > 0) {
+      this.view = { ...this.view, colOffset: this.view.colOffset - this.liveLag };
+    }
     // Fire the view-changed seam only when a uniform actually moved: updateView
     // runs per appended column while following, and most appends reframe a
     // sub-pixel delta that must not spam listeners (survey #7).
@@ -1950,7 +2048,7 @@ export class Renderer {
 
   /**
    * Price auto-follow, `'track'` mode: keep the user's `rowSpan` and ease
-   * `rowCenter` onto the tracked row whenever price leaves the central deadband
+   * `rowCenter` just enough to recover the price when it leaves the viewport
    * (gl/follow.ts). Called once per frame.
    *
    * Gated on the live edge being VISIBLE: when the user has scrolled back into
@@ -1958,9 +2056,9 @@ export class Renderer {
    * tracking it would drag the price window off the region being read and fight
    * the history backfill. Price simply freezes there and resumes on return.
    *
-   * The ease only re-dirties the frame when `rowCenter` actually moved by more
-   * than a sub-pixel; once it settles, `priceStalled` latches so a converged
-   * glide cannot hold the renderer at 60 fps for a whole session.
+   * The target follows the current price throughout the glide. Price and time
+   * changes are composed before one view notification, so observers never see
+   * an intermediate horizontal jump while the vertical camera is moving.
    */
   private stepPriceFollow(ts: number): void {
     const prevTs = this.priceStepTs;
@@ -1969,36 +2067,122 @@ export class Renderer {
     if (this.perf !== null) return;
     if (this.camera.followPrice !== 'track') return;
     if (this.trackedRowN === null || this.newestSeq < 0) return;
-    if (!isColVisible(this.view, this.newestSeq)) return;
+    // LOGICAL frame (camera), not the eased draw view — the glide's sub-column
+    // trail must never read as "scrolled back" and freeze the price glide.
+    if (!isColVisible(this.camera.toView(), this.newestSeq)) return;
 
     const st = this.camera.state;
-    if (this.priceTarget === null) {
-      this.priceTarget = priceFollowTarget(st.rowCenter, st.rowSpan, this.trackedRowN);
-      if (this.priceTarget === null) return; // still inside the deadband
-      this.priceStalled = false;
-    }
-    if (this.priceStalled) return;
+    // Track the price line the user sees. The time-weighted book can still
+    // contain old touch levels, and its midpoint is not the last traded price.
+    const price = this.overlays.lastPrice();
+    const map = price !== null ? this.overlayPriceMap() : null;
+    const liveRow = map !== null && price !== null
+      ? scalePriceToRow(mapScale(map), price) + 0.5
+      : this.trackedRowN;
+    this.priceTarget = priceFollowTarget(
+      st.rowCenter, st.rowSpan, liveRow, this.priceTarget !== null,
+    );
+    if (this.priceTarget === null) return;
 
     const target = this.priceTarget;
     const dt = prevTs > 0 ? ts - prevTs : PRICE_GLIDE_TAU_MS;
     const next = approach(st.rowCenter, target, dt, PRICE_GLIDE_TAU_MS);
-    const moved = Math.abs(next - st.rowCenter);
     const subPixel = st.rowSpan / Math.max(1, this.canvas.clientHeight);
 
-    if (Math.abs(target - st.rowCenter) <= PRICE_SNAP_ROWS || moved <= subPixel) {
+    if (Math.abs(target - st.rowCenter) <= Math.min(PRICE_SNAP_ROWS, subPixel)) {
       // Settled: land exactly and disarm until price drifts out again.
       this.camera.setRowCenter(target);
-      this.view = this.camera.toView();
       this.priceTarget = null;
-      this.priceStalled = true;
       this.dirty = true;
-      this.notifyViewChanged();
       return;
     }
     this.camera.setRowCenter(next);
-    this.view = this.camera.toView();
     this.dirty = true;
-    this.notifyViewChanged();
+    // Time glide composes BOTH axes and notifies once later in this frame.
+  }
+
+  /**
+   * The eased live-edge scroll (gl/follow.ts `stepLiveEdgeLag`). Called once per
+   * frame, before the draw: the drawn `this.view` trails the logical follow
+   * frame by `liveLag` columns, which grows by the number of columns that
+   * arrived since the previous frame and is consumed at the epoch's
+   * column rate — so the chart scrolls at a constant one column per
+   * interval instead of jumping once per column.
+   */
+  private stepLiveEdgeGlide(ts: number): void {
+    const before = this.view;
+    this.applyLiveEdgeGlide(ts);
+    if (
+      before.colOffset !== this.view.colOffset ||
+      before.colScale !== this.view.colScale ||
+      before.rowOffset !== this.view.rowOffset ||
+      before.rowScale !== this.view.rowScale
+    ) {
+      // The seam DOM consumers (the timeline minimap) ride so they track the
+      // glide per frame instead of polling in visible steps.
+      this.notifyViewChanged();
+    }
+  }
+
+  /**
+   * Whether the follow frame is in SCROLL mode: the visible span is fully
+   * covered by resident columns, so the frame is right-edge-pinned and every
+   * arrival must be absorbed into the eased lag. During the fill phase
+   * (resident count < visible span) the frame is LEFT-anchored — it stretches
+   * instead of scrolling — and a lag offset there would shift the whole map
+     against an anchored left edge, jumping when the scroll mode engages.
+   */
+  private liveGlideActive(): boolean {
+    const range = this.ring?.residentRange() ?? null;
+    if (range === null) return false;
+    return this.camera.state.colSpan < range.count - 0.05;
+  }
+
+  private applyLiveEdgeGlide(ts: number): void {
+    const dtMs =
+      this.glideLastTs > 0 ? Math.min(Math.max(ts - this.glideLastTs, 0), 250) : 0;
+    this.glideLastTs = ts;
+
+    const following = this.camera.followTime && this.liveGlideActive();
+    // Start with a spare interval: consuming the only available column leaves
+    // the camera motionless whenever the next packet is slightly late.
+    if (following && !this.glideWasFollowing) this.liveLag = TIME_GLIDE_STEADY_LAG;
+    this.glideWasFollowing = following;
+
+    const arrivals =
+      this.lagBaseSeq >= 0 && this.newestSeq > this.lagBaseSeq
+        ? Math.min(this.newestSeq - this.lagBaseSeq, 8)
+        : 0;
+    this.lagBaseSeq = this.newestSeq;
+    if (this.perf !== null) return; // after lagBaseSeq sync: keeps arrivals honest
+
+    if (following) {
+      // The time axis advances at the grid's duration, not network delivery
+      // speed. A late packet followed by catch-up must not accelerate the
+      // camera and empty its reserve on a repeating delivery-jitter cycle.
+      const interval = this.currentDtNs() / 1e6;
+      this.liveLag = stepLiveEdgeLag(this.liveLag, arrivals, dtMs, interval);
+    } else if (this.liveLag > 0) {
+      this.liveLag = Math.max(0, this.liveLag - dtMs / 250);
+    }
+
+    if (this.liveLag <= TIME_GLIDE_SETTLE_EPS) {
+      if (this.liveLag !== 0) {
+        // Converged: land exactly on the logical frame and stop re-dirtying.
+        this.liveLag = 0;
+        this.dirty = true;
+      }
+      this.view = this.camera.toView();
+      return;
+    }
+    const logical = this.camera.toView();
+    this.view = { ...logical, colOffset: logical.colOffset - this.liveLag };
+    this.dirty = true;
+  }
+
+  /** Test seam: the current eased live-edge lag in columns (0 = settled). */
+  get liveEdgeLagColumns(): number {
+    return this.liveLag;
   }
 
   private resize(): void {
@@ -2243,7 +2427,6 @@ export class Renderer {
         }
         this.forcedRemapFrom = null;
         this.priceTarget = null;
-        this.priceStalled = false;
         this.priceFitMemo = null;
       }
       this.priceEpoch = epoch; // first epoch: nothing to remap from
@@ -2289,7 +2472,6 @@ export class Renderer {
       this.trackedEpoch = null;
     }
     this.priceTarget = null;
-    this.priceStalled = false;
     this.priceFitMemo = null;
     this.priceEpoch = epoch;
   }
@@ -2518,6 +2700,11 @@ export class Renderer {
       // Price auto-follow glide (O(1): a handful of scalars). No-op unless the
       // camera is in 'track' mode with the live edge on screen.
       this.stepPriceFollow(ts);
+
+      // Eased live-edge scroll (O(1) scalars): the drawn view trails the logical
+      // follow frame by a decaying sub-column lag, so time-follow glides instead
+      // of jumping once per column. Re-dirties while the glide is in flight.
+      this.stepLiveEdgeGlide(ts);
 
       // T8: on frames where the view moved, ask the loader to ensure the visible
       // range is populated. This guard is O(1) (visible-left vs resident-oldest) —

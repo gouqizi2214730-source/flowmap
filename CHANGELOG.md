@@ -57,6 +57,54 @@ Client + server feature campaign on top of `7ae568e`
 
 ### Changed
 
+- **History pages are frame-budgeted (dev scroll-back fix)** — a
+  `HistoryResponse` is ONE binary WebSocket frame of `n_cols × rows × 8` bytes;
+  at the 256-column page size a 4096-row grid produces a ~8.4 MB message, and
+  the vite dev proxy measurably drops exactly those (verified 2026-09-20: the
+  identical request answered instantly direct-to-server; through the proxy the
+  server-side socket errors with `ECONNABORTED` and the client times out at
+  30 s — scrolled back, the dev client then shows a mostly EMPTY heatmap
+  because no page ever splices; the ceiling shrinks further under concurrent
+  live traffic). The loader now sizes each page from the grid height AND the
+  transport (`net/history.ts pageColsForRows` + a per-transport ceiling:
+  direct/Tauri keeps the full 256-column page, same-origin dev rides
+  512 KB-framed pages), so scroll-back fills in dev too. Root cause of the
+  proxy's backpressure abort is upstream (http-proxy ws relay) — recorded for
+  a follow-up.
+- **Eased live-edge scroll (the "chart jumps once per column" fix)** — while
+  time-follow is armed, the DRAWN view now trails the logical follow frame by a
+  fractional column lag that grows by each arrival and is consumed at EXACTLY
+  the measured column arrival rate (`gl/follow.ts stepLiveEdgeLag`: constant-
+  velocity catch-up, lag capped at 1 column), so the heatmap scrolls at a
+  steady one column per interval instead of stepping once per column — with no
+  slide-then-freeze tail on long-interval (1 s equity) grids, which an
+  exponential ease produced. The measured inter-arrival EMA drives the rate,
+  seeded from the epoch dt. Real feeds arrive in BURSTS (a Binance L2 queue
+  flushes 2-4 columns at once): the lag absorbs the WHOLE burst — an earlier
+  draft clamped the trail at 1 column, which turned every burst's excess into
+  instant forward jumps (the reported "perde perde" wave on BTC) — and drains
+  the backlog smoothly above the steady reserve (~1.2 s time constant), with a
+  runaway guard at 8 columns. A renderer-level regression test drives the real
+  frame loop through a bursty arrival pattern and pins "no frame advances more
+  than a fraction of a column". Uniforms-only — no column is re-uploaded, and
+  the camera state, `colsBehind` semantics, GO LIVE pill and history loader
+  keep
+  reasoning in whole columns; heatmap, overlays, axes and the minimap window
+  glide in sync off the same eased view. The Timeline rides the renderer's
+  `onViewChanged` seam per changed frame (the poll is only a fallback), so the
+  minimap/playhead no longer step at the 5 Hz poll cadence. The
+  Timeline/LiveControls "behind" readouts ignore sub-column glide lag (a
+  ≥ 1 whole-column threshold gated on follow state), and
+  `liveEdgeVisible`/price-follow gate on the logical camera frame so a glide
+  can never strobe the TRK·WAIT chip.
+- **Restrained shell modernization** — design tokens retuned across all seven
+  themes: radii 4/6/8 px, two-layer contact+ambient shadows, motion on a
+  decelerating cubic curve (0.15 s/0.22 s); UI chrome reads in the platform
+  sans (`--font-ui`, system stack — no network dependency) while every
+  data-bearing numeral stays on the mono stack with tabular figures; thin
+  theme-tinted scrollbars, a calm `:focus-visible` accent ring. Tape prints
+  and newly-entering ladder levels settle in with a ≤ 150 ms fade (value
+  spans shimmer on change); everything honors `prefers-reduced-motion`.
 - **Tick grouping is now real** — `settings.tickGrouping` floors the mip level
   at `log4(n)` (1/4/16 → levels 0/1/2; non-4^k values round UP to the next
   4^k block, documented at the setter). `probeAt`/crosshair stay

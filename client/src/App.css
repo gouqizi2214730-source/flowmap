@@ -15,7 +15,10 @@ body,
   width: 100%;
   background: var(--bg);
   color: var(--text);
-  font-family: var(--font-mono);
+  /* UI chrome reads in the platform sans (--font-ui); DATA numerics are pinned
+     back to --font-mono per-rule (every rule that declares tabular-nums), so
+     numbers still align in terminal columns while labels modernize. */
+  font-family: var(--font-ui);
   font-size: var(--fs-md);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
@@ -269,6 +272,7 @@ body,
   align-items: flex-end;
   line-height: 1.15;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   white-space: nowrap;
 }
 .clock__wall {
@@ -668,12 +672,14 @@ body,
   font-size: var(--fs-sm);
   text-align: right;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   color: var(--text-2, #c7d0da);
 }
 .sympal__chg {
   font-size: var(--fs-sm);
   text-align: right;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   color: var(--text-3);
 }
 /* Direction inks follow the theme channels (hardcoded teal/red read
@@ -745,10 +751,10 @@ body,
 }
 .sympal__pv-sym { font-size: 20px; font-weight: 700; color: var(--text, #e6ecf3); }
 .sympal__pv-mkt { font-size: var(--fs-2xs); color: var(--text-3); letter-spacing: 0.06em; margin-bottom: 6px; }
-.sympal__pv-px { font-size: 24px; font-variant-numeric: tabular-nums; }
+.sympal__pv-px { font-family: var(--font-mono); font-size: 24px; font-variant-numeric: tabular-nums; }
 .sympal__pv-px.is-up, .sympal__pv-chg.is-up { color: var(--accent-bright); }
 .sympal__pv-px.is-down, .sympal__pv-chg.is-down { color: var(--sell-bright); }
-.sympal__pv-chg { font-size: var(--fs-md); font-variant-numeric: tabular-nums; margin-bottom: 8px; }
+.sympal__pv-chg { font-family: var(--font-mono); font-size: var(--fs-md); font-variant-numeric: tabular-nums; margin-bottom: 8px; }
 .sympal__pv-spark { width: 100%; height: 60px; margin: 4px 0 8px; }
 .sympal__pv-caps { display: flex; gap: 4px; flex-wrap: wrap; margin-top: auto; }
 .sympal__pv-note { font-size: var(--fs-sm); color: var(--text-3); }
@@ -818,6 +824,19 @@ body,
   overflow: hidden;
 }
 
+.stage__viewport--volume {
+  --volume-strip-h: clamp(16px, 7%, 44px);
+}
+
+.stage__viewport .overlay-text {
+  height: 100%;
+}
+
+.stage__viewport--volume .gl-canvas,
+.stage__viewport--volume .overlay-text {
+  height: calc(100% - var(--volume-strip-h));
+}
+
 .cvd-pane {
   grid-area: cvd;
   position: relative;
@@ -875,6 +894,7 @@ body,
   color: var(--text-2);
   font-weight: 500;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   letter-spacing: 0.02em;
 }
 
@@ -1190,6 +1210,7 @@ body,
   height: 17px;
   font-size: var(--fs-md);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -1365,6 +1386,7 @@ body,
   padding: 0 var(--sp-3);
   font-size: var(--fs-sm);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   color: var(--text);
   border-bottom: 1px solid var(--line-soft);
 }
@@ -1422,6 +1444,7 @@ body,
   color: var(--accent);
   border-color: var(--accent-line);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 /* ============================================================================
@@ -1517,6 +1540,7 @@ body,
 }
 .go-live__behind {
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
   font-weight: 500;
   opacity: 0.75;
 }
@@ -1558,6 +1582,7 @@ body,
   letter-spacing: 0.06em;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 .minimap__track {
@@ -1757,6 +1782,7 @@ body,
   text-transform: none;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 .setting__hint {
   font-size: var(--fs-2xs);
@@ -1954,6 +1980,7 @@ body,
   border: 1px solid var(--line-soft);
   border-radius: var(--r-1);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 /* Synthetic depth ladder: recolour the bid/ask bars amber so fabricated
@@ -2639,5 +2666,87 @@ body,
   }
   .closed-banner__dot {
     box-shadow: none;
+  }
+}
+
+/* ============================================================================
+   MODERN POLISH WAVE — motion, focus, scrollbars, row entrances
+   ========================================================================= */
+/* A restrained pass: nothing moves that isn't data entering the panel, every
+   animation is sub-200ms on the shared decelerating curve, and everything
+   honors prefers-reduced-motion. The GL heatmap's own smoothness lives in the
+   renderer (eased live-edge scroll), not here. */
+
+/* --- keyboard focus: a calm accent ring, never the browser default --- */
+:focus-visible {
+  outline: 2px solid var(--accent-glow);
+  outline-offset: 1px;
+  border-radius: var(--r-1);
+}
+
+/* --- scrollbars: thin, theme-tinted, quiet until hovered --- */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-2) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 4px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--line-2);
+  background-clip: content-box;
+}
+
+/* --- tape: new prints settle in from above (React keys by trade id, so only
+   genuinely NEW rows mount and animate; scrolled rows never re-run it) --- */
+.tape__row {
+  animation: fm-row-in var(--t-fast) both;
+}
+
+/* --- DOM ladder: entering price levels fade up; a CHANGED size span (keyed by
+   value in DomLadder) re-mounts and shimmer-fades to its new figure, so the
+   book reads as a flowing surface instead of snapping numbers --- */
+.ladder__row {
+  animation: fm-row-in var(--t-fast) both;
+}
+.ladder__sz {
+  animation: fm-sz-in var(--t-fast) both;
+}
+
+@keyframes fm-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fm-sz-in {
+  from {
+    opacity: 0.4;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tape__row,
+  .ladder__row,
+  .ladder__sz {
+    animation: none;
   }
 }

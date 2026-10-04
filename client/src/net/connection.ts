@@ -55,6 +55,9 @@ import {
   type Status,
   type StreamMode,
   type Trade,
+  type GexLevelUpdate,
+  type MarketIntelligence,
+  type MacroStressUpdate,
 } from '../proto/types';
 
 /** Connection lifecycle state (distinct from the server's Status.feed_state). */
@@ -67,7 +70,15 @@ export interface CloseInfo {
 }
 
 /** The high-frequency messages forwarded to the renderer (never React state). */
-export type StreamMsg = DepthColumn | BarColumn | Trade | BBO | Marker;
+export type StreamMsg =
+  | DepthColumn
+  | BarColumn
+  | Trade
+  | BBO
+  | Marker
+  | GexLevelUpdate
+  | MarketIntelligence
+  | MacroStressUpdate;
 
 /**
  * Structural subset of the browser WebSocket that the Connection drives. A
@@ -689,6 +700,9 @@ export class Connection {
       case MsgType.TRADE:
       case MsgType.BBO:
       case MsgType.MARKER:
+      case MsgType.GEX_UPDATE:
+      case MsgType.MARKET_INTELLIGENCE:
+      case MsgType.MACRO_STRESS:
         this.handlers.onStream?.(msg);
         return;
       default:

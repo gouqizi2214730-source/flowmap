@@ -289,4 +289,17 @@ describe('Watchlist panel', () => {
     container.remove();
     expect(unsubCalls).toBe(1);
   });
+
+  it('renders Talent Index and Executive Jet Alert for symbols with deep intelligence data', () => {
+    addToWatchlist('nasdaq:NVDA');
+    const { container } = render(<Watchlist activeKey="nasdaq:NVDA" onSelect={vi.fn()} />);
+
+    const talentChip = container.querySelector('[data-testid="watchlist-talent-nasdaq:NVDA"]');
+    expect(talentChip).not.toBeNull();
+    expect(talentChip!.textContent).toContain('%');
+
+    const jetChip = container.querySelector('[data-testid="watchlist-jet-nasdaq:NVDA"]');
+    expect(jetChip).not.toBeNull();
+    expect(jetChip!.textContent).toContain('✈️');
+  });
 });

@@ -80,6 +80,9 @@ MSG_MARKER = 0x07
 MSG_STATUS = 0x08
 MSG_PING = 0x09
 MSG_HISTORY_RESP = 0x0A
+MSG_GEX_UPDATE = 0x20
+MSG_MARKET_INTELLIGENCE = 0x21
+MSG_MACRO_STRESS = 0x22
 MSG_SUBSCRIBE = 0x40
 MSG_UNSUBSCRIBE = 0x41
 MSG_SEEK = 0x42
@@ -97,6 +100,7 @@ _BBO = struct.Struct("<qdddd")  # 40 bytes
 _PING = struct.Struct("<q")
 _PONG = struct.Struct("<qq")
 _HIST_HDR = struct.Struct("<IIqHHHH")  # 24 bytes
+_GEX_HDR = struct.Struct("<ddddd")  # 40 bytes: spot, flip, call_wall, put_wall, net_gex
 
 
 def _ceil4(n: int) -> int:
@@ -173,6 +177,19 @@ def _enc_history(ev: events.HistoryResponse) -> bytes:
         for m in group
     )
     return hdr + nested
+
+
+def _enc_gex(ev: events.GexLevelUpdate) -> bytes:
+    sym_bytes = ev.symbol.encode("utf-8")
+    if len(sym_bytes) > 255:
+        raise ValueError(f"symbol too long: {len(sym_bytes)} > 255")
+    return (
+        _GEX_HDR.pack(
+            ev.spot_price, ev.gamma_flip, ev.call_wall, ev.put_wall, ev.net_gex
+        )
+        + bytes([len(sym_bytes)])
+        + sym_bytes
+    )
 
 
 # --- hot decoders ((buf, payload_offset, payload_len) -> event) -----------------
@@ -279,6 +296,26 @@ def _dec_history(buf: bytes, off: int, plen: int) -> events.HistoryResponse:
                                   markers=groups[2], big_trades=groups[3])
 
 
+def _dec_gex(buf: bytes, off: int, plen: int) -> events.GexLevelUpdate:
+    if plen < _GEX_HDR.size:
+        raise ValueError(f"GEX_UPDATE payload too short: {plen} < {_GEX_HDR.size}")
+    spot_price, gamma_flip, call_wall, put_wall, net_gex = _GEX_HDR.unpack_from(buf, off)
+    symbol = ""
+    if plen > _GEX_HDR.size:
+        slen = buf[off + _GEX_HDR.size]
+        if _GEX_HDR.size + 1 + slen > plen:
+            raise ValueError("GEX symbol overruns payload")
+        symbol = buf[off + _GEX_HDR.size + 1 : off + _GEX_HDR.size + 1 + slen].decode("utf-8")
+    return events.GexLevelUpdate(
+        symbol=symbol,
+        spot_price=spot_price,
+        gamma_flip=gamma_flip,
+        call_wall=call_wall,
+        put_wall=put_wall,
+        net_gex=net_gex,
+    )
+
+
 # --- registries (table-driven dispatch) -----------------------------------------
 
 _HOT_ENCODERS: dict[type, tuple[int, Callable]] = {
@@ -289,6 +326,7 @@ _HOT_ENCODERS: dict[type, tuple[int, Callable]] = {
     events.Ping: (MSG_PING, _enc_ping),
     events.Pong: (MSG_PONG, _enc_pong),
     events.HistoryResponse: (MSG_HISTORY_RESP, _enc_history),
+    events.GexLevelUpdate: (MSG_GEX_UPDATE, _enc_gex),
 }
 
 _HOT_DECODERS: dict[int, Callable] = {
@@ -299,6 +337,7 @@ _HOT_DECODERS: dict[int, Callable] = {
     MSG_PING: _dec_ping,
     MSG_PONG: _dec_pong,
     MSG_HISTORY_RESP: _dec_history,
+    MSG_GEX_UPDATE: _dec_gex,
 }
 
 _COLD_TYPES: dict[type, int] = {
@@ -313,6 +352,8 @@ _COLD_TYPES: dict[type, int] = {
     events.Pause: MSG_PAUSE,
     events.Resume: MSG_RESUME,
     events.HistoryRequest: MSG_HISTORY_REQ,
+    events.MarketIntelligence: MSG_MARKET_INTELLIGENCE,
+    events.MacroStressUpdate: MSG_MACRO_STRESS,
 }
 
 _COLD_BY_ID: dict[int, type] = {v: k for k, v in _COLD_TYPES.items()}

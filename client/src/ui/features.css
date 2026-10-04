@@ -60,6 +60,7 @@
 }
 .measure__v {
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 .measure__bid {
   color: var(--chart-accent, #33d6c4);
@@ -167,6 +168,7 @@
 .alerts-chip__count {
   color: var(--chart-warn, #d6a13a);
   font-variant-numeric: tabular-nums;
+  font-family: var(--font-mono);
 }
 
 /* Alerts popover — a compact panel anchored to the bell chip. It lives INSIDE

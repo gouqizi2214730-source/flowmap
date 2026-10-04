@@ -213,6 +213,7 @@ describe('normalizeSettings', () => {
       price: DEFAULT_SETTINGS.overlays.price,
       cvd: DEFAULT_SETTINGS.overlays.cvd,
       volume: DEFAULT_SETTINGS.overlays.volume,
+      gex: DEFAULT_SETTINGS.overlays.gex,
     });
     // New fields adopt defaults (colormap deliberately does NOT keep 'thermal':
     // the v1→v2 chart-harmony migration forces 'theme').

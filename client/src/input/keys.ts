@@ -30,7 +30,8 @@ export type GlobalKeyAction =
   | { type: 'toggle-follow' }
   | { type: 'toggle-price-follow' }
   | { type: 'price-auto-fit' }
-  | { type: 'go-live' };
+  | { type: 'go-live' }
+  | { type: 'toggle-intel' };
 
 /** How the event target is classified for routing (computed from the DOM by the caller). */
 export interface KeyTargetContext {
@@ -112,6 +113,7 @@ export function routeGlobalKey(
   if (key === 'a' || key === 'A') return { type: 'create-alert' };
   if (key === 'h' || key === 'H') return { type: 'toggle-hud' };
   if (key === 'c' || key === 'C') return { type: 'cycle-depth-channel' };
+  if (key === 'i' || key === 'I') return { type: 'toggle-intel' };
   return null;
 }
 
@@ -155,6 +157,8 @@ export interface GlobalKeyHandlers {
   onPriceAutoFit?: () => void;
   /** `R` — go live (re-pin the live edge). */
   onGoLive?: () => void;
+  /** `I` — toggle the Intelligence Terminal Drawer (<GO>). */
+  onToggleIntel?: () => void;
 }
 
 /**
@@ -209,6 +213,9 @@ export function attachGlobalKeys(
         break;
       case 'go-live':
         handlers.onGoLive?.();
+        break;
+      case 'toggle-intel':
+        handlers.onToggleIntel?.();
         break;
       default:
         handlers.onFocusSearch();

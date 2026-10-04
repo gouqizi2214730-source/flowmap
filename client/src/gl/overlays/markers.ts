@@ -54,8 +54,11 @@ const KIND_CODE: Record<MarkerKind, number> = {
   large_lot: 5,
   iceberg: 6,
   info: 7,
+  capitol: 8,
+  defense_contract: 9,
+  clinical: 10,
 };
-const CODE_LABEL = ['LIQ', 'HALT', 'LULD', 'GAP', 'BRK', 'LOT', 'ICE', 'INFO'];
+const CODE_LABEL = ['LIQ', 'HALT', 'LULD', 'GAP', 'BRK', 'LOT', 'ICE', 'INFO', '🏛️ CAPITOL', '🛡️ DOD', '🧪 FDA'];
 /** Kinds rendered as a full-height vertical line rather than a price glyph. */
 const VERTICAL = new Set([KIND_CODE.gap, KIND_CODE.session_break]);
 
@@ -212,6 +215,12 @@ export class Markers {
       if (code === KIND_CODE.liquidation) {
         // Upward triangle centered on the price.
         solid.addTri(cx, cy + gy, cx - gx, cy - gy, cx + gx, cy - gy, OVERLAY.liquidation.gl);
+      } else if (code === KIND_CODE.capitol) {
+        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, [0.22, 0.74, 0.97, 0.95]);
+      } else if (code === KIND_CODE.defense_contract) {
+        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, [0.29, 0.87, 0.50, 0.95]);
+      } else if (code === KIND_CODE.clinical) {
+        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, [0.93, 0.28, 0.60, 0.95]);
       } else {
         // Diamond glyph for the other event kinds.
         solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, OVERLAY.event.gl);
@@ -335,7 +344,13 @@ export class Markers {
           ? OVERLAY.gap.css
           : gr.code === KIND_CODE.liquidation
             ? OVERLAY.liquidation.css
-            : OVERLAY.event.css;
+            : gr.code === KIND_CODE.capitol
+              ? '#38bdf8'
+              : gr.code === KIND_CODE.defense_contract
+                ? '#4ade80'
+                : gr.code === KIND_CODE.clinical
+                  ? '#ec4899'
+                  : OVERLAY.event.css;
       text.text(gr.x, y, label, { color, size: LABEL_SIZE, weight: 600 });
     }
   }

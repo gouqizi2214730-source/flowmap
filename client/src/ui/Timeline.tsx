@@ -36,7 +36,7 @@
  * line with an indeterminate progress element carries the reason.
  */
 
-import { useEffect, useRef, useState, type ChangeEvent, type RefObject } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type RefObject } from 'react';
 
 import { colsBehind } from '../gl/follow';
 import type { Renderer } from '../gl/renderer';
@@ -132,64 +132,95 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   const pillRef = useRef<HTMLSpanElement | null>(null);
   const isReplay = mode === 'replay';
 
-  // ≤5 Hz poll of the renderer's timeline geometry → minimap extent + window box.
+  // Timeline geometry refresh: reads the renderer's timeline() snapshot and
+  // updates the minimap window / playhead / behind-label through the guarded
+  // setters (each skips the re-render when its value did not change).
+  const refresh = useCallback((): void => {
+    const r = rendererRef.current;
+    const tl = r?.timeline();
+    if (r) setFollowing((f) => (f === r.following ? f : r.following));
+    if (!tl) {
+      if (geomRef.current !== EMPTY_GEOM) {
+        geomRef.current = EMPTY_GEOM;
+        setGeom(EMPTY_GEOM);
+      }
+      setBehind((b) => (b === '' ? b : ''));
+      return;
+    }
+    const span = Math.max(1, tl.newestSeq - tl.oldestSeq);
+    const leftPct = clamp01((tl.viewStartCol - tl.oldestSeq) / span) * 100;
+    const rightPct = clamp01((tl.viewEndCol - tl.oldestSeq) / span) * 100;
+    let extent: TimeExtent | null = null;
+    let toNs: ((col: number) => bigint) | null = null;
+    if (tl.timeBase) {
+      const { anchorSeq, anchorT0Ns, dtNs } = tl.timeBase;
+      toNs = (col: number): bigint =>
+        anchorT0Ns + BigInt(Math.round((col - anchorSeq) * dtNs));
+      extent = { startNs: toNs(tl.oldestSeq), endNs: toNs(tl.newestSeq) };
+    }
+    // How far the right edge trails the newest column, as HH:MM:SS. "Behind"
+    // is a WHOLE-column concept: while time-follow is armed, the eased draw
+    // edge (gl/renderer stepLiveEdgeGlide) trails the logical frame by a
+    // sub-column glide lag that must never read as history lag, and the
+    // sub-column residue right after a follow-off is below this readout's
+    // granularity — both report live (blank).
+    const dtNs = tl.timeBase?.dtNs ?? 0;
+    const lag = colsBehind(
+      { colOffset: tl.viewStartCol, colScale: tl.viewEndCol - tl.viewStartCol, rowOffset: 0, rowScale: 1 },
+      tl.newestSeq,
+    );
+    const behindCols = r !== null && !r.following && lag >= 1 ? lag : 0;
+    const nextBehind = behindCols > 0 && dtNs > 0 ? formatDurationCoarseNs(behindNs(behindCols, dtNs)) : '';
+    setBehind((b) => (b === nextBehind ? b : nextBehind));
+    // Advance the playhead: map the newest column to ns and drive the scrubber
+    // from its fraction of the session extent — unless the user is scrubbing.
+    // Also self-corrects a stale thumb across session/symbol switches.
+    if (extent && toNs && !draggingRef.current) {
+      const f = fractionOfExtent(toNs(tl.newestSeq), extent);
+      const nv = Math.round(f * 1000);
+      setScrub((prev) => (prev === nv ? prev : nv));
+    }
+    const next: MinimapGeom = {
+      leftPct,
+      widthPct: Math.max(0.6, rightPct - leftPct),
+      extent,
+    };
+    const prev = geomRef.current;
+    // Skip a re-render unless something moved perceptibly.
+    if (
+      Math.abs(prev.leftPct - next.leftPct) > 0.3 ||
+      Math.abs(prev.widthPct - next.widthPct) > 0.3 ||
+      (prev.extent === null) !== (next.extent === null)
+    ) {
+      geomRef.current = next;
+      setGeom(next);
+    }
+  }, [rendererRef]);
+
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  // The poll is only the FALLBACK (renderer absent, replay seeks, quiet view).
+  // While the view moves — the live-edge glide, a drag, price glides — the
+  // renderer's `onViewChanged` seam drives this refresh per changed frame, so
+  // the minimap window and playhead ride the same motion the chart draws
+  // instead of stepping at the poll cadence (the "bölüm bölüm" updates).
   useEffect(() => {
+    let unsub: (() => void) | null = null;
     const id = window.setInterval(() => {
       const r = rendererRef.current;
-      const tl = r?.timeline();
-      if (r) setFollowing((f) => (f === r.following ? f : r.following));
-      if (!tl) {
-        if (geomRef.current !== EMPTY_GEOM) {
-          geomRef.current = EMPTY_GEOM;
-          setGeom(EMPTY_GEOM);
-        }
-        setBehind((b) => (b === '' ? b : ''));
-        return;
+      // The renderer is created after this component mounts, so the FIRST tick
+      // is the earliest moment the subscription can attach (idempotent after).
+      // Test fakes may omit the seam entirely — the poll fallback covers them.
+      if (r && typeof r.onViewChanged === 'function' && unsub === null) {
+        unsub = r.onViewChanged(() => refreshRef.current());
       }
-      const span = Math.max(1, tl.newestSeq - tl.oldestSeq);
-      const leftPct = clamp01((tl.viewStartCol - tl.oldestSeq) / span) * 100;
-      const rightPct = clamp01((tl.viewEndCol - tl.oldestSeq) / span) * 100;
-      let extent: TimeExtent | null = null;
-      let toNs: ((col: number) => bigint) | null = null;
-      if (tl.timeBase) {
-        const { anchorSeq, anchorT0Ns, dtNs } = tl.timeBase;
-        toNs = (col: number): bigint =>
-          anchorT0Ns + BigInt(Math.round((col - anchorSeq) * dtNs));
-        extent = { startNs: toNs(tl.oldestSeq), endNs: toNs(tl.newestSeq) };
-      }
-      // How far the right edge trails the newest column, as HH:MM:SS.
-      const dtNs = tl.timeBase?.dtNs ?? 0;
-      const lag = colsBehind(
-        { colOffset: tl.viewStartCol, colScale: tl.viewEndCol - tl.viewStartCol, rowOffset: 0, rowScale: 1 },
-        tl.newestSeq,
-      );
-      const nextBehind = lag > 0 && dtNs > 0 ? formatDurationCoarseNs(behindNs(lag, dtNs)) : '';
-      setBehind((b) => (b === nextBehind ? b : nextBehind));
-      // Advance the playhead: map the newest column to ns and drive the scrubber
-      // from its fraction of the session extent — unless the user is scrubbing.
-      // Also self-corrects a stale thumb across session/symbol switches.
-      if (extent && toNs && !draggingRef.current) {
-        const f = fractionOfExtent(toNs(tl.newestSeq), extent);
-        const nv = Math.round(f * 1000);
-        setScrub((prev) => (prev === nv ? prev : nv));
-      }
-      const next: MinimapGeom = {
-        leftPct,
-        widthPct: Math.max(0.6, rightPct - leftPct),
-        extent,
-      };
-      const prev = geomRef.current;
-      // Skip a re-render unless something moved perceptibly.
-      if (
-        Math.abs(prev.leftPct - next.leftPct) > 0.3 ||
-        Math.abs(prev.widthPct - next.widthPct) > 0.3 ||
-        (prev.extent === null) !== (next.extent === null)
-      ) {
-        geomRef.current = next;
-        setGeom(next);
-      }
+      refreshRef.current();
     }, POLL_MS);
-    return () => window.clearInterval(id);
+    return () => {
+      window.clearInterval(id);
+      unsub?.();
+    };
   }, [rendererRef]);
 
   // Reset the scrub gate on a mode switch, and drop any pending throttled seek.

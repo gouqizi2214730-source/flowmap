@@ -12,7 +12,7 @@
  *   - {@link getSnapshot}: a cheap, lazily-rebuilt immutable snapshot (rebuilt only
  *     when the buffer actually changed — never per read);
  *   - {@link subscribe}: a listener the panels register; notifications are THROTTLED
- *     to ~10 Hz (coalescing a burst of columns/trades into one panel update) and
+ *     to ~60 Hz (coalescing a burst of columns/trades into one panel update) and
  *     are only scheduled while at least one panel is subscribed. No timer spins
  *     when nothing is listening or nothing is flowing.
  *
@@ -25,11 +25,12 @@
 import type { StreamMsg } from '../net/connection';
 import { MsgType, type BBO, type DepthColumn, type Trade } from '../proto/types';
 import { useFlowMapStore } from './store';
+import { LIVE_UPDATE_MS } from './cadence';
 
 /** Max trades retained for the tape (spec §9: "last ~200"); ring is a touch larger. */
 export const TRADE_RING = 256;
-/** Panel notify cadence — coalesce the high-freq stream to ~10 Hz. */
-export const THROTTLE_MS = 100;
+/** Panel notify cadence — coalesce the high-freq stream within one frame. */
+export const THROTTLE_MS = LIVE_UPDATE_MS;
 
 /** Current book: the newest DepthColumn's density arrays + identity. */
 export interface BookBuffer {

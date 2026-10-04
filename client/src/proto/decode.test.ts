@@ -504,4 +504,62 @@ describe('encode ↔ decode round-trip (control messages)', () => {
 
     expect(goldenPayload.replace(',"client_ts_ns":null', '')).toBe(payload);
   });
+
+  it('decodes GEX_UPDATE binary payload correctly', () => {
+    // 8-byte envelope + 40-byte doubles + 1-byte len + 4-byte ASCII ('AAPL')
+    const buf = new ArrayBuffer(60);
+    const view = new DataView(buf);
+    view.setUint8(0, MsgType.GEX_UPDATE);
+    view.setUint8(1, 1); // PROTO_VER
+    view.setUint16(2, 0, true); // flags = 0 (binary)
+    view.setUint32(4, 45, true); // payload_len = 45 (40 + 1 + 4)
+
+    // doubles at offset 8
+    view.setFloat64(8, 150.0, true); // spot
+    view.setFloat64(16, 148.5, true); // flip
+    view.setFloat64(24, 155.0, true); // call_wall
+    view.setFloat64(32, 145.0, true); // put_wall
+    view.setFloat64(40, 2500000.0, true); // net_gex
+    view.setUint8(48, 4); // symbol len
+    const enc = new TextEncoder();
+    const sym = enc.encode('AAPL');
+    new Uint8Array(buf, 49, 4).set(sym);
+
+    const { msg } = decode(view, 0);
+    expect(msg).not.toBeNull();
+    expect(msg?.type).toBe(MsgType.GEX_UPDATE);
+    const gex = msg as any;
+    expect(gex.symbol).toBe('AAPL');
+    expect(gex.spot_price).toBe(150.0);
+    expect(gex.gamma_flip).toBe(148.5);
+    expect(gex.call_wall).toBe(155.0);
+    expect(gex.put_wall).toBe(145.0);
+    expect(gex.net_gex).toBe(2500000.0);
+  });
+
+  it('decodes cold MARKET_INTELLIGENCE and MACRO_STRESS JSON payloads', () => {
+    const intelJson = JSON.stringify({
+      ts_ns: 1000,
+      kind: 'defense_contract',
+      symbol: 'PLTR',
+      headline: 'Awarded DoD Contract',
+      amount_usd: 178000000.0,
+      detail: 'US Army TITAN ground station',
+      source: 'USASpending.gov',
+    });
+    const bytes = new TextEncoder().encode(intelJson);
+    const buf = new ArrayBuffer(8 + bytes.length + 4);
+    const view = new DataView(buf);
+    view.setUint8(0, MsgType.MARKET_INTELLIGENCE);
+    view.setUint8(1, 1);
+    view.setUint16(2, 0x0001, true); // FLAG_JSON
+    view.setUint32(4, bytes.length, true);
+    new Uint8Array(buf, 8, bytes.length).set(bytes);
+
+    const { msg } = decode(view, 0);
+    expect(msg).not.toBeNull();
+    expect(msg?.type).toBe(MsgType.MARKET_INTELLIGENCE);
+    expect((msg as any).symbol).toBe('PLTR');
+    expect((msg as any).amount_usd).toBe(178000000.0);
+  });
 });

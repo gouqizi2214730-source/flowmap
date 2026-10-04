@@ -286,6 +286,16 @@ export class TextLayer {
     ctx.restore();
   }
 
+  /** Filled data geometry keeps fractional positions during camera motion. */
+  rect(x: number, y: number, width: number, height: number, color: string, alpha = 1): void {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, Math.min(1, alpha));
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, width, height);
+    ctx.restore();
+  }
+
   dispose(): void {
     if (this.owned) this.canvas.remove();
   }

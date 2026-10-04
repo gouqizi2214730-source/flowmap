@@ -183,7 +183,7 @@ describe('bookStore buffer', () => {
 });
 
 describe('bookStore throttling', () => {
-  it('coalesces a burst into ONE ~10 Hz notification', () => {
+  it('coalesces a burst into ONE display-frame notification', () => {
     vi.useFakeTimers();
     const cb = vi.fn();
     const unsub = subscribe(cb);
@@ -202,6 +202,19 @@ describe('bookStore throttling', () => {
     vi.advanceTimersByTime(THROTTLE_MS);
     expect(cb).toHaveBeenCalledTimes(2);
 
+    unsub();
+  });
+
+  it('delivers at least 30 updates per second under continuous input', () => {
+    vi.useFakeTimers();
+    const cb = vi.fn();
+    const unsub = subscribe(cb);
+    for (let ms = 0; ms < 1000; ms += 5) {
+      ingestForTest(trade(ms, 100, 1, SIDE_BUY));
+      vi.advanceTimersByTime(5);
+    }
+    expect(cb.mock.calls.length).toBeGreaterThanOrEqual(30);
+    expect(cb.mock.calls.length).toBeLessThanOrEqual(63);
     unsub();
   });
 

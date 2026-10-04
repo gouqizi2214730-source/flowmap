@@ -77,6 +77,8 @@ describe('routeGlobalKey', () => {
     expect(routeGlobalKey('H', PLAIN)).toEqual({ type: 'toggle-hud' });
     expect(routeGlobalKey('c', PLAIN)).toEqual({ type: 'cycle-depth-channel' });
     expect(routeGlobalKey('C', PLAIN)).toEqual({ type: 'cycle-depth-channel' });
+    expect(routeGlobalKey('i', PLAIN)).toEqual({ type: 'toggle-intel' });
+    expect(routeGlobalKey('I', PLAIN)).toEqual({ type: 'toggle-intel' });
   });
 
   it('never hijacks the feature keys while typing or inside a dialog', () => {

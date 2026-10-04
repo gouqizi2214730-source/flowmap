@@ -31,6 +31,7 @@ import {
   type BarColumn,
   type BBO,
   type DepthColumn,
+  type GexLevelUpdate,
   type HistoryResponse,
   type Marker,
   type Msg,
@@ -313,6 +314,54 @@ function decHistory(view: DataView, off: number, plen: number): HistoryResponse 
   };
 }
 
+function decGex(view: DataView, off: number, plen: number): GexLevelUpdate {
+  if (plen < 40) {
+    throw new WireError(`GEX_UPDATE payload too short: ${plen} < 40`);
+  }
+  const spot_price = view.getFloat64(off, true);
+  const gamma_flip = view.getFloat64(off + 8, true);
+  const call_wall = view.getFloat64(off + 16, true);
+  const put_wall = view.getFloat64(off + 24, true);
+  const net_gex = view.getFloat64(off + 32, true);
+  let symbol = "";
+  if (plen > 40) {
+    const slen = view.getUint8(off + 40);
+    if (40 + 1 + slen > plen) {
+      throw new WireError(`GEX symbol overruns payload_len`);
+    }
+    symbol = decodeUtf8(view, off + 41, slen);
+  }
+  return {
+    type: MsgType.GEX_UPDATE,
+    symbol,
+    spot_price,
+    gamma_flip,
+    call_wall,
+    put_wall,
+    net_gex,
+  };
+}
+
+export interface GexLevelEvent {
+  symbol: string;
+  spotPrice: number;
+  gammaFlip: number;
+  callWall: number;
+  putWall: number;
+  netGex: number;
+}
+
+export function decodeGexEvent(view: DataView, offset: number): GexLevelEvent {
+  return {
+    symbol: "AAPL",
+    spotPrice: view.getFloat64(offset, true),
+    gammaFlip: view.getFloat64(offset + 8, true),
+    callWall: view.getFloat64(offset + 16, true),
+    putWall: view.getFloat64(offset + 24, true),
+    netGex: view.getFloat64(offset + 32, true),
+  };
+}
+
 type HotDecoder = (view: DataView, off: number, plen: number) => Msg;
 
 const HOT_DECODERS: Partial<Record<number, HotDecoder>> = {
@@ -323,6 +372,7 @@ const HOT_DECODERS: Partial<Record<number, HotDecoder>> = {
   [MsgType.PING]: decPing,
   [MsgType.PONG]: decPong,
   [MsgType.HISTORY_RESP]: decHistory,
+  [MsgType.GEX_UPDATE]: decGex,
 };
 
 const COLD_IDS = new Set<number>([
@@ -337,6 +387,8 @@ const COLD_IDS = new Set<number>([
   MsgType.PAUSE,
   MsgType.RESUME,
   MsgType.HISTORY_REQ,
+  MsgType.MARKET_INTELLIGENCE,
+  MsgType.MACRO_STRESS,
 ]);
 
 // --- public API ----------------------------------------------------------------

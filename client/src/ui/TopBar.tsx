@@ -16,6 +16,7 @@ import { useT } from '../i18n/useT';
 
 import type { StreamMode } from '../proto/types';
 import { useFlowMapStore } from '../state/store';
+import { useIntelligenceStore } from '../state/intelligenceStore';
 import { SymbolSearch, type SymbolSearchHandle } from './SymbolSearch';
 import { Wordmark } from './Wordmark';
 import {
@@ -58,6 +59,7 @@ interface TopBarProps {
   railVisible: boolean;
   onToggleRail: () => void;
   onOpenSettings: () => void;
+  onToggleIntel?: () => void;
   /** Export the chart canvas as a PNG download (renderer snapshot; `E` shares it). */
   onExportPng: () => void;
   /** Non-null when the last export attempt was refused (lost GL context). */
@@ -78,6 +80,7 @@ export const TopBar = forwardRef<SymbolSearchHandle, TopBarProps>(function TopBa
     exportNotice,
     onDismissExportNotice,
     streamClock,
+    onToggleIntel,
   },
   searchRef,
 ) {
@@ -87,6 +90,7 @@ export const TopBar = forwardRef<SymbolSearchHandle, TopBarProps>(function TopBa
   const capability = useFlowMapStore((s) => s.capability);
   const subscription = useFlowMapStore((s) => s.subscription);
   const replayUnavailable = useFlowMapStore((s) => s.replayUnavailable);
+  const macro = useIntelligenceStore((s) => s.macro);
 
   const [wall, setWall] = useState(() => new Date());
   useEffect(() => {
@@ -149,6 +153,29 @@ export const TopBar = forwardRef<SymbolSearchHandle, TopBarProps>(function TopBa
           ))
         )}
       </span>
+
+      {/* Institutional Macro & Liquidity Stress Ticker (MACRO <GO>) */}
+      <div
+        className="macro-ticker"
+        data-testid="institutional-stress-ticker"
+        title="Cross-Asset Credit & Liquidity Stress (FRED SOFR / HY OAS / 10Y-2Y Inversion)"
+      >
+        <span className="macro-ticker__lbl">MACRO:</span>
+        <span className="macro-ticker__item">
+          SOFR <strong>{macro.sofrRate.toFixed(2)}%</strong>
+        </span>
+        <span className="macro-ticker__div">|</span>
+        <span className="macro-ticker__item">
+          HY OAS <strong>{macro.hySpreadBps.toFixed(0)} bps</strong>
+        </span>
+        <span className="macro-ticker__div">|</span>
+        <span className={`macro-ticker__item ${macro.yieldCurve10Y2Y < 0 ? 'is-neg' : 'is-pos'}`}>
+          10Y-2Y <strong>{macro.yieldCurve10Y2Y < 0 ? '' : '+'}{macro.yieldCurve10Y2Y.toFixed(2)}%</strong>
+        </span>
+        <span className={`macro-ticker__badge is-${macro.stressRegime.toLowerCase()}`}>
+          {macro.stressRegime}
+        </span>
+      </div>
 
       <span className="topbar__spacer" />
 
@@ -277,6 +304,18 @@ export const TopBar = forwardRef<SymbolSearchHandle, TopBarProps>(function TopBa
       >
         {t('topbar.rail')}
       </button>
+
+      {onToggleIntel && (
+        <button
+          type="button"
+          className="tbtn is-intel"
+          onClick={onToggleIntel}
+          data-testid="intel-toggle"
+          title="Toggle Deep Market Intelligence Terminal (DOCS, GOV, FLOW, GEO) <GO>"
+        >
+          ⚡ INTEL &lt;GO&gt;
+        </button>
+      )}
 
       <button
         type="button"

@@ -17,6 +17,7 @@ const ITEMS: Array<[keyof OverlayVisibility, string, string]> = [
   ['vwap', 'VWAP', 'VWAP — volume-weighted average price'],
   ['cvd', 'CVD', 'CVD — cumulative volume delta (lower pane)'],
   ['profile', 'Profile', 'Profile — volume profile'],
+  ['gex', 'GEX', 'GEX — Gamma Exposure boundaries (Call/Put Walls, Gamma Flip)'],
   ['markers', 'Markers', 'Markers — event markers'],
   ['axes', 'Axes', 'Axes — price/time axes'],
 ];

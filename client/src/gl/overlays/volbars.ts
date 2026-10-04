@@ -15,9 +15,8 @@
  *
  * Rendering: ONE 2D-canvas pass over the visible buckets, on the shared text
  * layer (the same canvas the price line uses — real canvas AA at 1 px). Buckets
- * are screen-space: `bucketCount = min(visible columns, canvas px)`, so a
- * fully zoomed-out view collapses to ≤ one bucket per pixel and the cost is
- * O(visible buckets) ≤ O(canvas width), never O(history). The bucket scratch
+ * are aligned to absolute columns, with a fixed width chosen from the zoom.
+ * A zoomed-out view draws at most canvas width + two edge buckets. Scratch
  * arrays are instance-owned and reused, so a dirty frame allocates nothing.
  */
 
@@ -56,8 +55,11 @@ export const VOLBAR_MIN_PX = 1;
 export const VOLBAR_MAX_BAR_PX = 14;
 /** Bar opacity over the heatmap (Bookmap's bars read solid but not paper). */
 export const VOLBAR_ALPHA = 0.92;
-/** Height auto-contrast percentile over the VISIBLE nonzero buckets. Bookmap's
- *  internal contrast follows the visible distribution (KB), not the max: a
+
+export function volumeStripHeight(cssH: number): number {
+  return Math.max(VOLBAR_MIN_STRIP_PX, Math.min(VOLBAR_MAX_STRIP_PX, cssH * VOLBAR_HEIGHT_FRAC));
+}
+/** Initial contrast percentile over the visible nonzero buckets. A
  *  single whale on a linear-vs-max scale crushes every other bar to a whisker
  *  (measured live BTC: p50 = 17% of p90). Anything at/above this percentile
  *  clamps to full height (the upper-cutoff behaviour Bookmap documents). */
@@ -87,18 +89,28 @@ export function scatterVolumes(
   hi: number,
   buy: Float64Array,
   sell: Float64Array,
+  bucketCount = Math.min(buy.length, sell.length),
+  clipLo = lo,
+  clipHi = hi,
 ): number {
-  const n = Math.min(buy.length, sell.length);
+  const n = Math.min(bucketCount, buy.length, sell.length);
   const span = hi - lo + 1;
   if (n <= 0 || !(span > 0)) return 0;
+  const columnsPerBucket = span / n;
   for (const p of points) {
     if (!Number.isFinite(p.buy) || !Number.isFinite(p.sell)) continue;
     const width = Math.max(1, p.span | 0);
     const share = 1 / width;
-    for (let j = 0; j < width; j++) {
+    const first = Math.max(0, Math.ceil(Math.max(lo, clipLo) - p.col));
+    const end = Math.min(width, Math.floor(Math.min(hi, clipHi) - p.col) + 1);
+    for (let j = first; j < end; j++) {
       const col = p.col + j;
       if (!(col >= lo) || !(col <= hi)) continue;
-      const b = Math.min(n - 1, Math.max(0, Math.floor(((col - lo) / span) * n)));
+      // Divide by the bucket width, not by the viewport and back again.
+      // (3 / 367) * 367 rounds below 3 and aliases column 3 into column 2.
+      // Our absolute, power-of-two column buckets have exact widths, so each
+      // interval keeps its address as the visible count changes during glide.
+      const b = Math.min(n - 1, Math.max(0, Math.floor((col - lo) / columnsPerBucket)));
       buy[b] += p.buy * share;
       sell[b] += p.sell * share;
     }
@@ -119,12 +131,14 @@ export function scatterVolumes(
 export class VolBars {
   /** Absolute col_seq → taker-split volume (empty splits are not stored). */
   private readonly points = new Map<number, VolBarPoint>();
-  /** Last STORED point whose span is still open (closed by the next bar event). */
-  private openPoint: VolBarPoint | null = null;
+  /** Ordered event columns, including zero-volume span closers from history. */
+  private readonly eventCols: number[] = [];
   /** Reused per-frame bucket scratch (no allocation on a dirty frame). */
   private buyScratch = new Float64Array(0);
   private sellScratch = new Float64Array(0);
   private totalScratch = new Float64Array(0);
+  private cap = 0;
+  private bucketWidth = 0;
 
   /**
    * Record a column's traded volume. A column without a taker split
@@ -140,23 +154,47 @@ export class VolBars {
    */
   add(bar: BarColumn): void {
     const col = bar.col_seq;
-    const open = this.openPoint;
-    if (open !== null && col > open.col) {
-      open.span = col - open.col;
-      this.openPoint = null;
-    }
+    const index = this.eventIndex(col);
+    if (this.eventCols[index] !== col) this.eventCols.splice(index, 0, col);
+    // Immediate chronological neighbours define a candle span even when a
+    // history page arrives behind the live edge or replays an existing bar.
+    const previous = this.points.get(this.eventCols[index - 1]);
+    if (previous !== undefined) previous.span = col - previous.col;
+    const next = this.eventCols[index + 1];
+    const span = next === undefined ? 1 : next - col;
     const buy = Number.isFinite(bar.vol_buy) ? Math.max(0, bar.vol_buy) : 0;
     const sell = Number.isFinite(bar.vol_sell) ? Math.max(0, bar.vol_sell) : 0;
     if (buy + sell <= 0) return;
     let point = this.points.get(col);
     if (point === undefined) {
-      point = { col, buy, sell, span: 1 };
+      point = { col, buy, sell, span };
       this.points.set(col, point);
     } else {
       point.buy = buy;
       point.sell = sell;
+      point.span = span;
     }
-    this.openPoint = point;
+  }
+
+  private eventIndex(col: number): number {
+    let lo = 0;
+    let hi = this.eventCols.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.eventCols[mid] < col) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  private *visiblePoints(lo: number, hi: number): Iterable<VolBarPoint> {
+    // Include the previous candle when its span crosses the left edge. Avoid
+    // visiting the entire resident history on every animation frame.
+    const end = this.eventIndex(hi + 1);
+    for (let i = Math.max(0, this.eventIndex(lo) - 1); i < end; i++) {
+      const point = this.points.get(this.eventCols[i]);
+      if (point !== undefined) yield point;
+    }
   }
 
   get size(): number {
@@ -170,12 +208,16 @@ export class VolBars {
     for (const seq of this.points.keys()) {
       if (seq < lo || seq > hi) this.points.delete(seq);
     }
+    this.eventCols.splice(this.eventIndex(hi + 1));
+    this.eventCols.splice(0, this.eventIndex(lo));
   }
 
   /** Drop every stored column (context loss / go-live re-seed / test reset). */
   reset(): void {
     this.points.clear();
-    this.openPoint = null;
+    this.eventCols.length = 0;
+    this.cap = 0;
+    this.bucketWidth = 0;
   }
 
   /** Volume at a column (for tests / readouts), or null when absent. */
@@ -185,12 +227,12 @@ export class VolBars {
 
   /**
    * Draw the strip: bottom-anchored bars, one per visible time bucket, heights
-   * normalized to the visible p90 with a sqrt lift (Bookmap auto-contrast +
-   * upper cutoff; see VOLBAR_CAP_PERCENTILE). Nothing is drawn for empty
+   * normalized to a fixed p90 calibration with a sqrt lift and upper cutoff
+   * (see VOLBAR_CAP_PERCENTILE). Nothing is drawn for empty
    * buckets or when no visible column carries a split — the heatmap shows
    * through unchanged.
    */
-  draw(frame: OverlayFrame): void {
+  draw(frame: OverlayFrame, stripH = volumeStripHeight(frame.gm.dims.cssH)): void {
     const { gm, text } = frame;
     if (this.points.size === 0) return;
     const range = visibleColRange(gm.view, frame.resident);
@@ -198,11 +240,16 @@ export class VolBars {
     const span = range.hi - range.lo + 1;
     if (!(span > 0)) return;
 
-    // One bucket per visible column, but never more than one per canvas pixel:
-    // zoomed-out views aggregate per pixel (O(canvas width)), zoomed-in views
+    // One bucket per column when zoomed in; zoomed-out views aggregate at
+    // approximately pixel granularity (O(canvas width)), zoomed-in views
     // keep per-column bars (Bookmap's histogram granularity).
     const cssW = Math.max(1, Math.floor(gm.dims.cssW));
-    const buckets = Math.max(1, Math.min(span, cssW));
+    // Anchor buckets to absolute time columns, never to the moving viewport.
+    // A power-of-two width keeps the grouping fixed throughout a time glide.
+    const bucketWidth = 2 ** Math.max(0, Math.ceil(Math.log2(gm.view.colScale / cssW)));
+    const lo = Math.floor(range.lo / bucketWidth) * bucketWidth;
+    const hi = (Math.floor(range.hi / bucketWidth) + 1) * bucketWidth - 1;
+    const buckets = (hi - lo + 1) / bucketWidth;
     let buy = this.buyScratch;
     let sell = this.sellScratch;
     if (buy.length < buckets) {
@@ -212,35 +259,39 @@ export class VolBars {
       buy.fill(0, 0, buckets);
       sell.fill(0, 0, buckets);
     }
-    const max = scatterVolumes(this.points.values(), range.lo, range.hi, buy, sell);
+    const max = scatterVolumes(this.visiblePoints(lo, hi), lo, hi, buy, sell,
+      buckets, frame.resident?.oldest, frame.resident?.newest);
     if (max <= 0) return;
 
-    // Auto-contrast reference: the p90 of the VISIBLE nonzero bucket totals
-    // (Bookmap follows the visible distribution; linear-vs-max crushed live
+    // Calibration reference: the p90 of the visible nonzero bucket totals
+    // (linear-vs-max crushed live
     // BTC's median bar to ~0.2% of the strip). Computed on the reused scratch —
     // zeros sort to the front, the nonzero tail carries the percentile.
-    let totals = this.totalScratch;
-    if (totals.length < buckets) this.totalScratch = totals = new Float64Array(buckets);
-    let nonzero = 0;
-    for (let b = 0; b < buckets; b++) {
-      const t = buy[b] + sell[b];
-      totals[b] = t;
-      if (t > 0) nonzero++;
+    if (this.cap <= 0 || this.bucketWidth !== bucketWidth) {
+      let totals = this.totalScratch;
+      if (totals.length < buckets) this.totalScratch = totals = new Float64Array(buckets);
+      let nonzero = 0;
+      for (let b = 0; b < buckets; b++) {
+        const t = buy[b] + sell[b];
+        totals[b] = t;
+        if (t > 0) nonzero++;
+      }
+      totals.subarray(0, buckets).sort();
+      const rank = Math.ceil(VOLBAR_CAP_PERCENTILE * nonzero) - 1;
+      const targetCap = totals[buckets - nonzero + rank];
+      if (!(targetCap > 0)) return;
+      this.cap = targetCap;
     }
-    totals.subarray(0, buckets).sort();
-    const rank = Math.ceil(VOLBAR_CAP_PERCENTILE * nonzero) - 1;
-    const cap = totals[buckets - nonzero + rank];
-    if (!(cap > 0)) return;
+    // Calibrate once per aggregation width. Camera scrolling and new forming
+    // volume never rescale already completed bars, even gradually.
+    this.bucketWidth = bucketWidth;
+    const cap = this.cap;
 
-    const xLo = gm.cssX(range.lo);
-    const xHi = gm.cssX(range.hi + 1);
+    const xLo = gm.cssX(lo);
+    const xHi = gm.cssX(hi + 1);
     const bw = (xHi - xLo) / buckets;
     if (!(bw > 0)) return;
 
-    const stripH = Math.max(
-      VOLBAR_MIN_STRIP_PX,
-      Math.min(VOLBAR_MAX_STRIP_PX, gm.dims.cssH * VOLBAR_HEIGHT_FRAC),
-    );
     // Hairline gaps only once bars are wide enough to need them; when a bucket
     // is ~1 px the bars stay contiguous (barcode-free by construction — the
     // strip is ink, not hairlines floating in a void).
@@ -257,8 +308,13 @@ export class VolBars {
       // instead of a floor of 1-px whiskers; the p90 clamp keeps the top flat
       // like Bookmap's upper cutoff (values above `cap` all reach full height).
       const h = Math.max(VOLBAR_MIN_PX, Math.sqrt(Math.min(1, total / cap)) * stripH);
-      const x = xLo + (b + 0.5) * bw;
-      text.line(x, yBase, x, yBase - h, color, barW, VOLBAR_ALPHA);
+      // Use the same absolute-column transform as PriceLine's vertex, rather
+      // than reconstructing a position from the visible range's two edges.
+      const x = gm.cssX(lo + (b + 0.5) * bucketWidth);
+      // A stroke uses the text layer's hairline snapping at <=1px and makes
+      // scrolling bars jump between pixels. Filled rectangles retain the exact
+      // camera transform and have no stroke cap/join state to inherit.
+      text.rect(x - barW / 2, yBase - h, barW, h, color, VOLBAR_ALPHA);
     }
   }
 }

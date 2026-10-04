@@ -32,11 +32,12 @@ import { PriceLine } from './priceLine';
 import { Profile } from './profile';
 import { Cvd } from './cvd';
 import { Vwap } from './vwap';
-import { VolBars } from './volbars';
+import { VolBars, volumeStripHeight } from './volbars';
+import { GexOverlay } from './gexLevels';
 import { TextLayer } from '../textLayer';
 import type { HeatmapView } from '../heatmap';
 import { rowToPrice as scaleRowToPrice } from '../priceScale';
-import type { BarColumn, BBO, Marker, Trade } from '../../proto/types';
+import type { BarColumn, BBO, Marker, Trade, GexLevelUpdate } from '../../proto/types';
 
 /** Everything one overlay frame needs from the renderer. */
 export interface OverlayDrawContext {
@@ -63,6 +64,7 @@ export class OverlayManager {
   private solid: SolidBatch;
   private points: PointBatch;
   private readonly text: TextLayer;
+  private readonly volumeText: TextLayer;
   private priceAxis: TextLayer | null = null;
   private timeAxis: TextLayer | null = null;
 
@@ -79,6 +81,7 @@ export class OverlayManager {
   /** Traded-volume bars along the chart's bottom edge (Bookmap H7, F26):
    *  bar-derived like CVD but drawn IN the chart, on the shared text layer. */
   private readonly volumeBars = new VolBars();
+  private readonly gexLevels = new GexOverlay();
 
   private visibility: OverlayVisibility = { ...DEFAULT_OVERLAY_VISIBILITY };
 
@@ -86,10 +89,16 @@ export class OverlayManager {
   private channelBbo: BboState | null = null;
   private hasChannelBbo = false;
 
-  constructor(gl: WebGL2RenderingContext, glCanvas: HTMLCanvasElement) {
+  constructor(gl: WebGL2RenderingContext, private readonly glCanvas: HTMLCanvasElement) {
     this.solid = new SolidBatch(gl);
     this.points = new PointBatch(gl);
     this.text = TextLayer.over(glCanvas);
+    this.text.canvas.style.height = '';
+    this.volumeText = TextLayer.over(glCanvas);
+    const canvas = this.volumeText.canvas;
+    canvas.className = 'overlay-volume';
+    canvas.style.inset = 'auto 0 0';
+    canvas.style.zIndex = '1';
   }
 
   /**
@@ -182,8 +191,25 @@ export class OverlayManager {
     this.volumeBars.add(b);
   }
 
+  /** The actual price drawn by the last-price line, rather than a book extent. */
+  lastPrice(): number | null {
+    return this.priceLine.last()?.price ?? null;
+  }
+
   onMarker(m: Marker): void {
     this.markers.add(m);
+  }
+
+  onGex(g: GexLevelUpdate): void {
+    this.gexLevels.set(g);
+  }
+
+  setGex(g: GexLevelUpdate | null): void {
+    this.gexLevels.set(g);
+  }
+
+  getGex(): GexLevelUpdate | null {
+    return this.gexLevels.get();
   }
 
   /** Prune per-window overlay memory (col_seq-keyed maps) to the resident range. */
@@ -203,6 +229,7 @@ export class OverlayManager {
     this.cvd.reset();
     this.volumeBars.reset();
     this.markers.reset();
+    this.gexLevels.reset();
     this.resetCursor();
   }
 
@@ -230,6 +257,7 @@ export class OverlayManager {
    */
   clearInk(): void {
     this.text.clear();
+    this.volumeText.clear();
     this.priceAxis?.clear();
     this.timeAxis?.clear();
   }
@@ -273,7 +301,7 @@ export class OverlayManager {
   /** Whether any overlay could draw (used by the renderer to skip cheaply). */
   get anyVisible(): boolean {
     const v = this.visibility;
-    return v.bubbles || v.bbo || v.vwap || v.profile || v.markers || v.axes || v.price || v.volume;
+    return v.bubbles || v.bbo || v.vwap || v.profile || v.markers || v.axes || v.price || v.volume || (v.gex ?? true);
   }
 
   // --- draw ---------------------------------------------------------------------
@@ -297,6 +325,11 @@ export class OverlayManager {
     columnArrays: null as unknown as OverlayFrame['columnArrays'],
     mipLevel: 0,
   };
+  private readonly volumeGm = new GridMap(
+    { colOffset: 0, colScale: 0, rowOffset: 0, rowScale: 0 },
+    { drawW: 0, drawH: 0, cssW: 0, cssH: 0 }, null, null,
+  );
+  private readonly volumeDims: SurfaceDims = { drawW: 0, drawH: 0, cssW: 0, cssH: 0 };
   private readonly badgeOpts: Array<{ align: 'left' | 'right'; color: string; size: number; bg: string }> = [
     { align: 'left', color: '', size: 9, bg: OVERLAY.badgeBg },
     { align: 'left', color: '', size: 9, bg: OVERLAY.badgeBg },
@@ -318,10 +351,27 @@ export class OverlayManager {
     this.text.clear();
     if (this.visibility.axes) drawGridlines(this.text, this.gm);
 
-    // Volume strip FIRST among the data overlays: it is a bottom-edge band, so
-    // the price line / BBO / bubbles stay on top where the trace dips into it.
-    // Drawn after the gridlines so the bars are ink, not a hole in the grid.
-    if (this.visibility.volume) this.volumeBars.draw(frame);
+    // A separate, opaque bottom strip prevents changing heatmap/price ink
+    // from changing the apparent height or colour of a completed volume bar.
+    // Its x transform is the exact same camera; only its local y origin differs.
+    const stripH = volumeStripHeight(this.glCanvas.parentElement?.clientHeight || ctx.dims.cssH);
+    const volumeCanvas = this.volumeText.canvas;
+    volumeCanvas.style.display = this.visibility.volume ? '' : 'none';
+    const height = `${stripH}px`;
+    if (volumeCanvas.style.height !== height) volumeCanvas.style.height = height;
+    this.volumeText.syncSize(ctx.dims.cssW, stripH, ctx.dpr);
+    this.volumeText.clear();
+    if (this.visibility.volume) {
+      this.volumeText.rect(0, 0, ctx.dims.cssW, stripH, 'rgb(5, 8, 12)');
+      this.volumeText.rect(0, 0, ctx.dims.cssW, 1, OVERLAY.grid.css);
+      Object.assign(this.volumeDims, ctx.dims, { cssH: stripH, drawH: stripH * ctx.dpr });
+      this.volumeGm.refill(ctx.view, this.volumeDims, ctx.time, ctx.price);
+      frame.gm = this.volumeGm;
+      frame.text = this.volumeText;
+      this.volumeBars.draw(frame, stripH - 1);
+      frame.gm = this.gm;
+      frame.text = this.text;
+    }
 
     // GL overlays in the effective z-order (each flushes its own geometry →
     // z-order). BBO draws BEFORE the price line so the near-white last-price
@@ -334,6 +384,7 @@ export class OverlayManager {
       this.bbo.draw(frame);
     }
     if (this.visibility.price) this.priceLine.draw(frame);
+    if (this.visibility.gex ?? true) this.gexLevels.draw(frame);
     if (this.visibility.bubbles) this.bubbles.draw(frame);
     if (this.visibility.markers) this.markers.draw(frame);
 
@@ -419,6 +470,7 @@ export class OverlayManager {
     this.solid.dispose();
     this.points.dispose();
     this.text.dispose();
+    this.volumeText.dispose();
     // Gutter canvases are App-owned (not disposed here).
   }
 }

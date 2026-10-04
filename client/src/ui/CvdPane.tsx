@@ -156,7 +156,8 @@ export function CvdPane({ rendererRef }: CvdPaneProps): JSX.Element {
     const IDLE_MAX_MS = 250;
     const scheduleNext = (painted: boolean): void => {
       idleStep = painted ? 0 : Math.min(idleStep + 1, 8);
-      const wait = painted ? 0 : Math.min(IDLE_MAX_MS, 2 ** idleStep);
+      const maxWait = rendererRef.current?.following ? 16 : IDLE_MAX_MS;
+      const wait = painted ? 0 : Math.min(maxWait, 2 ** idleStep);
       if (wait === 0) {
         raf = requestAnimationFrame(draw);
       } else {

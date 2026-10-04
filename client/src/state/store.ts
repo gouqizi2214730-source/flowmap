@@ -17,6 +17,7 @@
  */
 
 import { create } from 'zustand';
+import { useIntelligenceStore } from './intelligenceStore';
 
 import {
   Connection,
@@ -172,6 +173,11 @@ export function setFlowMapTransport(overrides: Partial<ConnectionOptions>): void
 }
 
 function fanoutStream(msg: StreamMsg): void {
+  try {
+    useIntelligenceStore.getState().handleStreamMsg(msg);
+  } catch (err) {
+    console.error('intelligence store stream handler failed', err);
+  }
   for (const listener of streamListeners) {
     try {
       listener(msg);

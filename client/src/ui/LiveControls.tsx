@@ -73,11 +73,16 @@ export function LiveControls({
       const tl = r.timeline();
       let next = '';
       if (tl && tl.timeBase) {
+        // Whole-column lag only (see Timeline's poll): the eased draw edge's
+        // sub-column glide lag (gl/renderer stepLiveEdgeGlide) is not history
+        // lag and must not read as one.
         const lag = colsBehind(
           { colOffset: tl.viewStartCol, colScale: tl.viewEndCol - tl.viewStartCol, rowOffset: 0, rowScale: 1 },
           tl.newestSeq,
         );
-        if (lag > 0 && tl.timeBase.dtNs > 0) next = formatDurationCoarseNs(behindNs(lag, tl.timeBase.dtNs));
+        const behindCols = !r.following && lag >= 1 ? lag : 0;
+        if (behindCols > 0 && tl.timeBase.dtNs > 0)
+          next = formatDurationCoarseNs(behindNs(behindCols, tl.timeBase.dtNs));
       }
       setBehind((b) => (b === next ? b : next));
     }, POLL_MS);

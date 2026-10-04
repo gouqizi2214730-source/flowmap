@@ -50,6 +50,37 @@ import { detectDepthSeam, seamGapMarker, seamToleranceNs } from './seam';
 const PREFETCH_MARGIN_COLS = 64;
 /** Max columns per HistoryRequest (mirrors the server's HISTORY_MAX_COLS clamp). */
 export const HISTORY_PAGE_COLS = 256;
+/**
+ * Per-request frame budget. The HistoryResponse is ONE binary WS frame whose
+ * size is n_cols × rows × 2 channels × 4 bytes — 256 columns of a 4096-row grid
+ * is ~8.4 MB in a single message, and the vite dev proxy measurably DIES on
+ * frames that large (direct-to-server delivers the identical page instantly;
+ * through the proxy the socket errors server-side and the client times out at
+ * 30 s — verified 2026-09-20; the ceiling is load-dependent, ≥3 MB dies even at
+ * moderate concurrent traffic). The loader therefore sizes each page so the
+ * encoded frame stays under a budget ({@link pageColsForRows}); the renderer
+ * keeps full-size pages only on DIRECT transports (the injected Tauri sidecar
+ * origin), where the same 8.4 MB frame verified clean.
+ */
+export const HISTORY_FRAME_BUDGET_BYTES = 2 * 1024 * 1024;
+/**
+ * Frame budget for the SAME-ORIGIN dev transport (the vite ws proxy): smaller
+ * still, because its ceiling shrinks under concurrent live traffic. Pages are
+ * latency-bound locally (~one round-trip each), so small pages cost little.
+ */
+export const HISTORY_DEV_FRAME_BUDGET_BYTES = 512 * 1024;
+/**
+ * Page size (columns) that keeps one HistoryResponse frame under
+ * {@link HISTORY_FRAME_BUDGET_BYTES} for a grid of `rows` rows. Floor of 16 so
+ * a poisoned row count still makes progress; ceiling at HISTORY_PAGE_COLS.
+ * Pure; unit-tested (history.test.ts).
+ */
+export function pageColsForRows(rows: number, budgetBytes = HISTORY_FRAME_BUDGET_BYTES): number {
+  if (!Number.isFinite(rows) || rows <= 0) return HISTORY_PAGE_COLS;
+  const bytesPerCol = rows * 2 * 4; // bid+ask, f32
+  const byBudget = Math.floor(budgetBytes / bytesPerCol);
+  return Math.max(16, Math.min(HISTORY_PAGE_COLS, byBudget));
+}
 /** Keep the visible span resident: never fetch so many that the just-viewed
  *  columns get evicted in the same slide. Leave this much headroom. */
 const RESIDENT_HEADROOM_COLS = 32;
@@ -72,6 +103,21 @@ export interface HistoryLoaderDeps {
   budgetCols: () => number;
   /** Nominal column interval in ns for the before_t fallback (epoch dt_ns). */
   dtNs: () => number;
+  /**
+   * Current grid row count (renderer → ring). Drives the per-request page size
+   * (see {@link pageColsForRows}): one HistoryResponse frame is n_cols × rows ×
+   * 8 bytes, and transports with per-frame ceilings (the vite dev proxy) drop
+   * multi-MB messages. Optional — absent means "no rows known", which keeps the
+   * historical 256-column page.
+   */
+  rows?: () => number;
+  /**
+   * Transport page-size CEILING (columns). Same-origin dev (the vite ws proxy)
+   * caps this low via pageColsForRows(rows, HISTORY_DEV_FRAME_BUDGET_BYTES);
+   * direct transports (the injected Tauri sidecar origin) leave it at
+   * HISTORY_PAGE_COLS. Optional — defaults to the full wire ceiling.
+   */
+  maxPageCols?: () => number;
   /** Called after a batch splices (renderer marks dirty / refits). Optional. */
   onSpliced?: (resp: HistoryResponse) => void;
 }
@@ -112,6 +158,13 @@ export class HistoryLoader {
 
   constructor(deps: HistoryLoaderDeps) {
     this.deps = deps;
+  }
+
+  /** Current per-request page size (frame-budget + transport-ceiling aware). */
+  private pageCols(): number {
+    const rows = this.deps.rows ? this.deps.rows() : 0;
+    const cap = this.deps.maxPageCols ? this.deps.maxPageCols() : HISTORY_PAGE_COLS;
+    return Math.min(cap, pageColsForRows(rows));
   }
 
   /**
@@ -194,10 +247,11 @@ export class HistoryLoader {
       return;
     }
 
-    // Page size: leave the visible span resident so it doesn't evict itself.
-    // Must be an integer — the wire `n_cols` field is a u32.
+    // Page size: leave the visible span resident so it doesn't evict itself,
+    // capped by the per-frame transport budget (pageCols). Must be an integer —
+    // the wire `n_cols` field is a u32.
     const room = this.deps.budgetCols() - Math.ceil(v.span) - RESIDENT_HEADROOM_COLS;
-    const n = Math.max(1, Math.min(HISTORY_PAGE_COLS, Math.floor(room)));
+    const n = Math.max(1, Math.min(this.pageCols(), Math.floor(room)));
     void this.fetch(beforeT, n);
   }
 
@@ -305,7 +359,7 @@ export class HistoryLoader {
       let lastResp: HistoryResponse | null = null;
       for (let page = 0; page < BAND_REFETCH_MAX_PAGES && need >= lo; page++) {
         const want = need - lo + 1;
-        const n = Math.min(HISTORY_PAGE_COLS, want + BAND_REFETCH_SLACK);
+        const n = Math.min(this.pageCols(), want + BAND_REFETCH_SLACK);
         const resp = await this.deps.requestHistory(beforeT, n);
         const cols = resp.depth_cols
           .filter((c) => c.col_seq >= lo && c.col_seq <= need)
@@ -463,7 +517,7 @@ export class HistoryLoader {
         this.startOfHistoryFlag = true;
         return;
       }
-      const n = Math.max(1, Math.min(HISTORY_PAGE_COLS, Math.ceil(effTarget - range.count)));
+      const n = Math.max(1, Math.min(this.pageCols(), Math.ceil(effTarget - range.count)));
       await this.fetch(beforeT, n);
     }
   }

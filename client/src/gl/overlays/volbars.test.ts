@@ -8,7 +8,7 @@
  * recording text-stub, so no canvas/GL is needed.
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   VOLBAR_ALPHA,
@@ -64,8 +64,8 @@ function harness(
   const d: SurfaceDims = { drawW: 100, drawH: 100, cssW: 100, cssH: 100, ...dims };
   const gm = new GridMap(v, d, null as TimeMap | null, null as PriceMap | null);
   const text = {
-    line: (x0: number, y0: number, x1: number, y1: number, color: string, width: number, alpha: number) => {
-      calls.push({ x0, y0, x1, y1, color, width, alpha });
+    rect: (x: number, y: number, width: number, height: number, color: string, alpha: number) => {
+      calls.push({ x0: x + width / 2, y0: y + height, x1: x + width / 2, y1: y, color, width, alpha });
     },
   };
   const frame = { gm, text, resident } as unknown as OverlayFrame;
@@ -73,6 +73,18 @@ function harness(
 }
 
 describe('scatterVolumes (bucket math)', () => {
+  it('assigns every column to its own address without float-rounding collisions', () => {
+    for (const count of [100, 300, 367, 400, 447, 448, 449, 480, 481, 482, 1118]) {
+      const lo = 100_000;
+      const buy = new Float64Array(count);
+      const sell = new Float64Array(count);
+      const points = Array.from({ length: count }, (_, i) => pt(lo + i, i + 1, 0));
+      scatterVolumes(points, lo, lo + count - 1, buy, sell);
+      expect(Array.from(buy), `visible column count ${count}`)
+        .toEqual(Array.from({ length: count }, (_, i) => i + 1));
+    }
+  });
+
   it('maps columns to equal-width buckets and sums each side', () => {
     const buy = new Float64Array(5);
     const sell = new Float64Array(5);
@@ -180,6 +192,79 @@ describe('VolBars data store', () => {
 });
 
 describe('VolBars.draw (bottom strip pass)', () => {
+  it('keeps bucket volumes and colors fixed while the time camera glides', () => {
+    const vb = new VolBars();
+    for (let c = 0; c < 40; c++) vb.add(bar(c, c % 4 === 0 ? 10 : 1, c % 4 === 1 ? 20 : 0));
+    const a = harness({ colOffset: 4.1, colScale: 20 }, { cssW: 5 }, { oldest: 0, newest: 39 });
+    const b = harness({ colOffset: 5.3, colScale: 20 }, { cssW: 5 }, { oldest: 0, newest: 39 });
+    vb.draw(a.frame);
+    vb.draw(b.frame);
+    expect(b.calls).toHaveLength(a.calls.length);
+    for (let i = 0; i < a.calls.length; i++) {
+      expect(b.calls[i].y1).toBeCloseTo(a.calls[i].y1, 8);
+      expect(b.calls[i].color).toBe(a.calls[i].color);
+      expect(b.calls[i].x0 - a.calls[i].x0).toBeCloseTo(-1.2 * 5 / 20, 8);
+    }
+  });
+
+  it('uses only active scratch buckets after zoom changes their count', () => {
+    const vb = new VolBars();
+    const fresh = new VolBars();
+    for (let c = 0; c < 10; c++) {
+      vb.add(bar(c, c + 1, c % 2 ? 20 : 0));
+      fresh.add(bar(c, c + 1, c % 2 ? 20 : 0));
+    }
+    vb.draw(harness().frame); // allocates ten buckets
+    const reused = harness(undefined, { cssW: 5 });
+    const initial = harness(undefined, { cssW: 5 });
+    vb.draw(reused.frame); // only five buckets now
+    fresh.draw(initial.frame);
+    expect(reused.calls).toEqual(initial.calls);
+  });
+
+  it('does not reopen historical spans when older bars are replayed', () => {
+    const vb = new VolBars();
+    vb.add(bar(0, 16, 0));
+    vb.add(bar(16, 0, 0));
+    vb.add(bar(32, 1, 0));
+    vb.add(bar(0, 16, 0));
+    vb.add(bar(33, 1, 0));
+    expect(vb.valueAt(0)?.span).toBe(16);
+    expect(vb.valueAt(32)?.span).toBe(1);
+  });
+
+  it('keeps reconstructed spans correct when history arrives behind live data', () => {
+    const vb = new VolBars();
+    vb.add(bar(100, 1, 0));
+    vb.add(bar(0, 16, 0));
+    vb.add(bar(16, 0, 0));
+    vb.add(bar(32, 4, 0));
+    vb.add(bar(48, 0, 0));
+    expect(vb.valueAt(0)?.span).toBe(16);
+    expect(vb.valueAt(32)?.span).toBe(16);
+    vb.add(bar(101, 2, 0));
+    expect(vb.valueAt(100)?.span).toBe(1);
+    expect(vb.valueAt(0)?.span).toBe(16);
+  });
+
+  it('keeps completed bars unchanged when other volumes change', () => {
+    const clock = vi.spyOn(performance, 'now');
+    try {
+      clock.mockReturnValue(100);
+      const vb = new VolBars();
+      for (let c = 0; c < 10; c++) vb.add(bar(c, c === 0 ? 1 : 9, 0));
+      const a = harness();
+      vb.draw(a.frame);
+      for (let c = 1; c < 9; c++) vb.add(bar(c, 100, 0));
+      clock.mockReturnValue(116);
+      const b = harness();
+      vb.draw(b.frame);
+      expect(b.calls[0].y1).toBe(a.calls[0].y1);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
   it('draws nothing without data (no fake bars)', () => {
     const vb = new VolBars();
     const { frame, calls } = harness();
