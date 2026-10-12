@@ -33,6 +33,8 @@ workspace, and integration with supported public L2 sources.
 - **Fixes:** Switching instruments clears the previous profile. On slow
   displays, a rendered chart no longer remains hidden beneath the loading
   screen. `I` opens the indicator selector and `J` opens the research panel.
+  While viewing history, live price recentering keeps the selected time window
+  intact, and forward navigation can reach newly received history.
   Trade thresholds use source quantities; differing contract units are not
   presented as USD.
 - **Desktop packaging:** The Windows server process runs without a console

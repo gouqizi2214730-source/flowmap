@@ -34,6 +34,11 @@ Unreleased work sits on top of the newest listed commit.
   selected tag, validate package versions, use locked vendored dependencies,
   and publish the release notes after the required platform builds succeed.
 
+### Fixed
+
+- History navigation tracks newly received source time. Live price recentering
+  preserves the selected historical time window.
+
 See [release notes](docs/release-notes-1.5.0.md) for the user-facing summary.
 
 ## 2026-09-11 — campaign 4

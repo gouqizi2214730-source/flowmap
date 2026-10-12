@@ -1622,6 +1622,16 @@ export class Renderer {
       ring = this.ring!;
     }
 
+    if (col.col_seq >= this.newestSeq) {
+      this.newestSeq = col.col_seq;
+      this.newestT0Ns = col.t0_ns;
+    }
+    const range = ring.residentRange();
+    // Omitted live columns still extend navigable history. Refresh this before
+    // an epoch remap clamps the camera, so a price change cannot pull a manual
+    // time window back to the last column uploaded into the resident ring.
+    this.camera.setTimeWindow({ floor: 0, newest: this.newestSeq, resident: range });
+
     // Epoch change: the server moved p0, so a USER-OWNED price window (track /
     // off) is now pointing at different prices. Remap the camera + tracked row
     // through the two affines. `priceEpoch` only advances when the remap
@@ -1632,17 +1642,11 @@ export class Renderer {
       this.remapPriceEpoch(col.epoch);
     }
 
-    if (col.col_seq >= this.newestSeq) {
-      this.newestSeq = col.col_seq;
-      this.newestT0Ns = col.t0_ns;
-    }
-
     // Deep scroll-back gate (T8): when the user has panned back into history
     // (follow off) and this live column sits past the resident window's right
     // edge, DON'T write it — it would wrap-evict the region being viewed. The
     // column stays on the server and is recoverable on go-live; the resident
     // window keeps tracking the scrolled-back region the loader is filling.
-    const range = ring.residentRange();
     if (!this.camera.followTime && range !== null && col.col_seq > range.newest + 1) {
       return;
     }

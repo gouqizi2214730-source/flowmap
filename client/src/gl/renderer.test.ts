@@ -794,6 +794,45 @@ describe('Renderer (fake GL harness)', () => {
     r.dispose();
   });
 
+  it('manual forward pan can reach newly received columns while old history stays resident', () => {
+    const { r, store } = makeRenderer();
+    for (let seq = 0; seq <= 4; seq++) store.emit(makeCol(seq, true));
+    r.setFollowTime(false);
+    r.setViewForTest(0, 128, 2, 4);
+    const resident = r.residentRange();
+
+    store.emit(makeCol(1000, true));
+    expect(r.newestColSeq).toBe(1000);
+    expect(r.residentRange()).toEqual(resident);
+    expect(r.columnCacheForTest.has(1000)).toBe(false);
+    r.panColumnsForTest(900);
+    expect(r.viewSnapshot.colOffset).toBe(900);
+    expect(r.following).toBe(false);
+    r.dispose();
+  });
+
+  it('a live price epoch change preserves the manual time window during history reload', () => {
+    const { r, store } = makeRenderer();
+    for (let seq = 0; seq <= 4; seq++) store.emit(makeCol(seq, true));
+    r.setFollowTime(false);
+    store.emit(makeCol(1000, true));
+    r.setViewForTest(900, 64, 2, 4);
+    const before = r.viewSnapshot;
+    const resident = r.residentRange();
+    (store.state.epochs as Map<number, Record<string, unknown>>).set(1,
+      { epoch: 1, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 101, rows: ROWS });
+    store.state.gridEpoch = 1;
+
+    store.emit({ ...makeCol(1100, true), epoch: 1 });
+    pump(16);
+    expect(r.viewSnapshot.colOffset).toBe(before.colOffset);
+    expect(r.viewSnapshot.colScale).toBe(before.colScale);
+    expect(r.following).toBe(false);
+    expect(r.residentRange()).toEqual(resident);
+    expect(r.columnCacheForTest.has(1100)).toBe(false);
+    r.dispose();
+  });
+
   it('refetches a repaired skip band from history and splices the REAL columns', async () => {
     const { r, store } = makeRenderer();
     for (let s = 10; s <= 14; s++) store.emit(makeCol(s, true));
