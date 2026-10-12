@@ -48,7 +48,7 @@ interface CanvasStats {
 test('deep scroll-back: LRU residency + history backfill + context-loss recovery', async ({
   page,
 }) => {
-  test.setTimeout(150_000);
+  test.setTimeout(360_000);
 
   const consoleErrors: string[] = [];
   page.on('console', (m) => {
@@ -69,6 +69,8 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
       return (
         live.store.getState().status === 'live' &&
         range !== null &&
+        range.count === r.residentBudgetCols &&
+        !r.historyStats().inFlight &&
         r.newestColSeq > overrun &&
         r.residentBudgetCols === 512
       );
@@ -96,7 +98,8 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
       return { thermal, checksum };
     }, THERMAL_LUMA);
 
-  // --- Baseline: following the live edge, within budget, no backfill yet. -----
+  // --- Baseline: a full ring follows live without further history requests. --
+  // A warm SIM-DEMO session may need one startup page before its ring fills.
   const baseline = await page.evaluate(() => {
     const r = (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer;
     return {
@@ -110,7 +113,17 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
   expect(baseline.budget).toBe(BUDGET);
   expect(baseline.range.count, 'resident window within budget').toBeLessThanOrEqual(BUDGET);
   expect(baseline.range.oldest, 'older columns must have been evicted').toBeGreaterThan(0);
-  expect(baseline.history.requestCount, 'no backfill while following live').toBe(0);
+  expect(baseline.following, 'baseline follows the live edge').toBe(true);
+  expect(baseline.history.inFlight, 'startup history has finished').toBe(false);
+  await page.waitForFunction(newest => window.__flowmapLive!.renderer.newestColSeq >= newest + 32,
+    baseline.newest, { timeout: 30_000 });
+  const following = await page.evaluate(() => {
+    const r = window.__flowmapLive!.renderer;
+    return { following: r.following, history: r.historyStats() };
+  });
+  expect(following.following).toBe(true);
+  expect(following.history.inFlight).toBe(false);
+  expect(following.history.requestCount, 'no backfill while a full ring follows live').toBe(baseline.history.requestCount);
 
   // --- (A) Pan LEFT into the evicted history → backfill must fire. ------------
   const panInfo = await page.evaluate(() => {
@@ -134,13 +147,13 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
 
   // Wait for the backfill: a request fired AND the target column is now resident.
   await page.waitForFunction(
-    (target) => {
+    ({ target, requests }) => {
       const r = (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer;
       const h = r.historyStats();
-      return h.requestCount > 0 && r.isResidentFullRes(target);
+      return h.requestCount > requests && r.isResidentFullRes(target);
     },
-    panInfo.targetCenter,
-    { timeout: 30_000 },
+    { target: panInfo.targetCenter, requests: baseline.history.requestCount },
+    { timeout: 90_000 },
   );
 
   const afterBackfill = await page.evaluate((target) => {
@@ -154,7 +167,7 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
   }, panInfo.targetCenter);
 
   // A HistoryRequest fired and the backfilled column landed at its true col_seq.
-  expect(afterBackfill.history.requestCount, 'HistoryRequest must fire on scroll-back').toBeGreaterThan(0);
+  expect(afterBackfill.history.requestCount, 'HistoryRequest must fire on scroll-back').toBeGreaterThan(baseline.history.requestCount);
   expect(afterBackfill.targetResident, 'backfilled column resident full-res').toBe(true);
   // The resident window slid backward but stayed within the full-res budget.
   expect(afterBackfill.range.count, 'residency stays within budget').toBeLessThanOrEqual(BUDGET);
@@ -192,7 +205,7 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
     const r = window.__flowmapLive!.renderer;
     const range = r.residentRange();
     return range && range.oldest <= start && range.newest >= end && r.validFromSeq <= start && !r.historyStats()?.inFlight;
-  }, zoomState, { timeout: 30_000 });
+  }, zoomState, { timeout: 90_000 });
   const reqAfterZoom = await page.evaluate(
     () => (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer.historyStats().requestCount,
   );
@@ -215,7 +228,7 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
     const r = window.__flowmapLive!.renderer;
     const range = r.residentRange();
     return range && range.oldest <= start && range.newest >= end && r.validFromSeq <= start && !r.historyStats()?.inFlight;
-  }, forward, { timeout: 30_000 });
+  }, forward, { timeout: 90_000 });
   expect((await readStats()).thermal).toBeGreaterThan(MIN_THERMAL_PIXELS);
 
   // --- (D) WebGL context loss → recover and render again. ---------------------

@@ -228,9 +228,11 @@ test('deep time zoom-out selects the SUM mip by the COLUMN axis and keeps liquid
 }) => {
   test.setTimeout(200_000);
   const consoleErrors = collectErrors(page);
+  // Keep 16+ columns/pixel within the raw ring, below overview activation.
+  await page.setViewportSize({ width: 640, height: 720 });
   await waitForLive(page, 512);
 
-  const result = await page.evaluate(async () => {
+  const configured = await page.evaluate(() => {
     const r = (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer;
     const canvas = document.querySelector('canvas#gl') as HTMLCanvasElement;
     const gl = canvas.getContext('webgl2') as WebGL2RenderingContext;
@@ -240,33 +242,38 @@ test('deep time zoom-out selects the SUM mip by the COLUMN axis and keeps liquid
     // Freeze both axes: this is the "user zoomed time out" state.
     r.setFollowTime(false);
     r.setPriceFollow('off');
+    r.zoomPriceForTest(0.05);
     const before = { level: r.currentMipLevel, view: r.viewSnapshot };
 
     // Drive the REAL time-zoom camera op synchronously until the mip rises.
     let guard = 0;
-    while (r.currentMipLevel < 2 && guard++ < 60) r.zoomTimeForTest(1.5);
-    let level = r.currentMipLevel;
+    while (r.viewSnapshot.colScale / dbw < 16 && guard++ < 60) r.zoomTimeForTest(1.5);
 
-    if (level < 2) {
+    if (r.viewSnapshot.colScale / dbw < 16 || r.viewSnapshot.colScale > r.residentBudgetCols) {
       // Deterministic fallback through the same view uniforms: a column span
       // 18× the device width forces the column axis to level 2 even when the
       // camera clamp walk is slow on a loaded box.
       const range = r.residentRange();
-      const colScale = 18 * dbw;
+      const colScale = Math.min(18 * dbw, r.residentBudgetCols);
       const center = (range.oldest + range.newest + 1) / 2;
       r.setViewForTest(center - colScale / 2, colScale, before.view.rowOffset, before.view.rowScale);
-      level = r.currentMipLevel;
     }
+    // A zoom at the camera limit also fits price; restore the narrow price
+    // frame so the final selected mip can only be driven by time.
+    const view = r.viewSnapshot;
+    r.setViewForTest(view.colOffset, view.colScale, before.view.rowOffset, before.view.rowScale);
+    return { drawBefore: r.drawCount, levelBefore: before.level, dbw, dbh };
+  });
+  await page.waitForFunction(drawBefore => {
+    const r = window.__flowmapLive!.renderer;
+    return r.drawCount > drawBefore && r.normalizerForTest.settled;
+  }, configured.drawBefore, { timeout: 45_000 });
 
-    // Condition wait: let the frame draw and the viewport norm settle.
-    await new Promise<void>((resolve) => {
-      let frames = 0;
-      const tick = () => {
-        if ((r.normalizerForTest.settled && r.drawCount > 0) || ++frames >= 90) resolve();
-        else requestAnimationFrame(tick);
-      };
-      requestAnimationFrame(tick);
-    });
+  const result = await page.evaluate(async (configured) => {
+    // @ts-expect-error Vite production module
+    const { projectedRowsPerPixel } = await import('/src/gl/priceProjection.ts');
+    const r = (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer;
+    const canvas = document.querySelector('canvas#gl') as HTMLCanvasElement;
 
     // Pixel probe: count non-background (thermal) pixels over the whole canvas.
     const off = document.createElement('canvas');
@@ -281,14 +288,17 @@ test('deep time zoom-out selects the SUM mip by the COLUMN axis and keeps liquid
     }
 
     return {
-      levelBefore: before.level,
-      level,
-      rowFoot: before.view.rowScale / dbh,
-      colFoot: r.viewSnapshot.colScale / dbw,
+      level: r.currentMipLevel,
+      rowFoot: projectedRowsPerPixel(r.viewSnapshot, r.heatmap.priceScale, configured.dbh),
+      colFoot: r.viewSnapshot.colScale / configured.dbw,
+      span: r.viewSnapshot.colScale,
+      budget: r.residentBudgetCols,
+      overview: r.overviewStats(),
+      drawCount: r.drawCount,
       thermal,
       range: r.residentRange(),
     };
-  });
+  }, configured);
 
   mkdirSync(ARTIFACT_DIR, { recursive: true });
   const shot = await page.locator('canvas#gl').screenshot();
@@ -297,6 +307,9 @@ test('deep time zoom-out selects the SUM mip by the COLUMN axis and keeps liquid
   // The price footprint alone would select level 0 — the rise is column-driven.
   expect(result.rowFoot, `row footprint ${result.rowFoot.toFixed(3)} rows/px`).toBeLessThan(4);
   expect(result.colFoot, `col footprint ${result.colFoot.toFixed(1)} cols/px`).toBeGreaterThanOrEqual(16);
+  expect(result.span, 'time zoom remains within full-resolution residency').toBeLessThanOrEqual(result.budget);
+  expect(result.overview, 'raw mip probe never activates coarse overview').toBeNull();
+  expect(result.drawCount, 'configured view was actually drawn').toBeGreaterThan(configured.drawBefore);
   expect(result.level, 'deep time zoom-out rose the SUM-mip level').toBeGreaterThanOrEqual(2);
   // And the resident liquidity is still painted through the mips, not a void.
   expect(result.thermal, `thermal px at level ${result.level}`).toBeGreaterThan(50);

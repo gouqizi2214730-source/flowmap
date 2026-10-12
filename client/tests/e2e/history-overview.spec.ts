@@ -50,7 +50,8 @@ async function waitForOverview(page: Page, minimumBuckets = 30): Promise<void> {
     return plan?.stride === stride && plan.lo === lo && plan.hi === hi &&
       !stats.inFlight && stats.error === null && stats.buckets >= minimum && stats.resident &&
       stats.progress.loaded === stats.progress.total;
-  }, minimumBuckets, { timeout: 45_000 }); } catch (error) {
+  // SwiftShader can spend >45 s yielding a complete, healthy 480-bucket load.
+  }, minimumBuckets, { timeout: 90_000 }); } catch (error) {
     const diagnostics = await page.evaluate(() => {
       const live = window.__flowmapLive!;
       const r = live.renderer, s = live.store.getState();
@@ -78,7 +79,7 @@ async function waitForOverview(page: Page, minimumBuckets = 30): Promise<void> {
 }
 
 test('whole history uses bounded coarse detail without cutting time, price or old heatmap', async ({ page }) => {
-  test.setTimeout(210_000);
+  test.setTimeout(360_000);
   const errors: string[] = [];
   page.on('framenavigated', frame => { if (frame === page.mainFrame()) console.log('history overview navigation', frame.url()); });
   page.on('pageerror', error => errors.push(error.message));
@@ -226,7 +227,7 @@ test('whole history uses bounded coarse detail without cutting time, price or ol
     return requestStart;
   });
   await page.waitForFunction(() => window.__flowmapLive!.renderer.isResidentFullRes(64) &&
-    window.__flowmapLive!.renderer.isResidentFullRes(319), undefined, { timeout: 30_000 });
+    window.__flowmapLive!.renderer.isResidentFullRes(319), undefined, { timeout: 90_000 });
   expect(Math.min(...await heatmapThirds(page))).toBeGreaterThan(100);
   const oldView = await page.evaluate(() => window.__flowmapLive!.renderer.viewSnapshot);
   expect(oldView.colScale).toBe(256);
