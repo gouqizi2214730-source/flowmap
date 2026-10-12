@@ -13,9 +13,12 @@ Unreleased work sits on top of the newest listed commit.
   aggregation cache for inspecting data beyond the live RAM/GPU ring.
 - Orderflow, Analysis, and Focus workspace layouts with resizable panels,
   quote-age readouts, time-window controls, and 5/30/60-second trade-flow totals.
-- FLOW, GOV, DOCS, GEO, and MACRO intelligence panels from the previously
-  unpublished `9d3d281` source commit. Demo fixtures are restricted to SIM-DEMO;
+- Previously unpublished FLOW, GOV, DOCS, GEO, and MACRO intelligence panels.
+  Demo fixtures are restricted to SIM-DEMO;
   other instruments show unavailable states when no connected source supplied data.
+- GEX model readouts in millions of dollars per 100% relative spot move, with
+  the fixed call-positive/put-negative assumption stated and gamma flip shown
+  only when a sign crossing exists.
 - Vendored Crocodile engine integration for supported public L2 sources,
   including the selected connector's depth mode and book-update counters.
 
