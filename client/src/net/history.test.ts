@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { HistoryLoader, pageColsForRows, HISTORY_PAGE_COLS, type HistoryLoaderDeps } from './history';
-import type { ResidentRange } from '../gl/tileRing';
+import { Residency, type ResidentRange } from '../gl/tileRing';
 import { MODE_L2, MsgType, type DepthColumn, type HistoryResponse, type Marker } from '../proto/types';
 
 /**
@@ -84,6 +84,119 @@ function harness(
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
+/** The actual bounded modulo window, with slot identities checked like texels. */
+function residentHarness(start = 1000, budget = 256, pageCols = 64) {
+  const residency = new Residency(budget, budget, 1);
+  const slots = new Map<number, number>();
+  const requests: { before_t: bigint; n: number }[] = [];
+  const spliced: number[] = [];
+  const latest = { colSeq: start + budget - 1, t0Ns: BigInt((start + budget - 1) * DT) };
+  let completed = 0;
+  const write = (colSeq: number) => {
+    slots.set(colSeq % budget, colSeq);
+    residency.note(colSeq);
+  };
+  for (let s = start; s <= latest.colSeq; s++) write(s);
+  const loader = new HistoryLoader({
+    residentRange: () => residency.range(),
+    validFromSeq: () => residency.validFromSeq(),
+    latestColumn: () => latest,
+    budgetCols: () => budget,
+    maxPageCols: () => pageCols,
+    dtNs: () => DT,
+    requestHistory: async (before_t, n) => {
+      requests.push({ before_t, n });
+      const last = Math.floor(Number(before_t) / DT) - 1;
+      const depth_cols = Array.from({ length: n }, (_, i) => last - n + 1 + i)
+        .filter(s => s >= 0 && s <= latest.colSeq)
+        .map(s => makeCol(s, BigInt(s * DT)));
+      return { type: MsgType.HISTORY_RESP, req_id: requests.length, epoch: 0,
+        oldest_available_t_ns: 0n, depth_cols, bar_cols: [], markers: [], big_trades: [] };
+    },
+    spliceColumn: col => { spliced.push(col.col_seq); write(col.col_seq); },
+    onSpliced: () => { completed++; },
+  });
+  loader.noteColumn(start, BigInt(start * DT));
+  loader.noteColumn(latest.colSeq, latest.t0Ns);
+  return {
+    loader, residency, requests, spliced, latest,
+    completed: () => completed,
+    advance: (seq: number) => {
+      latest.colSeq = seq;
+      latest.t0Ns = BigInt(seq * DT);
+      write(seq);
+      loader.noteColumn(seq, latest.t0Ns);
+    },
+    assertValid: () => {
+      const range = residency.range()!;
+      expect(range.count).toBeLessThanOrEqual(budget);
+      for (let s = residency.validFromSeq(); s <= range.newest; s++) {
+        expect(slots.get(s % budget), `slot for valid column ${s}`).toBe(s);
+      }
+    },
+  };
+}
+
+async function fillVisible(
+  h: ReturnType<typeof residentHarness>, view: { leftCol: number; span: number; level: number },
+) {
+  for (let page = 0; page < 32; page++) {
+    const before = h.loader.requestCount;
+    h.loader.ensureVisible(view);
+    await flush();
+    h.assertValid();
+    if (h.loader.requestCount === before) return;
+  }
+  throw new Error('visible history did not settle within its bounded pages');
+}
+
+describe('history upload frame budget', () => {
+  function scheduledPage() {
+    const spliced: number[] = [];
+    const pending: Array<() => void> = [];
+    let completed = 0;
+    const loader = new HistoryLoader({
+      residentRange: () => ({ oldest: 100, newest: 199, count: 100 }),
+      budgetCols: () => 512, dtNs: () => DT,
+      requestHistory: async () => ({ type: MsgType.HISTORY_RESP, req_id: 1,
+        epoch: 0, oldest_available_t_ns: 0n,
+        depth_cols: Array.from({length:24}, (_,i) => makeCol(76+i, BigInt((76+i)*DT))),
+        bar_cols: [], markers: [], big_trades: [] }),
+      spliceColumn: c => { spliced.push(c.col_seq); },
+      yieldToFrame: () => new Promise<void>(resolve => { pending.push(resolve); }),
+      onSpliced: () => { completed++; },
+    });
+    loader.noteColumn(100, BigInt(100*DT));
+    loader.ensureVisible({leftCol:0, span:80, level:0});
+    return {loader, spliced, pending, completed: () => completed};
+  }
+
+  it('lets display/live work run between small ordered upload chunks', async () => {
+    const h = scheduledPage();
+    await flush();
+    expect(h.spliced).toEqual(Array.from({length:8}, (_,i) => 99-i));
+    expect(h.loader.inFlight).toBe(true);
+    expect(h.completed()).toBe(0);
+    h.pending.shift()!(); await flush();
+    expect(h.spliced).toHaveLength(16);
+    h.pending.shift()!(); await flush();
+    expect(h.spliced).toEqual(Array.from({length:24}, (_,i) => 99-i));
+    expect(h.completed()).toBe(1);
+    expect(h.loader.inFlight).toBe(false);
+  });
+
+  it('cancels a yielded old-session page before it can write the next chunk', async () => {
+    const h = scheduledPage();
+    await flush();
+    h.loader.reset();
+    h.pending.shift()!(); await flush();
+    expect(h.spliced).toHaveLength(8);
+    expect(h.completed()).toBe(0);
+    expect(h.loader.inFlight).toBe(false);
+    expect(h.loader.error).toBeNull();
+  });
+});
+
 describe('HistoryLoader (T8 backfill)', () => {
   it('fires a HistoryRequest when the view pans left past the resident window', async () => {
     const h = harness(/* oldestAvailable */ -1_000_000n); // server has lots older
@@ -115,11 +228,13 @@ describe('HistoryLoader (T8 backfill)', () => {
     expect(h.loader.requestCount).toBe(1);
   });
 
-  it('does NOT backfill on deep zoom-out (mip level-2 engaged)', () => {
+  it('backfills a fitting viewport at mip level 2', async () => {
     const h = harness(-1_000_000n);
     h.loader.noteColumn(100, BigInt(100 * DT));
     h.loader.ensureVisible({ leftCol: 0, span: 80, level: 2 });
-    expect(h.loader.requestCount).toBe(0);
+    expect(h.loader.requestCount).toBe(1);
+    await flush();
+    expect(h.spliced).toContain(0);
     expect(h.loader.inFlight).toBe(false);
   });
 
@@ -130,12 +245,21 @@ describe('HistoryLoader (T8 backfill)', () => {
     expect(h.loader.requestCount).toBe(0);
   });
 
-  it('does NOT fire while still comfortably inside the resident window', () => {
+  it('does NOT fire while the visible left edge is already resident', () => {
     const h = harness(-1_000_000n);
     h.loader.noteColumn(100, BigInt(100 * DT));
-    // leftCol 90 is within the prefetch margin of oldest(100) → no fetch yet.
-    h.loader.ensureVisible({ leftCol: 90, span: 40, level: 0 });
+    h.loader.ensureVisible({ leftCol: 110, span: 40, level: 0 });
     expect(h.loader.requestCount).toBe(0);
+  });
+
+  it('does not fight live eviction when a full ring glides just behind its edge', () => {
+    const h = harness(-1_000_000n, 0, 100);
+    h.loader.noteColumn(100, BigInt(100 * DT));
+    h.loader.ensureVisible({ leftCol: 99, span: 100, level: 2, following: true });
+    expect(h.loader.requestCount).toBe(0);
+    // Manual history still requests that exact same missing column.
+    h.loader.ensureVisible({ leftCol: 99, span: 100, level: 2, following: false });
+    expect(h.loader.requestCount).toBe(1);
   });
 
   it('latches start-of-history when the server has nothing older', async () => {
@@ -215,6 +339,268 @@ describe('HistoryLoader (T8 backfill)', () => {
   });
 });
 
+describe('HistoryLoader — bounded history navigation', () => {
+  it('uses the same missing-column request at every mip level without a timer gate', async () => {
+    const requests = [];
+    for (const level of [0, 1, 2]) {
+      const h = residentHarness();
+      h.loader.ensureVisible({ leftCol: 900, span: 80, level });
+      expect(h.loader.inFlight).toBe(true);
+      await flush();
+      requests.push(h.requests);
+    }
+    expect(requests[1]).toEqual(requests[0]);
+    expect(requests[2]).toEqual(requests[0]);
+    expect(requests[0]).toEqual([{ before_t: BigInt(1000 * DT), n: 64 }]);
+  });
+
+  it('loads a full-budget viewport in bounded pages and stops exactly at its left edge', async () => {
+    const h = residentHarness();
+    const view = { leftCol: 500, span: 256, level: 2 };
+    await fillVisible(h, view);
+    expect(h.residency.range()).toEqual({ oldest: 500, newest: 755, count: 256 });
+    expect(h.residency.validFromSeq()).toBe(500);
+    expect(h.requests.map(r => r.n)).toEqual([64, 64, 64, 64, 64, 64, 64, 52]);
+    expect(h.completed()).toBe(8);
+    h.loader.ensureVisible(view);
+    expect(h.loader.requestCount).toBe(8);
+  });
+
+  it('clips a page so the requested right edge cannot be overwritten', async () => {
+    const h = residentHarness(1000, 256, 256);
+    await fillVisible(h, { leftCol: 900, span: 240, level: 2 });
+    expect(h.requests).toEqual([{ before_t: BigInt(1000 * DT), n: 116 }]);
+    expect(h.residency.range()).toEqual({ oldest: 884, newest: 1139, count: 256 });
+    expect(h.residency.isResident(1139)).toBe(true);
+  });
+
+  it('repairs a one-column pan of a full-budget view without leaving a gap or looping', async () => {
+    const h = residentHarness();
+    await fillVisible(h, { leftCol: 999, span: 256, level: 2 });
+    expect(h.requests).toEqual([{ before_t: BigInt(1000 * DT), n: 1 }]);
+    expect(h.residency.range()).toEqual({ oldest: 999, newest: 1254, count: 256 });
+  });
+
+  it('refills invalid slots inside a claimed window after a large live jump', async () => {
+    const h = residentHarness();
+    h.advance(2000);
+    expect(h.residency.range()!.oldest).toBe(1745);
+    expect(h.residency.validFromSeq()).toBe(2000);
+    await fillVisible(h, { leftCol: 1900, span: 80, level: 2 });
+    expect(h.requests[0].before_t).toBe(BigInt(2000 * DT));
+    expect(h.requests).toHaveLength(2);
+    expect(h.residency.validFromSeq()).toBe(1872);
+    expect(h.residency.range()!.newest).toBe(2000);
+  });
+
+  it('can pan right after exhausting older history, then reload the missing left part', async () => {
+    const h = residentHarness();
+    await fillVisible(h, { leftCol: 0, span: 256, level: 2 });
+    expect(h.loader.startOfHistory).toBe(true);
+    expect(h.residency.range()).toEqual({ oldest: 0, newest: 255, count: 256 });
+    const oldRequests = h.requests.length;
+    await fillVisible(h, { leftCol: 800, span: 256, level: 2 });
+    expect(h.requests[oldRequests]).toEqual({ before_t: BigInt(1056 * DT), n: 64 });
+    expect(h.requests.length - oldRequests).toBe(4);
+    expect(h.residency.range()).toEqual({ oldest: 800, newest: 1055, count: 256 });
+    expect(h.residency.validFromSeq()).toBe(800);
+    expect(h.loader.startOfHistory).toBe(false);
+  });
+
+  it('clips right-side history requests to the latest actual source column', async () => {
+    const h = residentHarness();
+    await fillVisible(h, { leftCol: 0, span: 256, level: 0 });
+    const oldRequests = h.requests.length;
+    await fillVisible(h, { leftCol: 1200, span: 256, level: 2 });
+    expect(h.requests.slice(oldRequests)).toEqual([{ before_t: BigInt(1256 * DT), n: 56 }]);
+    expect(h.residency.range()!.newest).toBe(h.latest.colSeq);
+    expect(h.residency.validFromSeq()).toBe(1200);
+    expect(Math.max(...h.spliced)).toBe(1255);
+  });
+
+  it('eager backfill counts only valid columns after a live jump', async () => {
+    const h = residentHarness();
+    h.advance(2000);
+    await h.loader.prefetch(100);
+    h.assertValid();
+    expect(h.requests.map(r => r.n)).toEqual([64, 35]);
+    expect(h.residency.validFromSeq()).toBe(1901);
+    expect(h.residency.range()!.newest).toBe(2000);
+  });
+});
+
+describe('HistoryLoader — exact sequence navigation across restart clocks', () => {
+  const interval = 250_000_000n;
+  const restartDelay = 1_800_000_000_000n;
+  const clock = (seq: number) => 1_000_000_000_000n + BigInt(seq) * interval +
+    (seq >= 40_000 ? restartDelay : 0n);
+
+  function exactHarness(pageCols = 256) {
+    const budget = 256;
+    const residency = new Residency(budget, budget, 1);
+    const slots = new Map<number, number>();
+    const requests: { start: number; end: number; n: number }[] = [];
+    const spliced: number[] = [];
+    const latest = { colSeq: 60_255, t0Ns: clock(60_255) };
+    let active = true;
+    let held: (() => void) | null = null;
+    let holdNext = false;
+    let emptyNext = false;
+    const write = (seq: number) => {
+      slots.set(seq % budget, seq);
+      residency.note(seq);
+    };
+    for (let seq = 60_000; seq <= latest.colSeq; seq++) write(seq);
+    const loader = new HistoryLoader({
+      residentRange: () => residency.range(),
+      validFromSeq: () => residency.validFromSeq(),
+      latestColumn: () => latest,
+      budgetCols: () => budget,
+      dtNs: () => Number(interval),
+      maxPageCols: () => pageCols,
+      isActive: () => active,
+      requestHistory: async () => { throw new Error('an affine timestamp cannot locate this page'); },
+      requestSequence: async (start, end, n) => {
+        requests.push({ start, end, n });
+        if (holdNext) {
+          holdNext = false;
+          await new Promise<void>(resolve => { held = resolve; });
+        }
+        const depth_cols = emptyNext ? [] : Array.from({ length: end - start + 1 }, (_, i) =>
+          makeCol(start + i, clock(start + i)));
+        emptyNext = false;
+        return { type: MsgType.HISTORY_RESP, req_id: requests.length, epoch: 0,
+          oldest_available_t_ns: 0n, depth_cols, bar_cols: [], markers: [], big_trades: [] };
+      },
+      spliceColumn: col => { spliced.push(col.col_seq); write(col.col_seq); },
+    });
+    loader.noteColumn(60_000, clock(60_000));
+    loader.noteColumn(latest.colSeq, latest.t0Ns);
+    const assertValid = () => {
+      const range = residency.range()!;
+      expect(range.count).toBeLessThanOrEqual(budget);
+      for (let seq = residency.validFromSeq(); seq <= range.newest; seq++) {
+        expect(slots.get(seq % budget), `slot for ${seq}`).toBe(seq);
+      }
+    };
+    return { loader, residency, requests, spliced, latest, assertValid,
+      deactivate: () => { active = false; },
+      hold: () => { holdNext = true; },
+      release: () => { held?.(); },
+      empty: () => { emptyNext = true; },
+      advance: (seq: number) => {
+        latest.colSeq = seq; latest.t0Ns = clock(seq); write(seq); loader.noteColumn(seq, latest.t0Ns);
+      },
+    };
+  }
+
+  async function settle(h: ReturnType<typeof exactHarness>, leftCol: number, span = 256) {
+    for (let page = 0; page < 12; page++) {
+      const previous = h.requests.length;
+      h.loader.ensureVisible({ leftCol, span, level: 0 });
+      await flush();
+      h.assertValid();
+      if (h.requests.length === previous) return;
+    }
+    throw new Error('exact history walked beyond the requested viewport');
+  }
+
+  it('jumps directly from the live ring to raw columns 64..319 using one bounded page', async () => {
+    const h = exactHarness();
+    const guessedOldClock = h.latest.t0Ns + BigInt(319 - h.latest.colSeq) * interval;
+    expect(guessedOldClock - clock(319)).toBe(restartDelay);
+    await settle(h, 64);
+    expect(h.requests).toEqual([{ start: 64, end: 319, n: 256 }]);
+    expect(h.spliced).toEqual(Array.from({ length: 256 }, (_, i) => 319 - i));
+    expect(h.residency.range()).toEqual({ oldest: 64, newest: 319, count: 256 });
+    expect(h.loader.error).toBeNull();
+  });
+
+  it('uses only the four requested pages when transport budgets limit uploads to 64 columns', async () => {
+    const h = exactHarness(64);
+    await settle(h, 64);
+    expect(h.requests).toEqual([
+      { start: 256, end: 319, n: 64 }, { start: 192, end: 255, n: 64 },
+      { start: 128, end: 191, n: 64 }, { start: 64, end: 127, n: 64 },
+    ]);
+    expect(h.spliced).toHaveLength(256);
+    expect(h.residency.validFromSeq()).toBe(64);
+  });
+
+  it('returns to a distant newer region in ascending order and clips at the true source edge', async () => {
+    const h = exactHarness();
+    await settle(h, 64);
+    const oldCount = h.spliced.length;
+    await settle(h, 20_000);
+    expect(h.requests[1]).toEqual({ start: 20_000, end: 20_255, n: 256 });
+    expect(h.spliced.slice(oldCount)).toEqual(Array.from({ length: 256 }, (_, i) => 20_000 + i));
+    await settle(h, h.latest.colSeq - 20);
+    expect(h.requests[2]).toEqual({ start: h.latest.colSeq - 20, end: h.latest.colSeq, n: 21 });
+    expect(h.residency.range()!.newest).toBe(h.latest.colSeq);
+  });
+
+  it('repairs overlapping pans without evicting the requested right edge', async () => {
+    const h = exactHarness();
+    await settle(h, 59_900, 240);
+    expect(h.requests).toEqual([{ start: 59_884, end: 59_999, n: 116 }]);
+    expect(h.residency.range()).toEqual({ oldest: 59_884, newest: 60_139, count: 256 });
+    expect(h.residency.validFromSeq()).toBe(59_884);
+  });
+
+  it('keeps empty pages local and suppresses repeated reads without disabling other history', async () => {
+    const h = exactHarness();
+    h.empty();
+    await settle(h, 200);
+    expect(h.requests).toHaveLength(1);
+    expect(h.loader.startOfHistory).toBe(false);
+    await settle(h, 1000);
+    expect(h.requests[1]).toEqual({ start: 1000, end: 1255, n: 256 });
+    expect(h.residency.validFromSeq()).toBe(1000);
+  });
+
+  it('drops a delayed exact page after the renderer detaches or the loader resets', async () => {
+    for (const reset of [false, true]) {
+      const h = exactHarness();
+      h.hold();
+      h.loader.ensureVisible({ leftCol: 64, span: 256, level: 0 });
+      h.loader.ensureVisible({ leftCol: 64, span: 256, level: 0 });
+      expect(h.requests).toHaveLength(1);
+      if (reset) h.loader.reset(); else h.deactivate();
+      h.release(); await flush();
+      expect(h.spliced).toEqual([]);
+      expect(h.loader.inFlight).toBe(false);
+    }
+  });
+
+  it('discards a delayed far-pan page and immediately serves the latest view instead', async () => {
+    const h = exactHarness();
+    h.hold();
+    h.loader.ensureVisible({ leftCol: 64, span: 256, level: 0 });
+    h.loader.ensureVisible({ leftCol: 20_000, span: 256, level: 0 });
+    expect(h.requests).toEqual([{ start: 64, end: 319, n: 256 }]);
+    h.release(); await flush();
+    expect(h.requests).toEqual([
+      { start: 64, end: 319, n: 256 }, { start: 20_000, end: 20_255, n: 256 },
+    ]);
+    expect(h.spliced).toEqual(Array.from({ length: 256 }, (_, i) => 20_255 - i));
+    expect(h.residency.validFromSeq()).toBe(20_000);
+    h.assertValid();
+  });
+
+  it('uses exact sequence pages for eager repair and dropped bands after a clock seam', async () => {
+    const h = exactHarness(64);
+    h.advance(61_000);
+    await h.loader.prefetch(100);
+    expect(h.requests).toEqual([
+      { start: 60_936, end: 60_999, n: 64 }, { start: 60_901, end: 60_935, n: 35 },
+    ]);
+    h.loader.refetchBand(60_997, 60_999, 0n); // no trustworthy time anchor needed
+    await flush();
+    expect(h.requests[2]).toEqual({ start: 60_997, end: 60_999, n: 3 });
+    h.assertValid();
+  });
+});
+
 describe('HistoryLoader — session reset + page hygiene', () => {
   it('reset() drops the SESSION-scoped state: a stale oldest-available bound must not kill the new session’s scroll-back', async () => {
     // Old session: the server floor IS the resident oldest → empty page →
@@ -239,7 +625,7 @@ describe('HistoryLoader — session reset + page hygiene', () => {
     await flush();
   });
 
-  it('splices an out-of-order page ASCENDING (oldest first) regardless of arrival order', async () => {
+  it('splices an out-of-order older page descending from the resident anchor', async () => {
     const spliced: number[] = [];
     const loader = new HistoryLoader({
       requestHistory: (): Promise<HistoryResponse> =>
@@ -268,7 +654,7 @@ describe('HistoryLoader — session reset + page hygiene', () => {
 
     loader.ensureVisible({ leftCol: 0, span: 80, level: 0 });
     await flush();
-    expect(spliced).toEqual([96, 97, 98, 99]);
+    expect(spliced).toEqual([99, 98, 97, 96]);
     expect(loader.startOfHistory).toBe(false); // floor far below — not exhausted
   });
 
@@ -367,7 +753,7 @@ describe('HistoryLoader — repaired-skip band refetch (F24)', () => {
     return { loader, spliced, requests, flushCount: () => flushes, release: () => releaseFn?.() };
   }
 
-  it('splices ONLY the missing band, ascending, anchored at the post-band column', async () => {
+  it('splices ONLY the missing band, descending, anchored at the post-band column', async () => {
     const h = bandHarness(0);
     // Band 50..53 was dropped; col 54 arrived live with t0 = 54·DT.
     h.loader.refetchBand(50, 53, BigInt(54 * DT));
@@ -376,8 +762,8 @@ describe('HistoryLoader — repaired-skip band refetch (F24)', () => {
     expect(h.requests).toHaveLength(1);
     expect(h.requests[0].before_t).toBe(BigInt(54 * DT));
     // Older page members (below 50) are NOT re-spliced here, and the order is
-    // ascending (each lands adjacent to the window).
-    expect(h.spliced).toEqual([50, 51, 52, 53]);
+    // descending (each lands adjacent to the valid suffix).
+    expect(h.spliced).toEqual([53, 52, 51, 50]);
   });
 
   it('is single-flight and processes a band arriving mid-refetch (one pending slot)', async () => {
@@ -450,7 +836,7 @@ describe('HistoryLoader — repaired-skip band refetch (F24)', () => {
     fail = false;
     loader.refetchBand(60, 62, BigInt(63 * DT));
     await flush();
-    expect(spliced).toEqual([60, 61, 62]);
+    expect(spliced).toEqual([62, 61, 60]);
   });
 });
 
@@ -525,7 +911,7 @@ describe('HistoryLoader — page seam honesty (QA3 C-1)', () => {
     h.loader.ensureVisible({ leftCol: 0, span: 80, level: 0 });
     await flush();
 
-    expect(h.spliced).toEqual([990, 991, 992, 993, 994, 995, 996, 997, 998, 999]);
+    expect(h.spliced).toEqual([999, 998, 997, 996, 995, 994, 993, 992, 991, 990]);
     const resp = h.resp();
     expect(resp).not.toBeNull();
     const synthetic = resp!.markers.filter((m) => m.text.startsWith('history page seam'));

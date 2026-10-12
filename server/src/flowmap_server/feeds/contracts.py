@@ -9,14 +9,16 @@ for awarded defense, intelligence, and agency contracts:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
+import json
 import logging
+import math
 import time
 from typing import Any
 
 import aiohttp
 
+from flowmap_server import __version__
 from flowmap_server.data.warehouse import DuckWarehouse
 
 log = logging.getLogger(__name__)
@@ -52,7 +54,7 @@ class DefenseContractsListener:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"User-Agent": "FlowMap-GovTracker/1.4.0"})
+            self._session = aiohttp.ClientSession(headers={"User-Agent": f"FlowMap-GovTracker/{__version__}"})
         return self._session
 
     async def close(self) -> None:
@@ -97,28 +99,49 @@ class DefenseContractsListener:
                 else:
                     log.warning("USASpending API returned status %d", resp.status)
         except Exception as exc:
-            log.warning("Failed querying USASpending.gov API: %s. Using simulated intelligence stream.", exc)
+            log.warning("Failed querying USASpending.gov API: %s", exc)
 
         results: list[dict[str, Any]] = []
         raw_results = data.get("results", []) if isinstance(data, dict) else []
+        if not isinstance(raw_results, list):
+            return []
 
         now_ns = time.time_ns()
 
         for item in raw_results:
-            recipient = str(item.get("Recipient Name", "")).upper()
+            if not isinstance(item, dict):
+                continue
+            recipient = str(item.get("Recipient Name") or "").strip()
             matched_sym = None
             for key, sym in RECIPIENT_TICKER_MAP.items():
-                if key in recipient:
+                if key in recipient.upper():
                     matched_sym = sym
                     break
 
             if not matched_sym:
                 continue
 
-            amount = float(item.get("Award Amount") or 0.0)
-            desc = str(item.get("Description") or "Government procurement allocation")
-            agency = str(item.get("Awarding Agency") or "Department of Defense")
-            headline = f"{matched_sym} Awarded ${amount:,.0f} by {agency}"
+            raw_amount = item.get("Award Amount")
+            try:
+                amount = float(raw_amount) if raw_amount is not None and not isinstance(raw_amount, bool) else None
+            except (TypeError, ValueError, OverflowError):
+                amount = None
+            if amount is not None and not math.isfinite(amount):
+                amount = None
+            desc = str(item.get("Description") or "").strip()
+            agency = str(item.get("Awarding Agency") or "").strip()
+            headline = f"{matched_sym} contract award"
+            if amount is not None:
+                headline += f" ${amount:,.0f}"
+            if agency:
+                headline += f" by {agency}"
+            detail = json.dumps({
+                "award_id": item.get("Award ID") or None,
+                "recipient": recipient,
+                "agency": agency or None,
+                "description": desc or None,
+                "date": item.get("Action Date") or None,
+            }, ensure_ascii=False)
 
             contract_event = {
                 "ts_ns": now_ns,
@@ -126,7 +149,7 @@ class DefenseContractsListener:
                 "symbol": matched_sym,
                 "headline": headline,
                 "amount_usd": amount,
-                "detail": f"{agency}: {desc[:200]}",
+                "detail": detail,
                 "source": "USASpending.gov",
             }
             results.append(contract_event)
@@ -136,38 +159,8 @@ class DefenseContractsListener:
                 matched_sym,
                 headline,
                 amount,
-                desc[:200],
+                detail,
                 "USASpending.gov",
             )
-
-        if not results:
-            # Fallback canned recent landmark defense contracts for instant offline testing
-            sample_awards = [
-                ("LMT", "Lockheed Martin", 485_000_000.0, "F-35 Lightning II Sustainment & Avionics Modernization", "Department of Defense"),
-                ("PLTR", "Palantir", 178_400_000.0, "TITAN Next-Gen Deep-Sensing Battlefield AI Ground Station", "US Army"),
-                ("RTX", "Raytheon", 320_000_000.0, "Standard Missile-6 (SM-6) All-Up-Rounds Production", "US Navy"),
-                ("GD", "General Dynamics", 215_000_000.0, "Virginia-Class Fast Attack Submarine Materials", "US Navy"),
-            ]
-            for sym, rec, amt, desc, ag in sample_awards:
-                hl = f"{sym} Awarded ${amt:,.0f} by {ag}"
-                ev = {
-                    "ts_ns": now_ns,
-                    "kind": "defense_contract",
-                    "symbol": sym,
-                    "headline": hl,
-                    "amount_usd": amt,
-                    "detail": f"{ag}: {desc}",
-                    "source": "USASpending.gov",
-                }
-                results.append(ev)
-                self.warehouse.insert_intelligence(
-                    now_ns,
-                    "defense_contract",
-                    sym,
-                    hl,
-                    amt,
-                    desc,
-                    "USASpending.gov",
-                )
 
         return results

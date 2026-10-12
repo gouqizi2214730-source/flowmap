@@ -15,6 +15,7 @@
  */
 
 import { drawGridlines, drawPriceAxis, drawTimeAxis } from './axes';
+import { observeCanvasBox } from '../canvasBox';
 import { Bbo, type BboState } from './bbo';
 import { Bubbles } from './bubbles';
 import {
@@ -29,10 +30,11 @@ import { Markers } from './markers';
 import { OVERLAY } from './palette';
 import { PointBatch, SolidBatch } from './primitives';
 import { PriceLine } from './priceLine';
+import type { OverviewBars } from './overviewBars';
 import { Profile } from './profile';
 import { Cvd } from './cvd';
 import { Vwap } from './vwap';
-import { VolBars, volumeStripHeight } from './volbars';
+import { VolBars, volumeStripHeight, VOLBAR_HEIGHT_FRAC } from './volbars';
 import { GexOverlay } from './gexLevels';
 import { TextLayer } from '../textLayer';
 import type { HeatmapView } from '../heatmap';
@@ -50,17 +52,26 @@ export interface OverlayDrawContext {
   price: PriceMap | null;
   /** Exact density arrays for the profile (from the CPU column cache). */
   columnArrays: (col: number) => { bid: Float32Array; ask: Float32Array | null } | null;
+  columnScale?: OverlayFrame['columnScale'];
+  dataVersion?: number;
+  changed?: () => void;
   /** Newest column's book (for the L2-derived BBO fallback), or null. */
   newestArrays: { bid: Float32Array; ask: Float32Array | null } | null;
+  /** Native geometry of newestArrays; the displayed epoch can advance first. */
+  newestPrice?: PriceMap | null;
   /**
    * The SUM-mip level the heatmap paints this frame (tick-grouping floor
    * included). The profile samples rows at 4^level granularity so it never
    * out-resolves the cells behind it. Optional for direct unit tests: absent = 0.
    */
   mipLevel?: number;
+  /** Bar sources keyed to the coarse group coordinates of this frame. Raw
+   * stream overlays remain intact when an overview is being displayed. */
+  overviewBars?: OverviewBars | null;
 }
 
 export class OverlayManager {
+  private readonly axisBoxes = new Map<HTMLCanvasElement, ReturnType<typeof observeCanvasBox>>();
   private solid: SolidBatch;
   private points: PointBatch;
   private readonly text: TextLayer;
@@ -78,8 +89,8 @@ export class OverlayManager {
    *  pane (it is not a price), so the manager only owns its DATA; the CvdPane
    *  reads {@link cvdSeries} + the camera transform and draws its own canvas. */
   private readonly cvd = new Cvd();
-  /** Traded-volume bars along the chart's bottom edge (Bookmap H7, F26):
-   *  bar-derived like CVD but drawn IN the chart, on the shared text layer. */
+  /** Traded-volume bars in a dedicated bottom strip, sharing the price
+   *  chart's horizontal camera without sharing its pixels. */
   private readonly volumeBars = new VolBars();
   private readonly gexLevels = new GexOverlay();
 
@@ -89,7 +100,7 @@ export class OverlayManager {
   private channelBbo: BboState | null = null;
   private hasChannelBbo = false;
 
-  constructor(gl: WebGL2RenderingContext, private readonly glCanvas: HTMLCanvasElement) {
+  constructor(gl: WebGL2RenderingContext, glCanvas: HTMLCanvasElement) {
     this.solid = new SolidBatch(gl);
     this.points = new PointBatch(gl);
     this.text = TextLayer.over(glCanvas);
@@ -123,6 +134,11 @@ export class OverlayManager {
 
   /** Wrap the price/time gutter canvases (App-owned) for tick drawing. */
   attachAxes(priceCanvas: HTMLCanvasElement | null, timeCanvas: HTMLCanvasElement | null): void {
+    for (const box of this.axisBoxes.values()) box.dispose();
+    this.axisBoxes.clear();
+    for (const canvas of [priceCanvas, timeCanvas]) {
+      if (canvas) this.axisBoxes.set(canvas, observeCanvasBox(canvas));
+    }
     this.priceAxis = priceCanvas ? new TextLayer(priceCanvas, false) : null;
     this.timeAxis = timeCanvas ? new TextLayer(timeCanvas, false) : null;
   }
@@ -144,8 +160,9 @@ export class OverlayManager {
     for (const layer of [this.priceAxis, this.timeAxis]) {
       if (layer === null) continue;
       const c = layer.canvas;
-      const w = c.clientWidth;
-      const h = c.clientHeight;
+      const box = this.axisBoxes.get(c)?.size();
+      const w = box?.width ?? 0;
+      const h = box?.height ?? 0;
       if (w <= 0 || h <= 0) continue;
       const beforeW = c.width;
       const beforeH = c.height;
@@ -196,6 +213,10 @@ export class OverlayManager {
     return this.priceLine.last()?.price ?? null;
   }
 
+  priceRange(lo: number, hi: number): { low: number; high: number } | null {
+    return this.priceLine.priceRange(lo, hi);
+  }
+
   onMarker(m: Marker): void {
     this.markers.add(m);
   }
@@ -222,6 +243,7 @@ export class OverlayManager {
 
   /** Drop all overlay data (context loss / go-live re-seed / test reset). */
   reset(): void {
+    this.profile.reset();
     this.bubbles.reset();
     this.bbo.reset();
     this.vwap.reset();
@@ -275,6 +297,10 @@ export class OverlayManager {
    *  and repaint, since the forming column mutates without any view field moving. */
   cvdValueAt(colSeq: number): number {
     return this.cvd.valueAt(colSeq);
+  }
+
+  get cvdRevision(): number {
+    return this.cvd.dataRevision;
   }
 
   /** Overlay data counts + last profile result (deterministic e2e assertions). */
@@ -336,6 +362,9 @@ export class OverlayManager {
   ];
 
   draw(ctx: OverlayDrawContext): void {
+    const priceLine = ctx.overviewBars?.price ?? this.priceLine;
+    const vwap = ctx.overviewBars?.vwap ?? this.vwap;
+    const volumeBars = ctx.overviewBars?.volume ?? this.volumeBars;
     this.gm.refill(ctx.view, ctx.dims, ctx.time, ctx.price);
     const frame = this.frameScratch;
     frame.solid = this.solid;
@@ -344,6 +373,9 @@ export class OverlayManager {
     frame.resident = ctx.resident;
     frame.capability = ctx.capability;
     frame.columnArrays = ctx.columnArrays;
+    frame.columnScale = ctx.columnScale;
+    frame.dataVersion = ctx.dataVersion;
+    frame.changed = ctx.changed;
     frame.mipLevel = ctx.mipLevel ?? 0;
 
     // Text layer: size to the viewport, clear once, draw faint gridlines behind.
@@ -354,7 +386,9 @@ export class OverlayManager {
     // A separate, opaque bottom strip prevents changing heatmap/price ink
     // from changing the apparent height or colour of a completed volume bar.
     // Its x transform is the exact same camera; only its local y origin differs.
-    const stripH = volumeStripHeight(this.glCanvas.parentElement?.clientHeight || ctx.dims.cssH);
+    // Invert plotH = stageH - clamp(16, stageH * .07, 44), using the
+    // ResizeObserver geometry. Reading the parent after drawing forces layout.
+    const stripH = volumeStripHeight(ctx.dims.cssH / (1 - VOLBAR_HEIGHT_FRAC));
     const volumeCanvas = this.volumeText.canvas;
     volumeCanvas.style.display = this.visibility.volume ? '' : 'none';
     const height = `${stripH}px`;
@@ -368,7 +402,7 @@ export class OverlayManager {
       this.volumeGm.refill(ctx.view, this.volumeDims, ctx.time, ctx.price);
       frame.gm = this.volumeGm;
       frame.text = this.volumeText;
-      this.volumeBars.draw(frame, stripH - 1);
+      volumeBars.draw(frame, stripH - 1);
       frame.gm = this.gm;
       frame.text = this.text;
     }
@@ -378,12 +412,12 @@ export class OverlayManager {
     // core keeps the top layer where the inside quote touches it (survey S2 D4:
     // the teal/red quote lines used to overpaint the 1.8px price core).
     if (this.visibility.profile) this.profile.draw(frame);
-    if (this.visibility.vwap) this.vwap.draw(frame);
+    if (this.visibility.vwap) vwap.draw(frame);
     if (this.visibility.bbo) {
       this.bbo.set(this.effectiveBbo(ctx));
       this.bbo.draw(frame);
     }
-    if (this.visibility.price) this.priceLine.draw(frame);
+    if (this.visibility.price) priceLine.draw(frame);
     if (this.visibility.gex ?? true) this.gexLevels.draw(frame);
     if (this.visibility.bubbles) this.bubbles.draw(frame);
     if (this.visibility.markers) this.markers.draw(frame);
@@ -402,7 +436,7 @@ export class OverlayManager {
     this.syncGutters(ctx.dpr);
     if (this.visibility.axes) {
       if (this.priceAxis) {
-        drawPriceAxis(this.priceAxis, this.gm, this.visibility.price ? this.priceLine.last() : null);
+        drawPriceAxis(this.priceAxis, this.gm, this.visibility.price ? priceLine.last() : null);
       }
       if (this.timeAxis) drawTimeAxis(this.timeAxis, this.gm);
     } else {
@@ -420,8 +454,9 @@ export class OverlayManager {
     capability: Record<string, unknown> | null,
     price: PriceMap | null,
     newestArrays: { bid: Float32Array; ask: Float32Array | null } | null,
+    newestPrice?: PriceMap | null,
   ): BboState | null {
-    return this.effectiveBbo({ capability, price, newestArrays } as OverlayDrawContext);
+    return this.effectiveBbo({ capability, price, newestArrays, newestPrice } as OverlayDrawContext);
   }
 
   /** Channel BBO if the feed carries it, else the L2-derived inside quote. */
@@ -429,7 +464,9 @@ export class OverlayManager {
     if (this.hasChannelBbo) return this.channelBbo;
     const depth = ctx.capability?.depth;
     if (depth !== 'L2' || ctx.price === null || ctx.newestArrays === null) return null;
-    return deriveL2Bbo(ctx.newestArrays.bid, ctx.newestArrays.ask, ctx.price);
+    const nativePrice = ctx.newestPrice === undefined ? ctx.price : ctx.newestPrice;
+    if (nativePrice === null) return null;
+    return deriveL2Bbo(ctx.newestArrays.bid, ctx.newestArrays.ask, nativePrice);
   }
 
   private drawHonestyBadges(ctx: OverlayDrawContext): void {
@@ -467,6 +504,9 @@ export class OverlayManager {
   }
 
   dispose(): void {
+    this.profile.dispose();
+    for (const box of this.axisBoxes.values()) box.dispose();
+    this.axisBoxes.clear();
     this.solid.dispose();
     this.points.dispose();
     this.text.dispose();

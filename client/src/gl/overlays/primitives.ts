@@ -27,8 +27,8 @@
  * functions with a premultiplied source keep BOTH the rgb and the alpha
  * channels a correct `over`. The batch enables it on flush and the heatmap
  * re-disables BLEND at the top of its own draw, so no state leaks.
- * `checkGLError` guards every flush (a GL error throws, matching the heatmap's
- * own discipline and the e2e "no GL errors" gate).
+ * Diagnostic `?glcheck=1` builds check each flush; normal live draws avoid
+ * synchronous GPU queries. Unit tests keep the checks enabled.
  */
 
 import { checkGLError } from '../context';
@@ -297,7 +297,7 @@ export class SolidBatch {
     gl.drawArrays(gl.TRIANGLES, 0, this.n);
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    checkGLError(gl, 'SolidBatch.flush');
+    checkGLError(gl, 'SolidBatch.flush', true);
     this.n = 0;
   }
 
@@ -390,7 +390,7 @@ export class PointBatch {
     gl.drawArrays(gl.POINTS, 0, this.n);
     gl.bindVertexArray(null);
     gl.bindBuffer(gl.ARRAY_BUFFER, null);
-    checkGLError(gl, 'PointBatch.flush');
+    checkGLError(gl, 'PointBatch.flush', true);
     this.n = 0;
   }
 

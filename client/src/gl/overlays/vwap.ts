@@ -74,7 +74,7 @@ export class Vwap {
       if (e === undefined) continue;
       const v = sessionVwap(e.num, e.den);
       if (!Number.isFinite(v)) continue;
-      pts.push({ x: gm.clipX(c + 0.5), y: gm.clipY(gm.priceToRow(v) + 0.5) });
+      pts.push({ x: gm.clipX(c + 0.5), y: gm.clipY(gm.priceEventToRow(v)) });
     }
     if (pts.length === 0) return;
 

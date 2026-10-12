@@ -16,12 +16,12 @@ Contents: [Install](#install) · [First run](#first-run) ·
 ## Install
 
 **Desktop app (recommended).** Download the installer for your platform from the
-[releases page](https://github.com/nazmiefearmutcu0/FlowMap/releases/latest) —
+[releases page](https://github.com/nazmiefearmutcu/flowmap/releases/latest) —
 macOS (Apple Silicon / Intel), Windows x64 / ARM64, or Linux (deb / AppImage).
 Installers are self-contained: they bundle the client and a private Python
 runtime, so nothing else needs to be installed and nothing is fetched at first
 run. They are **unsigned**; verify the download with the SLSA build-provenance
-attestation (`gh attestation verify <file> -R nazmiefearmutcu0/FlowMap`) or the
+attestation (`gh attestation verify <file> -R nazmiefearmutcu/flowmap`) or the
 `SHA256SUMS` asset before bypassing the OS warning — the exact steps are in
 [SECURITY.md](../SECURITY.md).
 
@@ -51,6 +51,17 @@ lives. Notes on its honesty rules:
 
 Pick `sim:SIM-DEMO` if you want to look around with no network and no keys; it
 is a deterministic feed, so the same window of tape repeats identically.
+
+Later launches restore the last selected instrument. The quote strip beneath
+the toolbar shows the last trade, raw bid/ask with inside sizes, spread and the
+age of the most recently received quote. A quiet quote stays visible with its
+age; display frames do not manufacture new market updates.
+
+Use **15s / 1m / 5m / 30m** to change the visible duration while keeping the
+current end position. **All** fits the loaded history and its price range.
+When inspecting past data, a duration change keeps live follow off. The DOM's
+**Δ** label shows the grouped depth interval; the quote strip and tape retain
+the finer exchange price precision.
 
 ## Connecting & picking symbols
 
@@ -83,15 +94,20 @@ left → right, price is the vertical axis, and color intensity is how much
 bid/ask size rests at that price during that column. Because each column is
 rasterized to the GPU once, pan/zoom stays smooth no matter how deep the
 history. Zoom with the wheel (time at the cursor), Shift/Ctrl+wheel (price) or
-the price gutter (wheel = zoom, drag = scale, double-click = re-fit). The
-crosshair shows the exact per-cell liquidity readout.
+the price gutter (wheel = zoom, drag = scale, double-click = re-fit). Manual
+price zoom can extend beyond the automatically fitted market range. **All**
+shows the entire available session history, loading older recorded liquidity
+from disk when needed. Wider views combine time intervals into readable bars
+and an averaged heatmap; returning to a close view loads the original detail.
+The crosshair labels averaged intervals with `avg`. Missing recordings are
+shown as empty space rather than filled with current liquidity.
 
 **Depth channel modes** choose what the colors mean. Press `C` to cycle, or use
 the *Depth channel* segmented control in `Settings → Display`:
 
 | Mode | Shows | Notes |
 |---|---|---|
-| `sum` (default) | bid + ask density | The classic view, unchanged since the first release. |
+| `sum` (default) | bid + ask density | Normalized to the visible price region. |
 | `bid` | bid-side density only | Normalized with the same percentile pipeline. |
 | `ask` | ask-side density only | As `bid`, other side. |
 | `imbalance` | signed `(bid−ask)/(bid+ask)` | Fixed −1…+1 scale; one end of the divergent blue↔orange ramp is bid-heavy, the other ask-heavy; the neutral middle is balance. |
@@ -106,7 +122,19 @@ normalization percentile and overlay toggles live in the settings drawer
 (gear icon). The DOM ladder (right rail) shows the live book around the
 crosshair; the tape below it streams trades, with outsized prints highlighted
 at a configurable notional threshold (`Settings → Big trade size`); the CVD
-pane is locked to the chart's time axis.
+pane is locked to the chart's time axis. **Tolerance** is calibrated to the
+visible liquidity distribution: 0 keeps all active levels, 50 suppresses the
+weaker half, and 100 focuses on stronger levels. It does not use the largest
+order as a fixed cutoff, so the middle of the slider remains usable across
+symbols with very different prices and quantities.
+
+**Normalization** selects the white-point percentile (80–100); lower values
+make more levels bright. The full setting applies to close views and historical
+overviews. Imbalance has its own fixed signed scale, so density display controls
+are disabled in that mode. Broad price buckets in older recordings carry less
+price detail; they are shown as muted intervals, while the crosshair reports
+their actual stored quantity and range. Newly recorded fine depth follows the
+market as the price frame recenters, without moving older data to new prices.
 
 ## Replay & seek
 

@@ -5,10 +5,38 @@ All notable changes to FlowMap are documented here. The format follows
 the work campaign that produced them (dates and commit ranges from git history).
 Unreleased work sits on top of the newest listed commit.
 
-## [Unreleased] — campaign 4 (2026-09-11)
+## [1.5.0] — 2026-10-12
+
+### Added
+
+- Recorded-depth history overviews, absolute-range paging, and a persistent
+  aggregation cache for inspecting data beyond the live RAM/GPU ring.
+- Orderflow, Analysis, and Focus workspace layouts with resizable panels,
+  quote-age readouts, time-window controls, and 5/30/60-second trade-flow totals.
+- FLOW, GOV, DOCS, GEO, and MACRO intelligence panels from the previously
+  unpublished `9d3d281` source commit. Demo fixtures are restricted to SIM-DEMO;
+  other instruments show unavailable states when no connected source supplied data.
+- Vendored Crocodile engine integration for supported public L2 sources,
+  including the selected connector's depth mode and book-update counters.
+
+### Changed
+
+- Historical geometry is projected by physical price coverage; missing depth
+  stays empty. Wide views aggregate genuine recorded quantities and return to
+  original detail when zoomed in. Cold disk history loads progressively.
+- Heatmap tolerance and normalization follow visible liquidity; chart overlays,
+  grouped DOM levels, and fine quote/tape prices use their respective geometry.
+- Windows sidecar processes are hidden and owned by the desktop shell's job.
+- App, client, and server versions are aligned at 1.5.0. Releases build the
+  selected tag, validate package versions, use locked vendored dependencies,
+  and publish the release notes after the required platform builds succeed.
+
+See [release notes](docs/release-notes-1.5.0.md) for the user-facing summary.
+
+## 2026-09-11 — campaign 4
 
 Client + server feature campaign on top of `7ae568e`
-([compare](https://github.com/nazmiefearmutcu0/FlowMap/compare/7ae568e...HEAD)).
+([compare](https://github.com/nazmiefearmutcu/flowmap/compare/7ae568e...HEAD)).
 
 ### Added
 
@@ -153,7 +181,7 @@ reporting (lint + e2e are gated now).
 ## 2026-09-10 — campaign 3
 
 Client + server feature campaign on top of `9887937`
-([compare](https://github.com/nazmiefearmutcu0/FlowMap/compare/9887937...7ae568e)).
+([compare](https://github.com/nazmiefearmutcu/flowmap/compare/9887937...7ae568e)).
 
 ### Added
 
@@ -238,7 +266,7 @@ Client + server feature campaign on top of `9887937`
 ## [1.4.0] — 2026-09-10 — campaign 2
 
 `bd80f35..840cc96`
-([compare](https://github.com/nazmiefearmutcu0/FlowMap/compare/17b0c47...840cc96)).
+([compare](https://github.com/nazmiefearmutcu/flowmap/compare/17b0c47...840cc96)).
 
 ### Fixed
 
@@ -262,7 +290,7 @@ Client + server feature campaign on top of `9887937`
 ## 2026-09-06 — six-agent upgrade
 
 `3607a17..17b0c47`
-([compare](https://github.com/nazmiefearmutcu0/FlowMap/compare/a529eaa...17b0c47)).
+([compare](https://github.com/nazmiefearmutcu/flowmap/compare/a529eaa...17b0c47)).
 
 - Server: replay attach re-validates recording freshness; malformed-trade
   guard; refused subscribes logged; `/api/health`, file logging, structured
@@ -276,7 +304,7 @@ Client + server feature campaign on top of `9887937`
 ## 2026-09-05 — chart rebuild & honesty wave
 
 `e60168f..a529eaa`
-([compare](https://github.com/nazmiefearmutcu0/FlowMap/compare/bd71738...a529eaa)).
+([compare](https://github.com/nazmiefearmutcu/flowmap/compare/bd71738...a529eaa)).
 
 - TradingView-grade chart + smooth flow-colormap WebGL2 heatmap; bilinear
   sampling in slot space fixes the faded-past-first-tile-layer artifact.
@@ -285,7 +313,7 @@ Client + server feature campaign on top of `9887937`
 ## 2026-09-03 — review campaign
 
 `69249f6..bd71738`
-([compare](https://github.com/nazmiefearmutcu0/FlowMap/compare/7ae45a1...bd71738)).
+([compare](https://github.com/nazmiefearmutcu/flowmap/compare/7ae45a1...bd71738)).
 
 - Server review wave: f16 saturation, hybrid price-scale persistence,
   boot-teardown race, columnar tail decode.
@@ -298,8 +326,9 @@ Client + server feature campaign on top of `9887937`
 
 Initial public releases through v1.3.1.1 (up to 2026-08-01) predate this
 changelog; see the
-[releases page](https://github.com/nazmiefearmutcu0/FlowMap/releases) for
+[releases page](https://github.com/nazmiefearmutcu/flowmap/releases) for
 notes and assets.
 
-[Unreleased]: https://github.com/nazmiefearmutcu0/FlowMap/compare/7ae568e...HEAD
-[1.4.0]: https://github.com/nazmiefearmutcu0/FlowMap/compare/17b0c47...840cc96
+[Unreleased]: https://github.com/nazmiefearmutcu/flowmap/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/nazmiefearmutcu/flowmap/releases/tag/v1.5.0
+[1.4.0]: https://github.com/nazmiefearmutcu/flowmap/compare/17b0c47...840cc96

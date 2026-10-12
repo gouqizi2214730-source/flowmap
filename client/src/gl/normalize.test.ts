@@ -13,6 +13,14 @@ import {
 } from './normalize';
 
 const COLS_PER_TILE = 256;
+
+it('distinguishes large base-unit books beyond the old half-float ceiling', () => {
+  const normalizer = new ViewportNormalizer({floor: 0, emaAlpha: 1});
+  normalizer.addColumn(0, new Float32Array([1e7, 1e8, 2e9]), null);
+  const norm = normalizer.updateNorm({oldest: 0, newest: 0}, {lo: 0, hi: 2}, 0);
+  expect(norm).toBeGreaterThan(1e9);
+  expect(norm).toBeLessThan(3e9);
+});
 const ALL_ROWS: RowRange = { lo: 0, hi: 2047 };
 
 /** Add one column of `count` identical `value` samples (bid only) at `colSeq`. */
@@ -247,6 +255,22 @@ describe('EMA smoothing', () => {
     expect(v).toBeLessThan(35);
     expect(n.settled).toBe(true);
   });
+
+  it('keeps settling a knee-only change even when the white endpoint is unchanged', () => {
+    const n = new ViewportNormalizer({ floor: 0 });
+    n.foldColumnFinal(0, Float32Array.from({ length: 1000 }, (_, i) => Math.exp(i / 100)), null);
+    const col = { oldest: 0, newest: 0 };
+    for (let i = 0; i < 100; i++) n.updateNorm(col, ALL_ROWS, 0);
+    const white = n.current;
+    n.percentile = 80;
+    const target = n.viewportPercentiles(col, ALL_ROWS, 0);
+    n.updateNorm(col, ALL_ROWS, 0);
+    expect(n.current).toBe(white);
+    expect(n.settled).toBe(false);
+    for (let i = 0; i < 100 && !n.settled; i++) n.updateNorm(col, ALL_ROWS, 0);
+    expect(n.settled).toBe(true);
+    expect(Math.abs(n.currentPercentiles.knee - target.knee) / target.knee).toBeLessThan(0.021);
+  });
 });
 
 describe('tile eviction (bounded — O(tiles), not O(history))', () => {
@@ -344,28 +368,41 @@ describe('foldColumnFinal — final columns fold exactly once (B-1)', () => {
     // not double-count.
     fold(n, 5);
     expect(n.totalSamples).toBe(2);
-    fold(n, 261); // tile 1 — independent watermark
+    fold(n, 261); // tile 1 — independent membership
     expect(n.totalSamples).toBe(4);
   });
 
-  it('skips a column id at or below a tile watermark (out-of-order finalization safe)', () => {
+  it('includes unseen older columns while deduplicating overlapping history pages', () => {
     const n = new ViewportNormalizer({ colsPerTile: COLS_PER_TILE });
     fold(n, 10);
     fold(n, 11);
     expect(n.totalSamples).toBe(4);
-    fold(n, 9); // an older column finalizing after a newer one — skipped
-    expect(n.totalSamples).toBe(4);
-    fold(n, 12); // forward progress still folds
+    fold(n, 9); // older backfill was not seen before
     expect(n.totalSamples).toBe(6);
+    fold(n, 9);
+    fold(n, 10);
+    expect(n.totalSamples).toBe(6);
+    fold(n, 12); // forward progress still folds
+    expect(n.totalSamples).toBe(8);
   });
 
-  it('reset clears the watermarks so a fresh session folds from scratch', () => {
+  it('reset clears membership so a fresh session folds from scratch', () => {
     const n = new ViewportNormalizer({ colsPerTile: COLS_PER_TILE });
     fold(n, 5);
     n.reset();
     expect(n.totalSamples).toBe(0);
     fold(n, 5);
     expect(n.totalSamples).toBe(2);
+  });
+
+  it('refolds a tile after eviction clears its column membership', () => {
+    const n = new ViewportNormalizer({ maxTiles: 1 });
+    fold(n, 255);
+    fold(n, 256);
+    expect(n.totalSamples).toBe(2);
+    fold(n, 255, 50);
+    expect(n.totalSamples).toBe(2);
+    expect(n.viewportPercentile({ oldest: 255, newest: 255 }, ALL_ROWS, 0)).toBeGreaterThan(40);
   });
 });
 

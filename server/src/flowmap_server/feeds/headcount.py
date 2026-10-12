@@ -1,19 +1,22 @@
 """Corporate Headcount & Hiring Velocity Tracker (GEO & EXHAUST <GO>).
 
 Monitors job board activity across public tech & growth companies:
-- Leverages Greenhouse & Lever public APIs (no API key required).
+- Uses the Greenhouse public jobs API (no API key required).
 - Endpoint: https://boards-api.greenhouse.io/v1/boards/{company}/jobs
 - Categorizes openings into R&D / Engineering, Sales & Marketing, and G&A.
-- Detects sudden R&D expansion (new product launch pipeline) or unannounced hiring freezes.
+- Counts current openings with an explicitly labelled department heuristic.
+  No historical baseline is collected, so hiring velocity remains unknown.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+import re
 from typing import Any
 
 import aiohttp
+
+from flowmap_server import __version__
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +40,7 @@ class HeadcountVelocityTracker:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"User-Agent": "FlowMap-TalentTracker/1.4.0"})
+            self._session = aiohttp.ClientSession(headers={"User-Agent": f"FlowMap-TalentTracker/{__version__}"})
         return self._session
 
     async def close(self) -> None:
@@ -51,26 +54,30 @@ class HeadcountVelocityTracker:
 
         url = _GREENHOUSE_BASE.format(company=board_slug)
         session = await self._get_session()
-        jobs: list[dict[str, Any]] = []
+        jobs: list[dict[str, Any]] | None = None
 
         try:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    jobs = data.get("jobs", [])
+                    candidate = data.get("jobs") if isinstance(data, dict) else None
+                    if isinstance(candidate, list) and all(isinstance(job, dict) for job in candidate):
+                        jobs = candidate
         except Exception as exc:
             log.debug("Greenhouse query for %s failed: %s", board_slug, exc)
 
-        if not jobs:
-            # Fallback realistic talent metrics for monitored symbol
+        if jobs is None:
             return {
                 "symbol": sym_clean,
-                "total_openings": 245,
-                "rd_engineering_openings": 138,
-                "sales_openings": 72,
-                "ga_openings": 35,
-                "talent_index_delta_pct": 14.8,  # +14.8% expansion in R&D
-                "signal": "ACCELERATED_ENGINEERING_EXPANSION",
+                "available": False,
+                "source": url,
+                "total_openings": None,
+                "rd_engineering_openings": None,
+                "sales_openings": None,
+                "ga_openings": None,
+                "talent_index_delta_pct": None,
+                "signal": "UNAVAILABLE",
+                "department_classification": "title_and_department_keyword_heuristic",
             }
 
         rd_count = 0
@@ -78,11 +85,12 @@ class HeadcountVelocityTracker:
         ga_count = 0
 
         for j in jobs:
-            title = str(j.get("title", "")).lower()
-            dept = str(j.get("departments", [{}])[0].get("name", "")).lower() if j.get("departments") else ""
+            title = str(j.get("title") or "").lower()
+            departments = j.get("departments")
+            dept = " ".join(str(d.get("name") or "") for d in departments if isinstance(d, dict)).lower() if isinstance(departments, list) else ""
             comb = f"{title} {dept}"
 
-            if any(k in comb for k in ["engineer", "developer", "research", "software", "ai", "hardware"]):
+            if re.search(r"\b(engineer(?:ing)?|developer|research|software|ai|hardware)\b", comb):
                 rd_count += 1
             elif any(k in comb for k in ["sales", "account", "marketing", "business dev"]):
                 sales_count += 1
@@ -90,20 +98,15 @@ class HeadcountVelocityTracker:
                 ga_count += 1
 
         total = len(jobs)
-        delta_pct = round(((rd_count / total if total > 0 else 0) - 0.45) * 100, 1)
-
-        signal = "NORMAL_HIRING"
-        if delta_pct > 10.0:
-            signal = "ACCELERATED_ENGINEERING_EXPANSION"
-        elif total < 10:
-            signal = "HIRING_FREEZE_SUSPECTED"
-
         return {
             "symbol": sym_clean,
+            "available": True,
+            "source": url,
             "total_openings": total,
             "rd_engineering_openings": rd_count,
             "sales_openings": sales_count,
             "ga_openings": ga_count,
-            "talent_index_delta_pct": delta_pct,
-            "signal": signal,
+            "talent_index_delta_pct": None,
+            "signal": "CURRENT_OPENINGS",
+            "department_classification": "title_and_department_keyword_heuristic",
         }

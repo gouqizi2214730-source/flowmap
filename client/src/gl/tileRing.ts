@@ -1,7 +1,7 @@
 /**
  * The density tile ring (§8.3 storage) + full-res residency (§8.3, M2 T8).
  *
- * One immutable `TEXTURE_2D_ARRAY`, `256 (cols/tile) × rows × layers`, `RG16F`
+ * One immutable `TEXTURE_2D_ARRAY`, `256 (cols/tile) × rows × layers`, `RG32F`
  * (R = bid density, G = ask density). A column append is a single
  * `texSubImage3D` writing one column (width 1, height `rows`) into one
  * (layer, x) slot — the ONLY GPU write that ever touches history. Panning and
@@ -22,14 +22,14 @@
  * ### Full-res residency budget (§8.3 / §10 memory gate)
  *
  * Full-res tiles are memory-bounded. The budget is the ring capacity in columns
- * (`256 × layers`); at RG16F (2 channels × 2 bytes = 4 B/texel) one column is
- * `rows × 4` bytes:
+ * (`256 × layers`); at RG32F (2 channels × 4 bytes = 8 B/texel) one column is
+ * `rows × 8` bytes:
  *
- *   layers=64 → capacity 16 384 cols → at 2048 rows: 16384·2048·4 = 134 MiB;
- *                                      at 4096 rows: 16384·4096·4 = 268 MiB.
+ *   layers=24 → capacity 6144 cols → at 2048 rows: 6144·2048·8 = 96 MiB;
+ *                                    at 4096 rows: 6144·4096·8 = 192 MiB.
  *
- * 16 384 cols is the spec's "~16 k recent columns"; it stays ≤ 256 MB at the
- * production 4096-row grid and well under the §10 300 MB GPU-memory gate. See
+ * The production 4096-row grid, row-only mip and SUM mips together use
+ * about 253 MiB, within the 300 MB GPU-memory gate. See
  * {@link fullResBytes}. Ranges older than this window are not held full-res —
  * scrolling into them issues a `HistoryRequest` (see net/history) that slides
  * the window back; deep zoom-out renders from the SUM-mips instead.
@@ -46,6 +46,7 @@
  */
 
 import { checkGLError } from './context';
+import { ColumnGeometry } from './columnGeometry';
 
 export const COLS_PER_TILE = 256;
 
@@ -138,7 +139,10 @@ export class Residency {
       this.newest = colSeq;
       this.validFrom = colSeq;
     } else if (colSeq >= this.oldest && colSeq <= this.newest) {
-      // In-place overwrite of a resident column — window unchanged.
+      // A history page heals an unfilled forward gap newest-first. Only the
+      // column immediately adjoining the known-good suffix extends validity;
+      // an isolated write deeper inside the gap must not expose stale slots.
+      if (colSeq === this.validFrom - 1) this.validFrom = colSeq;
     } else if (colSeq >= this.newest) {
       if (colSeq > this.newest + 1 && !gapZeroed) {
         // GAP forward growth: the modulo wrap clobbered exactly slot(colSeq);
@@ -150,6 +154,13 @@ export class Residency {
       // band the caller zeroed).
       this.newest = colSeq;
       if (this.newest - this.oldest + 1 > cap) this.oldest = this.newest - cap + 1;
+    } else if (colSeq < this.oldest - 1) {
+      // The caller skipped backwards over unfilled slots. This ring tracks
+      // one contiguous window, so retain the proven column instead of claiming
+      // that skipped modulo slots contain the requested historical data.
+      this.oldest = colSeq;
+      this.newest = colSeq;
+      this.validFrom = colSeq;
     } else {
       // Backward growth (deep scroll-back backfill splicing older columns).
       // Validity extends down ONLY when the pre-splice window was fully valid
@@ -167,7 +178,14 @@ export class Residency {
     // clamp may have evicted it forward), nor past its newest (a backward
     // budget clamp can pull newest below the gap edge).
     if (this.validFrom < this.oldest) this.validFrom = this.oldest;
-    if (this.validFrom > this.newest) this.validFrom = this.newest;
+    if (this.validFrom > this.newest) {
+      // A nonadjacent backward write evicted the entire known-good suffix.
+      // Only the just-written column is proven valid; clamping to `newest`
+      // would expose a stale modulo slot that was never fetched.
+      this.oldest = colSeq;
+      this.newest = colSeq;
+      this.validFrom = colSeq;
+    }
     // LRU touch for the layer this column landed in.
     const slot = ((colSeq % cap) + cap) % cap;
     const layer = (slot / this.colsPerTile) | 0;
@@ -217,6 +235,7 @@ export class TileRing {
   /** Total columns the ring can hold before it wraps (== full-res budget). */
   readonly capacityCols: number;
   readonly texture: WebGLTexture;
+  readonly geometry: ColumnGeometry;
 
   /** Full-res residency window + LRU (pure; see {@link Residency}). */
   private readonly residency: Residency;
@@ -238,6 +257,7 @@ export class TileRing {
     this.rows = rows;
     this.layers = layers;
     this.capacityCols = this.colsPerTile * layers;
+    this.geometry = new ColumnGeometry(gl, this.colsPerTile, layers);
     this.residency = new Residency(this.capacityCols, this.colsPerTile, layers);
     this.scratch = new Float32Array(rows * 2);
 
@@ -247,7 +267,7 @@ export class TileRing {
 
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
     // Immutable storage, one mip level (SUM mips are separate textures, T7).
-    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG16F, this.colsPerTile, rows, layers);
+    gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG32F, this.colsPerTile, rows, layers);
     // texelFetch does its own indexing — NEAREST + clamp keep the texture
     // complete without implying any filtering.
     gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -267,8 +287,8 @@ export class TileRing {
   /**
    * Append one finalized column at absolute `colSeq`. `bid` (and `ask` for L2 /
    * L1_BAND) must be length `rows`; `ask` is null for SYNTH_PROFILE (ask channel
-   * uploads as 0). Densities are Float32 (server cast from f16); the driver
-   * converts to f16 on upload into RG16F.
+   * uploads as 0). Float32 venue units stay Float32 on the GPU, including
+   * quantities above the half-float ceiling.
    *
    * Absolute-col_seq addressing means this is equally the LIVE-append path
    * (forward, colSeq = newest+1) and the T8 backfill splice path (older colSeq
@@ -325,7 +345,7 @@ export class TileRing {
       gl.FLOAT,
       rg,
     );
-    checkGLError(gl, 'TileRing.append');
+    checkGLError(gl, 'TileRing.append', true);
 
     this.residency.note(colSeq, gapZeroed);
   }
@@ -372,7 +392,7 @@ export class TileRing {
         zeros,
       );
     }
-    checkGLError(gl, 'TileRing.zeroColumns');
+    checkGLError(gl, 'TileRing.zeroColumns', true);
   }
 
   /** Absolute colSeq range currently resident full-res (null before any append). */
@@ -399,9 +419,9 @@ export class TileRing {
     return this.capacityCols;
   }
 
-  /** Full-res GPU bytes this ring holds (§10 memory gate): cap·rows·RG16F(4 B). */
+  /** Full-res GPU bytes this ring holds: cap·rows·RG32F(8 B). */
   fullResBytes(): number {
-    return this.capacityCols * this.rows * 4;
+    return this.capacityCols * this.rows * 8;
   }
 
   /** LRU tile-layer order (oldest-touched first). Diagnostics. */
@@ -410,6 +430,7 @@ export class TileRing {
   }
 
   dispose(): void {
+    this.geometry.dispose();
     this.gl.deleteTexture(this.texture);
   }
 }

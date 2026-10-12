@@ -17,6 +17,7 @@
 
 import type { OverlayFrame } from './frame';
 import { OVERLAY } from './palette';
+import { quoteDecimals } from './axisTicks';
 
 export type BboSource = 'bbo' | 'l2';
 
@@ -58,7 +59,7 @@ export class Bbo {
 
     const cssW = gm.dims.cssW;
     const cssH = gm.dims.cssH;
-    const decimals = gm.price.step > 0 ? Math.min(8, Math.max(0, Math.ceil(-Math.log10(gm.price.step)))) : 2;
+    const decimals = quoteDecimals(gm.price.tick ?? gm.price.step);
     const tag = bbo.source === 'l2' ? ' ·L2' : '';
 
     const drawSide = (
@@ -68,9 +69,8 @@ export class Bbo {
       key: string,
     ): void => {
       if (!Number.isFinite(price)) return; // one-sided book / unknown quote
-      // `+0.5` = row-cell centre: the quote line/badge ride the density cell the
-      // heatmap paints (survey S2 D3 half-cell convention).
-      const rowf = gm.priceToRow(price) + 0.5;
+      // Uniform cell centres; exact price coordinates on hybrid grids.
+      const rowf = gm.priceEventToRow(price);
       const y = gm.clipY(rowf);
       if (y < -1.02 || y > 1.02) return; // off-screen vertically
       solid.begin();

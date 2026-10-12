@@ -23,20 +23,23 @@
  * off at 0 (the default) and renders nothing then.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { SIDE_BUY, SIDE_SELL } from '../proto/types';
 import {
   subscribe,
   getSnapshot,
+  bookSessionKey,
   type BookSnapshot,
   type TapeTrade,
 } from '../state/bookStore';
 import { useFlowMapStore } from '../state/store';
 import { priceDecimals } from './DomLadder';
+import './TradingPanels.css';
 
 /** Max rows rendered (spec §9: "last ~200"). */
 const TAPE_MAX = 200;
+const EMPTY_TAPE: readonly TapeTrade[] = Object.freeze([]);
 /** Minimum trades before the large-lot emphasis kicks in (avoid noise on cold start). */
 const LARGE_MIN_SAMPLES = 12;
 
@@ -57,18 +60,27 @@ export function largeThreshold(trades: readonly TapeTrade[]): number {
 
 /**
  * The persisted big-trade rule (settings.bigTradeUsd): a trade qualifies when
- * its notional `price × size` reaches `thresholdUsd`. Pure + strict:
+ * `price × native size` reaches the threshold. The stored key retains its
+ * historical name; contract quantities do not imply USD notional. Pure + strict:
  *   - a threshold at or below 0 (or non-finite) is OFF — nothing is ever big;
  *   - a NaN price or size is never big (no honest notional, no highlight);
  *   - the boundary counts: exactly at the threshold IS big.
  */
-export function isBigTrade(price: number, qty: number, thresholdUsd: number): boolean {
-  if (!(thresholdUsd > 0)) return false;
+export function isBigTrade(price: number, qty: number, threshold: number): boolean {
+  if (!(threshold > 0) || !Number.isFinite(threshold)) return false;
   if (!Number.isFinite(price) || !Number.isFinite(qty)) return false;
-  return price * qty >= thresholdUsd;
+  return price * qty >= threshold;
 }
 
 export type TapeSide = 'buy' | 'sell' | 'unknown';
+export type TapeSideFilter = TapeSide | 'all';
+
+/** Price × native quantity, inclusive boundary; contract units vary by venue. */
+export function filterTape(trades: readonly TapeTrade[], side: TapeSideFilter, minimum: number): readonly TapeTrade[] {
+  const floor = Number.isFinite(minimum) && minimum > 0 ? minimum : 0;
+  return trades.filter((t) => (side === 'all' || sideClass(t.side) === side)
+    && (floor === 0 || (Number.isFinite(t.price * t.size) && t.price * t.size >= floor)));
+}
 
 export function sideClass(side: number): TapeSide {
   if (side === SIDE_BUY) return 'buy';
@@ -130,17 +142,45 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
   const capability = useFlowMapStore((s) => s.capability);
   const epochs = useFlowMapStore((s) => s.epochs);
   const gridEpoch = useFlowMapStore((s) => s.gridEpoch);
+  const sessionKey = useFlowMapStore(bookSessionKey);
   const [snap, setSnap] = useState<BookSnapshot>(() => getSnapshot());
   const [collapsed, setCollapsed] = useState(false);
   // Hover-pause freezes the list so a row can be read; without a visible
   // indicator that read like a stuck feed, so the header says HELD.
   const [held, setHeld] = useState(false);
+  const [sideFilter, setSideFilter] = useState<TapeSideFilter>('all');
+  const [minimum, setMinimum] = useState('');
   const pausedRef = useRef(false);
+  const explicitHoldRef = useRef(false);
+  const sessionVersionRef = useRef(snap.sessionVersion);
+
+  // Reset before paint: even a hovered/explicitly held tape must drop old rows.
+  useLayoutEffect(() => {
+    pausedRef.current = false;
+    explicitHoldRef.current = false;
+    setHeld(false);
+    setSideFilter('all');
+    setMinimum('');
+    const current = getSnapshot();
+    sessionVersionRef.current = current.sessionVersion;
+    setSnap(current);
+  }, [sessionKey]);
 
   useEffect(
     () =>
       subscribe((s) => {
-        if (!pausedRef.current) setSnap(s);
+        if (s.sessionVersion !== sessionVersionRef.current) {
+          sessionVersionRef.current = s.sessionVersion;
+          pausedRef.current = false;
+          explicitHoldRef.current = false;
+          setHeld(false);
+          setSideFilter('all');
+          setMinimum('');
+          setSnap(s);
+        } else if (!pausedRef.current) {
+          // Depth-only flushes retain tape identity and do not rerender this list.
+          setSnap((prev) => prev.trades === s.trades && prev.sessionKey === s.sessionKey ? prev : s);
+        }
       }),
     [],
   );
@@ -150,23 +190,34 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
     setHeld(true);
   };
   const onLeave = (): void => {
+    if (explicitHoldRef.current) return;
     pausedRef.current = false;
     setHeld(false);
     setSnap(getSnapshot());
   };
 
-  const trades = snap.trades.slice(0, TAPE_MAX);
-  const keys = tapeKeys(trades);
-  const threshold = largeThreshold(trades);
+  const toggleHold = (): void => {
+    const next = !held;
+    explicitHoldRef.current = next;
+    pausedRef.current = next;
+    setHeld(next);
+    if (!next) setSnap(getSnapshot());
+  };
+
+  const source = snap.sessionKey === sessionKey ? snap.trades : EMPTY_TAPE;
+  const matched = useMemo(() => filterTape(source, sideFilter, Number(minimum)), [source, sideFilter, minimum]);
+  const trades = useMemo(() => matched.slice(0, TAPE_MAX), [matched]);
+  const keys = useMemo(() => tapeKeys(trades), [trades]);
+  const threshold = useMemo(() => largeThreshold(trades), [trades]);
   // Absolute notional highlight (settings.bigTradeUsd; 0 = off). Computed once
   // per render so the header chip and the row classes always agree.
   const bigActive = bigTradeUsd > 0;
-  const bigCount = bigActive
+  const bigCount = useMemo(() => bigActive
     ? trades.reduce((n, t) => n + (isBigTrade(t.price, t.size, bigTradeUsd) ? 1 : 0), 0)
-    : 0;
+    : 0, [bigActive, bigTradeUsd, trades]);
   // Price precision from the active epoch's step when known.
-  const params = epochs.get(snap.book?.epoch ?? gridEpoch ?? -1);
-  const decimals = params ? priceDecimals(params.tick * params.tick_multiple) : 2;
+  const params = epochs.get(gridEpoch ?? -1);
+  const decimals = params ? priceDecimals(params.tick) : 2;
   const badge = tapeBadge(capability);
 
   return (
@@ -176,7 +227,14 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
           type="button"
           className="panel__collapse"
           aria-expanded={!collapsed}
-          onClick={() => setCollapsed((c) => !c)}
+          onClick={() => {
+            setCollapsed((c) => !c);
+            if (!explicitHoldRef.current) {
+              pausedRef.current = false;
+              setHeld(false);
+              setSnap(getSnapshot());
+            }
+          }}
           data-testid="tape-collapse"
         >
           <span className="panel__chevron">{collapsed ? '▸' : '▾'}</span>
@@ -186,7 +244,7 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
           {badge}
         </span>
         {held && (
-          <span className="panel__badge tape__held" data-testid="tape-held" title="updates paused while reading — leave the tape to resume">
+          <span className="panel__badge tape__held" data-testid="tape-held" title="Display held; incoming prints are still retained. Resume to see the newest prints.">
             HELD
           </span>
         )}
@@ -194,13 +252,32 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
           <span
             className="panel__badge tape__big"
             data-testid="tape-big"
-            title={`tape rows at or above $${bigTradeUsd.toLocaleString('en-US')} notional`}
+            title={`tape rows at or above ${bigTradeUsd.toLocaleString('en-US')} price × quantity`}
           >
             {bigCount} big
           </span>
         )}
+        <button type="button" className="panel__lock tape__hold" aria-pressed={held}
+          onClick={toggleHold} data-testid="tape-hold">{held ? 'RESUME' : 'HOLD'}</button>
       </header>
       {!collapsed && (
+        <>
+        <div className="tape__controls">
+          <label>Side
+            <select aria-label="Tape side" value={sideFilter} data-testid="tape-side"
+              onChange={(e) => setSideFilter(e.target.value as TapeSideFilter)}>
+              <option value="all">All</option><option value="buy">Buy</option>
+              <option value="sell">Sell</option><option value="unknown">Unknown</option>
+            </select>
+          </label>
+          <label title="Minimum price multiplied by native quantity; contract units vary by instrument">Min price × quantity
+            <input aria-label="Minimum tape price × quantity" type="number" min="0" step="any"
+              placeholder="0" value={minimum} data-testid="tape-minimum"
+              onChange={(e) => setMinimum(e.target.value)} />
+          </label>
+          <span className="tape__count" data-testid="tape-count"
+            title={`${trades.length} shown, ${matched.length} matching, ${source.length} retained prints`}>{trades.length}/{source.length}</span>
+        </div>
         <div
           className="tape__body"
           data-testid="tape-body"
@@ -208,7 +285,7 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
           onPointerLeave={onLeave}
         >
           {trades.length === 0 ? (
-            <div className="panel__empty">waiting for tape…</div>
+            <div className="panel__empty">{source.length === 0 ? 'waiting for tape…' : 'no prints match filters'}</div>
           ) : (
             <div className="tape__rows">
               {trades.map((t, i) => {
@@ -221,6 +298,7 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
                     className={`tape__row tape__row--${side}${large ? ' is-large' : ''}${big ? ' is-big' : ''}`}
                     data-testid="tape-row"
                     data-side={side}
+                    data-side-src={t.sideSrc}
                     data-price={t.price.toFixed(decimals)}
                     data-size={t.size.toFixed(4)}
                     data-large={large ? '1' : '0'}
@@ -235,6 +313,7 @@ export function Tape({ bigTradeUsd = 0 }: { bigTradeUsd?: number }): JSX.Element
             </div>
           )}
         </div>
+        </>
       )}
     </section>
   );

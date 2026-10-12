@@ -77,12 +77,14 @@ describe('routeGlobalKey', () => {
     expect(routeGlobalKey('H', PLAIN)).toEqual({ type: 'toggle-hud' });
     expect(routeGlobalKey('c', PLAIN)).toEqual({ type: 'cycle-depth-channel' });
     expect(routeGlobalKey('C', PLAIN)).toEqual({ type: 'cycle-depth-channel' });
-    expect(routeGlobalKey('i', PLAIN)).toEqual({ type: 'toggle-intel' });
-    expect(routeGlobalKey('I', PLAIN)).toEqual({ type: 'toggle-intel' });
+    expect(routeGlobalKey('j', PLAIN)).toEqual({ type: 'toggle-intel' });
+    expect(routeGlobalKey('J', PLAIN)).toEqual({ type: 'toggle-intel' });
+    expect(routeGlobalKey('i', PLAIN)).toBeNull();
+    expect(routeGlobalKey('I', PLAIN)).toBeNull();
   });
 
   it('never hijacks the feature keys while typing or inside a dialog', () => {
-    for (const k of ['m', 'a', 'h', 'c']) {
+    for (const k of ['m', 'a', 'h', 'c', 'j']) {
       expect(routeGlobalKey(k, { ...PLAIN, editable: true })).toBeNull();
       expect(routeGlobalKey(k, { ...PLAIN, dialog: true })).toBeNull();
       expect(routeGlobalKey(k, PLAIN, { meta: true, ctrl: false })).toBeNull();

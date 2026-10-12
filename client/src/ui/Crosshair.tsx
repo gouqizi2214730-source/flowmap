@@ -36,6 +36,11 @@ interface HoverState {
   readout: CrosshairReadout | null;
 }
 
+const READOUT_KEYS: (keyof CrosshairReadout)[] = ['colSeq', 'row', 'group', 'price', 'priceLo', 'priceHi', 'priceDecimals', 'bid', 'ask', 'timeNs', 'averageMs', 'inRange'];
+function sameReadout(a: CrosshairReadout | null, b: CrosshairReadout | null): boolean {
+  return a === b || (a !== null && b !== null && READOUT_KEYS.every(key => Object.is(a[key], b[key])));
+}
+
 /** Thousands-grouped integers for the mid band (1e3..1e4). */
 const GROUP = new Intl.NumberFormat('en-US', { useGrouping: true, maximumFractionDigits: 0 });
 
@@ -97,13 +102,11 @@ export function Crosshair({ canvasRef, rendererRef }: CrosshairProps): JSX.Eleme
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const onMove = (e: PointerEvent): void => {
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      if (rafRef.current) return; // coalesce to ≤ one probe per frame
-      rafRef.current = requestAnimationFrame(() => {
+    let pointer: { x: number; y: number } | null = null;
+    const probe = (): void => {
         rafRef.current = 0;
+        if (!pointer) return;
+        const { x, y } = pointer;
         const renderer = rendererRef.current;
         const readout = renderer ? renderer.probeAt(x, y) : null;
         // Share the probe (price under the cursor) with feature components —
@@ -115,10 +118,18 @@ export function Crosshair({ canvasRef, rendererRef }: CrosshairProps): JSX.Eleme
           y,
           at: Date.now(),
         });
-        setHover({ x, y, readout });
-      });
+        setHover(prev => prev && prev.x === x && prev.y === y && sameReadout(prev.readout, readout) ? prev : { x, y, readout });
+        // While hovered, the camera and resident data can move beneath a
+        // stationary cursor. Only changed readouts commit a React render.
+        rafRef.current = requestAnimationFrame(probe);
+    };
+    const onMove = (e: PointerEvent): void => {
+      const rect = canvas.getBoundingClientRect();
+      pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      if (!rafRef.current) rafRef.current = requestAnimationFrame(probe);
     };
     const onLeave = (): void => {
+      pointer = null;
       if (rafRef.current) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = 0;
@@ -129,6 +140,7 @@ export function Crosshair({ canvasRef, rendererRef }: CrosshairProps): JSX.Eleme
     canvas.addEventListener('pointermove', onMove);
     canvas.addEventListener('pointerleave', onLeave);
     return () => {
+      pointer = null;
       canvas.removeEventListener('pointermove', onMove);
       canvas.removeEventListener('pointerleave', onLeave);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -213,6 +225,9 @@ export function Crosshair({ canvasRef, rendererRef }: CrosshairProps): JSX.Eleme
               </span>
             </div>
           )}
+          {readout.averageMs !== undefined && <div className="crosshair__line crosshair__line--dim">
+            <span className="crosshair__key">avg</span><span className="crosshair__val">{(readout.averageMs / 1000).toFixed(1)} s</span>
+          </div>}
         </div>
       )}
     </div>

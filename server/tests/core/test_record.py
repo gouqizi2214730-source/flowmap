@@ -100,7 +100,7 @@ def test_round_trip_bit_identical(tmp_path):
     assert len(tail.columns) == 100
     assert tail.newest_t0_ns == cols[-1].t0_ns == 99 * DT_NS
     for orig, got in zip(cols, tail.columns):
-        assert got.bid.dtype == np.float16 and got.ask.dtype == np.float16
+        assert got.bid.dtype == np.float32 and got.ask.dtype == np.float32
         assert np.array_equal(orig.bid, got.bid)
         assert np.array_equal(orig.ask, got.ask)
         assert (got.epoch, got.col_seq, got.t0_ns) == (orig.epoch, orig.col_seq, orig.t0_ns)
@@ -309,6 +309,7 @@ def test_restart_continues_part_numbering(tmp_path):
     parts1 = {int(f.stem.rsplit("-", 1)[-1]) for f in sym_dir(base).glob("*.parquet")}
 
     s2 = rec.open_session(MARKET, SYMBOL)  # simulated restart, same symbol
+    s2.record_epoch(EPOCH0)
     for c in cols[10:]:
         s2.record_column(c)
     s2.flush()
@@ -319,7 +320,7 @@ def test_restart_continues_part_numbering(tmp_path):
     tail = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
                          now_ns=20 * DT_NS, limit_cols=20)
     assert tail is not None
-    assert [c.col_seq for c in tail.columns] == list(range(20))
+    assert [c.col_seq for c in tail.columns] == list(range(10, 20))
 
 
 # 10. orphaned epochs ---------------------------------------------------------
@@ -523,7 +524,82 @@ def test_concurrent_sessions_never_share_part_numbers(tmp_path):
     tail = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
                          now_ns=40 * DT_NS, limit_cols=40)
     assert tail is not None
-    assert [c.col_seq for c in tail.columns] == list(range(40))
+    assert [c.col_seq for c in tail.columns] == list(range(20, 40))
+
+
+def _two_recording_runs(base):
+    rec = Recorder(base, 20.0)
+    old = SimFeed.generate_history(seed=3, n_cols=8)
+    new = SimFeed.generate_history(seed=4, n_cols=4, start_ns=20 * DT_NS)
+    shifted = msgspec.structs.replace(EPOCH0, p0=P0 + 500.0)
+    record_all(rec, old)
+    record_all(rec, new, epochs=(shifted,))
+    return rec, old, new, shifted
+
+
+def _make_legacy(base):
+    for path in sym_dir(base).glob("*.parquet"):
+        df = pl.read_parquet(path)
+        if "recording_id" in df.columns:
+            df.drop("recording_id").write_parquet(path)
+
+
+def test_recording_identity_keeps_reset_sequences_and_epoch_geometry_separate(tmp_path):
+    base = tmp_path / "rec"
+    rec, old, new, shifted = _two_recording_runs(base)
+    files = sorted(sym_dir(base).glob("*-columns-*.parquet"))
+    ids = [pl.read_parquet(path)["recording_id"][0] for path in files]
+    assert len(set(ids)) == 2
+    tail = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
+                         now_ns=24 * DT_NS, limit_cols=20)
+    assert tail is not None
+    assert [c.t0_ns for c in tail.columns] == [c.t0_ns for c in new]
+    assert tail.epochs == [shifted]
+    assert tail.truncated
+
+    earlier = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
+                            now_ns=8 * DT_NS, end_ns=8 * DT_NS, limit_cols=20)
+    assert earlier is not None
+    assert [c.t0_ns for c in earlier.columns] == [c.t0_ns for c in old]
+    assert earlier.epochs == [EPOCH0]  # future same-numbered params must not replace these
+
+
+def test_recording_identity_orphan_cannot_borrow_another_runs_epoch(tmp_path):
+    base = tmp_path / "rec"
+    rec, _, _, _ = _two_recording_runs(base)
+    files = sorted(sym_dir(base).glob("*-epochs-*.parquet"))
+    files[-1].unlink()
+    assert rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
+                         now_ns=24 * DT_NS, limit_cols=20) is None
+
+
+def test_legacy_ranged_read_does_not_use_future_same_hour_epoch(tmp_path):
+    base = tmp_path / "rec"
+    rec, old, new, shifted = _two_recording_runs(base)
+    _make_legacy(base)
+    earlier = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
+                            now_ns=8 * DT_NS, end_ns=8 * DT_NS, limit_cols=20)
+    assert earlier is not None
+    assert earlier.epochs == [EPOCH0]
+    assert [c.t0_ns for c in earlier.columns] == [c.t0_ns for c in old]
+    latest = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
+                           now_ns=24 * DT_NS, limit_cols=20)
+    assert latest is not None
+    assert latest.epochs == [shifted]
+    assert [c.t0_ns for c in latest.columns] == [c.t0_ns for c in new]
+    assert latest.truncated
+
+
+def test_legacy_reset_without_applicable_epoch_is_ambiguous_cold_start(tmp_path, caplog):
+    base = tmp_path / "rec"
+    rec, _, _, _ = _two_recording_runs(base)
+    _make_legacy(base)
+    sorted(sym_dir(base).glob("*-epochs-*.parquet"))[-1].unlink()
+    with caplog.at_level(logging.WARNING, logger="flowmap_server.core.record"):
+        tail = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15,
+                             now_ns=24 * DT_NS, limit_cols=20)
+    assert tail is None
+    assert "ambiguous legacy" in caplog.text
 
 
 # 16. path-component traversal refusal ----------------------------------------

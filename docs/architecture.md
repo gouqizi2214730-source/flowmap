@@ -4,7 +4,8 @@ FlowMap is three processes (or two, when you run from source without the desktop
 
 1. **Tauri 2 shell** (`app/`, Rust) — spawns the sidecar on a free loopback port, injects
    `window.__FLOWMAP_SERVER__` into the webview, terminates the sidecar on quit
-   (SIGTERM → SIGKILL). See [app/README.md](../app/README.md).
+   (SIGTERM → SIGKILL on Unix; a private kill-on-close Job Object on Windows also
+   terminates the server if the shell crashes). See [app/README.md](../app/README.md).
 2. **Client** (`client/`) — React 18 + TypeScript + WebGL2. In dev, vite serves it on `:5173`
    and proxies `/api` and `/ws` to `:8720` (see `client/vite.config.ts`). In the packaged app,
    the same client is bundled static assets.
@@ -102,6 +103,7 @@ boundary; `payload_len` is always the **unpadded** length, so readers advance by
 | `0x08` | `STATUS` | S→C | cold JSON: degraded/error states |
 | `0x09`/`0x47` | `PING`/`PONG` | both | hot: send timestamps for RTT |
 | `0x0A` | `HISTORY_RESP` | S→C | hot: header (req_id, epoch, oldest_available_t_ns, four u16 counts) + that many nested complete messages |
+| `0x23` | `BOOK_UPDATE` | S→C | hot: same layout as `DEPTH_COL`, containing the current grouped book, with `final=false`; `t0_ns` is the observation time |
 | `0x40`–`0x46` | `SUBSCRIBE`, `UNSUBSCRIBE`, `SEEK`, `SET_SPEED`, `PAUSE`, `RESUME`, `HISTORY_REQ` | C→S | cold JSON |
 
 **Depth tiles are f32, not f16.** A `DEPTH_COL` carries one grid column: `mode` is `L2` (true
@@ -114,6 +116,19 @@ per `HISTORY_REQ` (mirroring the server's `HISTORY_MAX_COLS` clamp) and keeps a 
 evicting far-behind columns as it pages (`client/src/net/history.ts`). The server answers with a
 single `HISTORY_RESP` whose nested messages are ordinary full envelopes — decoders validate that
 declared counts cannot overrun the payload.
+
+Full-resolution residency limits memory, not the time axis. Views wider than
+that cache use an independent 512-column overview surface, with power-of-two
+time bins addressed by absolute source sequences. Optional `start_col`,
+`end_col`, and `stride` request fields select this detail; the response envelope
+is unchanged. The server averages genuine recorded depth and sums volume,
+retaining OHLC extremes and the latest cumulative VWAP/CVD. Disk decoding and
+aggregation run outside the feed loop with bounded source batches and a
+32 MiB completed-bin cache. A recording identity and physical price projection
+prevent unrelated runs or different epoch row geometries from being mixed.
+Missing depth stays empty. Sparse real timestamp knots keep the axis and
+overlays aligned across gaps. The WebSocket receive loop continues processing
+Pong and subscription changes while one bounded history worker is running.
 
 **Cross-language lockstep.** Fixed golden vectors (no randomness, no clock reads) are frozen as
 `.bin` files; the Python encoder and the TypeScript decoder must agree byte-for-byte
@@ -141,6 +156,33 @@ bid/ask density, finalized column by column. Finalized columns are emitted as `D
 recorded, and (on reconnect) re-seeded. A `Hello` on subscribe carries the epoch parameters and
 the capability map the UI renders as badges — capabilities are read off the actual feed, so the
 badge cannot claim more than the stream delivers.
+
+Live non-sim L2 feeds also publish `BOOK_UPDATE` independently of finalized
+time-weighted density columns. The DOM uses these instantaneous quantities;
+historical averages never replace a newer current book. Older clients skip the
+new tag by envelope length and retain their finalized-column fallback. Raw BBO
+prices and sizes come from the inside book before depth grouping. The quote
+strip and tape format prices with the exchange's native tick precision.
+
+Deep grids group native ticks into a fixed per-session core step wide enough to
+cover about 1% of the initial price. The fine core recenters once price leaves
+its central 70%, keeping the native step and recording a new epoch. Partial
+integrals move by physical interval overlap; finalized history keeps its native
+geometry. The GPU carries two RGBA metadata texels per column and projects
+each source map at draw time. Mips that straddle maps fall back to native
+columns. Historical overview groups retain a representative native epoch,
+rather than forcing old detail into the current log wings. It does not round
+trades or quotes. The first viewport and full
+history overview frame actual visible price extremes with at least 64 core
+levels (or the smaller available core), rather than fitting all stored depth.
+
+Heatmap color uses resting quantity per fine-price-cell equivalent, dividing
+coarse interval mass by its physical width. Exact CPU readouts retain raw
+quantity and interval limits. Log buckets with lost fine resolution use a
+muted ramp range, rather than falsely appearing as a hot wall at every price.
+Viewport normalization merges bounded 64-row spatial histograms in physical
+price coordinates and the selected bid/ask/sum channel. Final-column membership
+is order independent so newest-first disk pages contribute their full CDF.
 
 ## Recording and replay lifecycle (`core/record.py`, `feeds/replay.py`, `core/session.py`)
 

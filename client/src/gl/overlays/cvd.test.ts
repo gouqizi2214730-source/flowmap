@@ -5,6 +5,19 @@ import { PriceLine } from './priceLine';
 import type { BarColumn } from '../../proto/types';
 import { MsgType } from '../../proto/types';
 
+it('reuses unchanged CVD ranges but invalidates forming updates, history, prune and reset', () => {
+  const c = new Cvd();
+  c.add(bar(2, 100, 3)); c.add(bar(1, 100, 2));
+  const initial = c.series(0, 3);
+  expect(c.series(0, 3.1)).toBe(initial);
+  expect(c.series(0, 3)).toBe(initial);
+  c.add(bar(2, 100, 4)); expect(c.series(0, 3)).not.toBe(initial);
+  expect(c.series(0, 3).at(-1)?.cvd).toBe(4);
+  c.add(bar(0, 100, 1)); expect(c.series(0, 3).map(p => p.col)).toEqual([0, 1, 2]);
+  c.prune(1, 2); expect(c.series(0, 3).length).toBe(2);
+  c.reset(); expect(c.series(0, 3)).toEqual([]);
+});
+
 function bar(col_seq: number, close: number, cvd: number): BarColumn {
   return {
     type: MsgType.BAR_COL,

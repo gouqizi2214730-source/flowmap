@@ -57,23 +57,20 @@ const IDENTITY: Required<ChartMapPair> = {
 };
 
 /**
- * The production mapping pair, built on the renderer: `probeAt` reads the exact
- * CPU column cache (cell resolution — the same precision the crosshair shows),
- * `cellToCanvasCss` forward-maps grid cells to canvas CSS px. Null-safe before
- * the first column.
+ * The production mapping pair uses the continuous price projection. Drawing
+ * a price must not snap it to a coarse depth bucket in a hybrid wing.
  */
 export function rendererChartMap(rendererRef: MutableRefObject<Renderer | null>): ChartMapPair {
   return {
     fromChart: (x, y) => {
       const r = rendererRef.current;
       if (!r) return null;
-      const p = r.probeAt(x, y);
-      return p === null ? null : { col: p.colSeq, row: p.row };
+      return r.canvasCssToGrid(x, y);
     },
     toChart: (col, row) => {
       const r = rendererRef.current;
       if (!r) return { x: 0, y: 0 };
-      return r.cellToCanvasCss(col, row);
+      return r.gridToCanvasCss(col, row);
     },
   };
 }

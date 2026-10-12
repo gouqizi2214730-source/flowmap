@@ -31,6 +31,10 @@ import {
 } from './axes';
 import { GridMap, type PriceMap, type TimeMap } from './coords';
 import type { TextLayer } from '../textLayer';
+import { makeHybrid } from '../priceScale';
+import { priceFrame } from '../camera';
+import { fractionRow } from '../priceProjection';
+import { timeLabelFormatter, timeTickModel } from './axisTicks';
 
 const DIMS = { drawW: 800, drawH: 400, cssW: 800, cssH: 400 };
 /** Session-relative affine: col 5 == 1.25 s, 250 ms per column. */
@@ -66,6 +70,23 @@ function stubLayer(width: number, height: number): { layer: TextLayer; lines: Li
 }
 
 describe('priceAxisModel — label fit at large prices (R2-M2)', () => {
+  it('labels the fitted BTC range with a uniform dollar ladder', () => {
+    const scale = makeHybrid({ mid: 85505, rows: 4096, coreRows: 2048, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+    const frame = priceFrame(scale.dnRows, scale.dnRows + scale.coreRows - 1, scale.rows, 0.08, 3, scale);
+    const g = new GridMap({ ...VIEW, rowOffset: frame.rowBottom, rowScale: frame.rowSpan }, DIMS, TIME,
+      { p0: scale.coreP0, step: scale.coreStep, scale });
+    const labels = priceAxisModel(g, DIMS.cssH, 56);
+    const core = labels.filter(l => Number(l.label) > 85490 && Number(l.label) < 85520);
+    expect(core.length).toBeGreaterThanOrEqual(4);
+    const positions = labels.map(l => l.pos).sort((a, b) => a - b);
+    for (let i = 1; i < positions.length; i++) expect(positions[i] - positions[i - 1]).toBeGreaterThanOrEqual(22);
+    expect(priceTickPositions(g, DIMS.cssH)).toEqual(labels.map(l => l.pos));
+    for (const label of core) {
+      const row = fractionRow(g.view, scale, 1 - label.pos / DIMS.cssH);
+      expect(Number(label.label)).toBeCloseTo(g.rowToPrice(row), 5);
+    }
+  });
+
   it('reduces decimals GLOBALLY so a big-price ladder stays inside the gutter', () => {
     // Deep zoom on a large price: tick step 0.01 → "12345.01" (8 chars) would
     // overflow the 7-char budget; the fit drops to 1 decimal for the WHOLE ladder.
@@ -124,6 +145,36 @@ describe('drawPriceAxis — tick marks and label styling', () => {
 });
 
 describe('drawTimeAxis — typography, ticks, edge clamping', () => {
+  it.each([220, 1033])('keeps projected labels apart at width %s, including a large timestamp gap', cssW => {
+    const hour = 3_600_000_000_000n;
+    const time: TimeMap = { anchorSeq: 1000, anchorT0Ns: 25n * hour, dtNs: 250_000_000,
+      slots: { startSeq: 0, cols: Float64Array.of(0, 300, 304, 1000),
+        t0: Float64Array.of(0, Number(3n * hour), Number(23n * hour), Number(25n * hour)) } };
+    const g = new GridMap({ ...VIEW, colScale: 1000 }, { ...DIMS, cssW, drawW: cssW }, time, { p0: 100, step: .5 });
+    const model = timeAxisModel(g, cssW);
+    const { layer, texts, lines } = stubLayer(cssW, 22);
+    drawTimeAxis(layer, g);
+    expect(model.length).toBeGreaterThan(0);
+    expect(model.length).toBeLessThanOrEqual(8);
+    expect(timeTickPositions(g, cssW)).toEqual(model.map(t => t.pos));
+    const candidates = timeTickModel(0n, 25n * hour, 7);
+    const fmt = timeLabelFormatter(candidates.step);
+    for (let i = 0; i < model.length; i++) {
+      expect(candidates.ticks.some(t => fmt(t) === model[i].label && Math.abs(g.cssX(g.tsToCol(t)) - model[i].pos) < 1e-8)).toBe(true);
+      expect(lines[i].x0).toBe(model[i].pos); // Tick location remains authoritative.
+    }
+    const boxes = texts.map(t => {
+      const width = t.str.length * AXIS_TIME_LABEL_SIZE * .6;
+      const left = t.opts.align === 'right' ? t.x - width : t.opts.align === 'center' ? t.x - width / 2 : t.x;
+      return { left, right: left + width };
+    });
+    for (let i = 0; i < boxes.length; i++) {
+      expect(boxes[i].left).toBeGreaterThanOrEqual(2 - 1e-8);
+      expect(boxes[i].right).toBeLessThanOrEqual(cssW - 2 + 1e-8);
+      if (i > 0) expect(boxes[i].left - boxes[i - 1].right).toBeGreaterThanOrEqual(8 - 1e-8);
+    }
+  });
+
   it('draws 6 px majors at AXIS_TICK_ALPHA and clamps the first/last label inward', () => {
     const g = gm({ p0: 0, step: 0.5 });
     const model = timeAxisModel(g, 800);

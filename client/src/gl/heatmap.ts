@@ -19,8 +19,9 @@ import {
   RegionTracker,
   REGION_LIVE,
 } from './regionFloor';
-import { HEATMAP_FRAG, HEATMAP_VERT } from './shaders/heatmap';
+import { heatmapProgram } from './heatmapProgram';
 import { TileRing } from './tileRing';
+import { rowToPrice, type PriceScale } from './priceScale';
 
 /** Screen→grid mapping. col = colOffset + colScale·uv.x; row = rowOffset + rowScale·uv.y. */
 export interface HeatmapView {
@@ -64,6 +65,8 @@ const MIP1_UNIT = 2;
 const MIP2_UNIT = 3;
 const ROWMIP_UNIT = 4;
 const REGION_UNIT = 5;
+const GEOMETRY_UNIT = 6;
+const RESOLUTION_UNIT = 7;
 
 /**
  * Default perceptual display gamma (§8.3). Order-flow density is heavy-tailed:
@@ -176,64 +179,21 @@ export function transferCurve(
   return S + (1 - S) * (Math.log1p((L * (tc - k)) / (1 - k)) / Math.log1p(L));
 }
 
-/**
- * Largest black point the Tolerance slider can reach. Raised from 0.5 to 0.85 so
- * the control has real reach — at the top of the slider it hides sub-threshold
- * density up to 85% of the white point, cutting a genuinely noisy field down to
- * just the walls. Still capped well below 1: at `floor → 1` the `1/(1-floor)`
- * re-expansion (scale = 6.67× here) degenerates and even the white percentile
- * maps to LUT entry 0 — a black screen — which would break the "both endpoints
- * stay fixed" promise rather than implement it.
- */
+/** Shader safety ceiling after a calibrated cut is scaled by row footprint. */
 export const TOLERANCE_MAX_FLOOR = 0.85;
 
-/** Curve exponent for the slider → floor map. Between linear (1) and the old
- *  square (2): eased enough to keep fine control at the low end, but with real
- *  bite through the mid-slider where the field actually gets cleaned up. */
-export const TOLERANCE_CURVE = 1.4;
-
-/**
- * Default Tolerance slider position. Wave 3 / F10 (2026-09-14): 5 → 0.
- *
- * History: 15 (floor ≈ 0.060) was the "empty heatmap" default and read black
- * out of the box; 5 (floor ≈ 0.013 × the row footprint) cut ≈56% of active
- * cells on the heavy-tail model. F2's display-policy A/B (frozen BTC window,
- * same data across conditions) measured that even 5 leaves the field
- * discontinuous: with the floor at 0 the rows carrying ink went 59.2% → 98.6%
- * and non-background pixels 45.2% → 95.6% (void 54.8% → 4.4%) — the only
- * candidate that reaches the Bookmap continuity target (D3-C1: no cell that
- * has data may render background). The isolated-speck count DROPPED (5 → 1
- * component; the faint cells connect instead of dotting), and the wall band is
- * untouched (knee/white outputs and max luma unchanged). The one honest cost —
- * the added faint fill needs low-end brightness to be legible — is carried by
- * {@link DEFAULT_DISPLAY_GAMMA}'s below-knee lift, not by this slider.
- *
- * Slider 0 is (and always was) an exact algebraic no-op: floor 0 keeps the
- * shader's remap the identity. Existing installs persist their stored
- * tolerance; pushing the new default to them needs a settings migration
- * (flagged in swarm2/F10.md — settings.ts is outside this lane).
- */
+/** Zero preserves every positive density sample. */
 export const DEFAULT_TOLERANCE = 0;
 
 /**
- * Map a 0–100 "Tolerance" slider to the shader's black point.
- *
- * Eased (exponent {@link TOLERANCE_CURVE}), not linear, because the useful floors
- * are small: order-flow density is heavy-tailed, so a floor around 1–2% of the
- * white point separates the real ladder from the specks without hiding the field
- * (a cell needs that fraction of the white point to paint at all). The default
- * is now 0 — the F2-measured continuity endpoint (see {@link DEFAULT_TOLERANCE});
- * the eased curve still gives fine control when a denoise IS wanted, reaching
- * the cap at 100.
- *
- * Non-finite input yields 0 rather than NaN — a NaN floor would blank the entire
- * heatmap, and this is reachable from `window.__flowmapLive` in dev/e2e builds.
- * Slider 0 → floor 0 exactly (an algebraic no-op), preserved by construction.
+ * Resolve a slider value through its visible density distribution. A cold or
+ * missing normalizer keeps the field visible until real samples arrive.
  */
-export function floorForTolerance(tolerance: number): number {
-  if (!Number.isFinite(tolerance)) return 0;
-  const t = Math.min(100, Math.max(0, tolerance)) / 100;
-  return TOLERANCE_MAX_FLOOR * Math.pow(t, TOLERANCE_CURVE);
+export function floorForTolerance(
+  tolerance: number,
+  normalizer?: Pick<ViewportNormalizer, 'floorForTolerance'> | null,
+): number {
+  return normalizer?.floorForTolerance(tolerance) ?? 0;
 }
 
 /** The mip level + tap geometry to sample this frame (see {@link selectLevel}). */
@@ -718,39 +678,6 @@ function drawingDpr(): number {
   return Number.isFinite(ratio) && ratio > 0 ? ratio : 1;
 }
 
-function compileShader(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
-  const sh = gl.createShader(type);
-  if (!sh) throw new Error('flowmap/heatmap: createShader returned null');
-  gl.shaderSource(sh, src);
-  gl.compileShader(sh);
-  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(sh);
-    gl.deleteShader(sh);
-    const kind = type === gl.VERTEX_SHADER ? 'vertex' : 'fragment';
-    throw new Error(`flowmap/heatmap: ${kind} shader compile failed: ${log}`);
-  }
-  return sh;
-}
-
-function linkProgram(gl: WebGL2RenderingContext, vert: string, frag: string): WebGLProgram {
-  const vs = compileShader(gl, gl.VERTEX_SHADER, vert);
-  const fs = compileShader(gl, gl.FRAGMENT_SHADER, frag);
-  const prog = gl.createProgram();
-  if (!prog) throw new Error('flowmap/heatmap: createProgram returned null');
-  gl.attachShader(prog, vs);
-  gl.attachShader(prog, fs);
-  gl.linkProgram(prog);
-  // Shaders can be detached/deleted once linked.
-  gl.deleteShader(vs);
-  gl.deleteShader(fs);
-  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-    const log = gl.getProgramInfoLog(prog);
-    gl.deleteProgram(prog);
-    throw new Error(`flowmap/heatmap: program link failed: ${log}`);
-  }
-  return prog;
-}
-
 /**
  * Upload a float uniform array. Real WebGL2 contexts always expose
  * `uniform1fv`; the optional-call guard lets the jsdom FakeGL (which predates
@@ -780,6 +707,19 @@ type UniformName =
   | 'u_colScale'
   | 'u_rowOffset'
   | 'u_rowScale'
+  | 'u_priceProjection'
+  | 'u_priceCore'
+  | 'u_priceWings'
+  | 'u_pricePixel'
+  | 'u_geometry'
+  | 'u_geometryEnabled'
+  | 'u_priceOriginResidual'
+  | 'u_resolution'
+  | 'u_resolutionEnabled'
+  | 'u_maxLevel'
+  | 'u_levelFloor'
+  | 'u_timeLevel'
+  | 'u_rowMipUsable'
   | 'u_capacityCols'
   | 'u_colsPerTile'
   | 'u_rows'
@@ -812,6 +752,7 @@ type UniformName =
   | 'u_rowMipWeights';
 
 export class Heatmap {
+  priceScale: PriceScale | null = null;
   readonly gl: WebGL2RenderingContext;
   private readonly tileRing: TileRing;
   private readonly lut: WebGLTexture;
@@ -832,13 +773,11 @@ export class Heatmap {
    */
   gamma = DEFAULT_DISPLAY_GAMMA;
 
-  /**
-   * Black point on the normalized intensity (§9 Tolerance), in the same units as
-   * `t` BEFORE the mip footprint is folded in — `draw()` scales it per frame.
-   * Kept outside {@link encoding} so `updateNormalization`'s per-frame
-   * reassignment of that object cannot clobber it, exactly like {@link gamma}.
-   */
+  /** Explicit normalized cut for diagnostic callers that bypass the slider. */
   floor = 0;
+
+  /** Raw 0–100 noise-filter position; null retains the explicit floor API. */
+  toleranceValue: number | null = null;
 
   /**
    * Depth channel mode (§9, contract C2): the `u_channel` code fed to the
@@ -941,7 +880,7 @@ export class Heatmap {
     this.tileRing = tileRing;
     this.lut = lut;
 
-    this.program = linkProgram(gl, HEATMAP_VERT, HEATMAP_FRAG);
+    this.program = heatmapProgram(gl);
 
     // Per-region mask (lane F17): one RGBA8 texel per COLUMN in ring-slot space
     // (colsPerTile × 1 × layers), red byte 0 = live / 255 = reconstructed. Kept
@@ -1006,6 +945,19 @@ export class Heatmap {
       u_colScale: loc('u_colScale'),
       u_rowOffset: loc('u_rowOffset'),
       u_rowScale: loc('u_rowScale'),
+      u_priceProjection: loc('u_priceProjection'),
+      u_priceCore: loc('u_priceCore'),
+      u_priceWings: loc('u_priceWings'),
+      u_pricePixel: loc('u_pricePixel'),
+      u_geometry: loc('u_geometry'),
+      u_geometryEnabled: loc('u_geometryEnabled'),
+      u_priceOriginResidual: loc('u_priceOriginResidual'),
+      u_resolution: loc('u_resolution'),
+      u_resolutionEnabled: loc('u_resolutionEnabled'),
+      u_maxLevel: loc('u_maxLevel'),
+      u_levelFloor: loc('u_levelFloor'),
+      u_timeLevel: loc('u_timeLevel'),
+      u_rowMipUsable: loc('u_rowMipUsable'),
       u_capacityCols: loc('u_capacityCols'),
       u_colsPerTile: loc('u_colsPerTile'),
       u_rows: loc('u_rows'),
@@ -1107,6 +1059,43 @@ export class Heatmap {
     gl.uniform1f(this.u.u_colScale, view.colScale);
     gl.uniform1f(this.u.u_rowOffset, view.rowOffset);
     gl.uniform1f(this.u.u_rowScale, view.rowScale);
+    gl.activeTexture(gl.TEXTURE0 + GEOMETRY_UNIT);
+    this.tileRing.geometry.flush();
+    gl.bindTexture(gl.TEXTURE_2D, this.tileRing.geometry.texture ?? this.lut);
+    gl.uniform1i(this.u.u_geometry, GEOMETRY_UNIT);
+    gl.uniform1i(this.u.u_geometryEnabled, this.tileRing.geometry.texture ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE0 + RESOLUTION_UNIT);
+    this.tileRing.geometry.flushResolution();
+    gl.bindTexture(gl.TEXTURE_2D, this.tileRing.geometry.resolutionTexture ?? this.lut);
+    gl.uniform1i(this.u.u_resolution, RESOLUTION_UNIT);
+    gl.uniform1i(this.u.u_resolutionEnabled, this.tileRing.geometry.resolutionTexture ? 1 : 0);
+    const scale = this.priceScale;
+    const physicalProjection = scale?.kind === 'hybrid' || (scale !== null && this.tileRing.geometry.texture !== null);
+    const origin = scale?.kind === 'hybrid' ? scale.coreP0 : scale?.p0 ?? 0;
+    gl.uniform1f(this.u.u_priceOriginResidual, origin - Math.fround(origin));
+    gl.uniform1i(this.u.u_priceProjection, physicalProjection ? 1 : 0);
+    if (scale?.kind === 'hybrid') {
+      const low = rowToPrice(scale, view.rowOffset);
+      const high = rowToPrice(scale, view.rowOffset + view.rowScale);
+      const coreHi = scale.coreP0 + scale.coreRows * scale.coreStep;
+      const dnLog = Math.log(scale.coreP0 / scale.loPrice) / Math.max(1, scale.dnRows);
+      const upLog = Math.log(scale.hiPrice / coreHi) / Math.max(1, scale.rows - scale.dnRows - scale.coreRows);
+      gl.uniform4f(this.u.u_priceCore, scale.dnRows, scale.coreRows, scale.coreStep, scale.coreP0);
+      gl.uniform4f(this.u.u_priceWings, dnLog, upLog, low - scale.coreP0, high - low);
+      gl.uniform1f(this.u.u_pricePixel, (high - low) * drawingDpr() / Math.max(1, gl.drawingBufferHeight));
+    } else if (scale?.kind === 'linear' && physicalProjection) {
+      const low = rowToPrice(scale, view.rowOffset - 0.5);
+      const span = view.rowScale * scale.step;
+      gl.uniform4f(this.u.u_priceCore, -1, scale.rows, scale.step, scale.p0);
+      gl.uniform4f(this.u.u_priceWings, 0, 0, low - scale.p0, span);
+      gl.uniform1f(this.u.u_pricePixel, span * drawingDpr() / Math.max(1, gl.drawingBufferHeight));
+    }
+    gl.uniform1i(this.u.u_maxLevel, mips?.maxLevel ?? 0);
+    gl.uniform1i(this.u.u_rowMipUsable, mips?.rowUsable ? 1 : 0);
+    gl.uniform1i(this.u.u_levelFloor, this.levelFloor);
+    // Projected sampling can average native columns without square mips.
+    // Time resolution must never force coarser price buckets in the wings.
+    gl.uniform1i(this.u.u_timeLevel, selectLevel(0, 2, view.colScale / Math.max(1, gl.drawingBufferWidth) * drawingDpr()).level);
 
     gl.uniform1i(this.u.u_capacityCols, this.tileRing.capacityCols);
     gl.uniform1i(this.u.u_colsPerTile, this.tileRing.colsPerTile);
@@ -1268,9 +1257,15 @@ export class Heatmap {
     // blk, and normMipScale(level) is 1 by design (gl/normalize.ts) — so t grows
     // with price zoom-out and an unscaled floor would hide a different amount of
     // size at every zoom. Clamped below 1 so the re-expansion never degenerates.
+    // Hybrid pixels select their own local row footprint in the shader;
+    // ordinary views retain the exact existing frame-wide floor semantics.
+    const floorRows = physicalProjection ? 1 : nRowTaps * blk;
+    const calibratedFloor = this.toleranceValue === null
+      ? this.floor
+      : floorForTolerance(this.toleranceValue, this.normalizer);
     const floor = Math.min(
       TOLERANCE_MAX_FLOOR,
-      Math.max(0, this.floor) * nRowTaps * blk,
+      Math.max(0, calibratedFloor) * floorRows,
     );
     gl.uniform1f(this.u.u_floor, floor);
     gl.uniform1f(this.u.u_floorScale, 1 / Math.max(1 - floor, 1e-6));
@@ -1280,10 +1275,10 @@ export class Heatmap {
     // zoom. scale 1 (the default-safe endpoint) uploads values bit-equal to the
     // live pair; with no tagged columns the shader's live branch is selected
     // anyway, keeping live pixels byte-identical.
-    const rawRecon = reconFloorFor(this.floor, this.reconFloorScale);
+    const rawRecon = reconFloorFor(calibratedFloor, this.reconFloorScale);
     const floorRecon = Math.min(
       TOLERANCE_MAX_FLOOR,
-      Math.max(0, rawRecon) * nRowTaps * blk,
+      Math.max(0, rawRecon) * floorRows,
     );
     const floorScaleRecon = 1 / Math.max(1 - floorRecon, 1e-6);
     gl.uniform1f(this.u.u_floorRecon, floorRecon);
@@ -1296,7 +1291,7 @@ export class Heatmap {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     gl.bindVertexArray(null);
-    checkGLError(gl, 'Heatmap.draw');
+    checkGLError(gl, 'Heatmap.draw', true);
   }
 
   /**
@@ -1374,7 +1369,6 @@ export class Heatmap {
     const gl = this.gl;
     gl.deleteBuffer(this.quad);
     gl.deleteVertexArray(this.vao);
-    gl.deleteProgram(this.program);
     gl.deleteTexture(this.regionTex);
   }
 }

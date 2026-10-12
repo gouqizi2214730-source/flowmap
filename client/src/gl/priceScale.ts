@@ -19,10 +19,9 @@
  * today's narrow grid — while the remaining 2048 rows reach −99%/+1000% at
  * ~0.34%/row. Nothing is lost near the money; the far field is gained.
  *
- * **The renderer does not care.** The WebGL fragment shader works purely in ROW
- * space (col/row → texel → LUT), so a non-uniform row height costs it nothing
- * and the O(1)-in-history no-re-raster invariant is untouched. Only the CPU-side
- * price↔row mapping changes.
+ * These are STORAGE coordinates. PriceProjection and the heatmap shader map a
+ * price-uniform screen back into these rows; storage resolution must never
+ * determine the apparent size of a price move. Tiles stay in place on zoom.
  *
  * **Linear stays linear.** `kind: 'linear'` is the current arithmetic verbatim,
  * so the default band is bit-identical to before. Everything here is pure, so
@@ -146,6 +145,13 @@ export function priceToRow(s: PriceScale, price: number): number {
   const up = upperRows(s);
   if (up <= 0) return coreEnd + (coreHi / s.coreStep) * Math.log(price / coreHi);
   return coreEnd + up * (Math.log(price / coreHi) / Math.log(s.hiPrice / coreHi));
+}
+
+/** Plot real prices exactly on a hybrid axis. A half-row shift there can
+ *  represent hundreds of dollars in a wing; only uniform grids retain the
+ *  legacy cell-centre offset used by the density texture. */
+export function priceToPlotRow(s: PriceScale, price: number): number {
+  return priceToRow(s, price) + (s.kind === 'linear' ? 0.5 : 0);
 }
 
 /**

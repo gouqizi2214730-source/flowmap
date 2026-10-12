@@ -50,16 +50,59 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           INPUT_TAG: ${{ github.event.inputs.tag }}
         run: |
+          set -euo pipefail
+          TAG=""
           if [ "$EVENT_NAME" = "push" ]; then
-            echo "tag=$REF_NAME" >> "$GITHUB_OUTPUT"
-            echo "do_release=true" >> "$GITHUB_OUTPUT"
+            TAG="$REF_NAME"
           elif [ -n "$INPUT_TAG" ]; then
-            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
+            TAG="$INPUT_TAG"
+          fi
+          if [ -n "$TAG" ]; then
+            if [[ ! "$TAG" =~ ^v[0-9]+(\.[0-9]+){2,3}$ ]]; then
+              echo "Invalid release tag: $TAG" >&2
+              exit 1
+            fi
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "do_release=true" >> "$GITHUB_OUTPUT"
           else
             echo "tag=" >> "$GITHUB_OUTPUT"
             echo "do_release=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.resolve.outputs.tag && format('refs/tags/{0}', steps.resolve.outputs.tag) || github.sha }}
+
+      - name: Verify release versions match the selected tag
+        if: steps.resolve.outputs.do_release == 'true'
+        env:
+          TAG: ${{ steps.resolve.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          root = pathlib.Path('.')
+          expected = os.environ['TAG'][1:]
+          def matched_version(path, pattern):
+              match = re.search(pattern, (root / path).read_text())
+              if match is None:
+                  raise SystemExit(f'Missing version in {path}')
+              return match.group(1)
+          versions = {
+              'Tauri': json.loads((root / 'app/src-tauri/tauri.conf.json').read_text())['version'],
+              'Cargo': matched_version('app/src-tauri/Cargo.toml', r'(?m)^version = "([^"]+)"'),
+              'Cargo lock': matched_version('app/src-tauri/Cargo.lock', r'name = "flowmap"\s+version = "([^"]+)"'),
+              'Client': json.loads((root / 'client/package.json').read_text())['version'],
+              'Client lock': json.loads((root / 'client/package-lock.json').read_text())['version'],
+              'Client root lock': json.loads((root / 'client/package-lock.json').read_text())['packages']['']['version'],
+              'Server': matched_version('server/pyproject.toml', r'(?m)^version = "([^"]+)"'),
+              'Server lock': matched_version('server/uv.lock', r'name = "flowmap-server"\s+version = "([^"]+)"'),
+              'Server runtime': matched_version('server/src/flowmap_server/__init__.py', r'__version__ = "([^"]+)"'),
+          }
+          wrong = {name: value for name, value in versions.items() if value != expected}
+          if wrong:
+              raise SystemExit(f'Tag expects {expected}; inconsistent versions: {wrong}')
+          print(f'All release versions match {expected}')
+          PY
 
   # ---------------------------------------------------------------------------
   # Ensure a (draft) Release exists for the tag before the matrix uploads to it.
@@ -70,16 +113,26 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ format('refs/tags/{0}', needs.prepare.outputs.tag) }}
       - name: Ensure a draft release exists
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
+          set -euo pipefail
+          NOTES="docs/release-notes-${TAG#v}.md"
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $TAG already exists — reusing it."
+            if [ -f "$NOTES" ]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$NOTES"
+            fi
+          elif [ -f "$NOTES" ]; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "FlowMap $TAG" --notes-file "$NOTES" --draft
           else
             gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
-              --title "FlowMap $TAG" --generate-notes --draft
+              --verify-tag --title "FlowMap $TAG" --generate-notes --draft
           fi
 
   # ---------------------------------------------------------------------------
@@ -98,7 +151,7 @@ jobs:
       # scopes let the run sign a provenance statement binding each installer's
       # digest to this repository, this workflow file and this commit, so the
       # link from readable source to downloaded binary stops being a promise:
-      #   gh attestation verify FlowMap_<version>_aarch64.dmg -R nazmiefearmutcu0/FlowMap
+      #   gh attestation verify FlowMap_<version>_aarch64.dmg -R <owner>/<repo>
       id-token: write
       attestations: write
     strategy:
@@ -139,6 +192,8 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag && format('refs/tags/{0}', needs.prepare.outputs.tag) || github.sha }}
 
       - name: Install Rust (host target ${{ matrix.triple }})
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -367,7 +422,7 @@ jobs:
       # uploaded, so the digest in the attestation is the digest of the file the
       # next step ships. Sigstore-backed and public — anyone can check a download
       # against it without trusting the release page:
-      #   gh attestation verify <file> -R nazmiefearmutcu0/FlowMap
+      #   gh attestation verify <file> -R <owner>/<repo>
       - name: Attest build provenance
         if: needs.prepare.outputs.do_release == 'true'
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4
@@ -427,6 +482,8 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Flip the release out of draft once every installer uploaded successfully.
+  # The operator must finish source review and validation before pushing the
+  # tag: a successful release run publishes a stable Latest release automatically.
   # ---------------------------------------------------------------------------
   publish:
     needs: [prepare, build]
@@ -438,6 +495,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ format('refs/tags/{0}', needs.prepare.outputs.tag) }}
 
       - name: Fetch the per-leg checksum lines
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -479,4 +538,4 @@ jobs:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           gh release edit "$TAG" \
-            --repo "$GITHUB_REPOSITORY" --draft=false --latest
+            --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest

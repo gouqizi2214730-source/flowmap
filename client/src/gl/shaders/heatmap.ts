@@ -34,6 +34,11 @@ out vec4 fragColor;
 
 // Density tiles: RG16F, R = bid, G = ask. texelFetch only — no filtering.
 uniform highp sampler2DArray u_tiles;
+uniform highp sampler2D u_geometry;
+uniform int u_geometryEnabled;
+uniform float u_priceOriginResidual;
+uniform highp sampler2D u_resolution;
+uniform int u_resolutionEnabled;
 // SUM-mip levels (§8.3 / T7). Each texel of level L is the SUM of a 4^L x 4^L
 // block of level 0 — walls stay walls when zoomed out. When mips are absent the
 // caller binds u_tiles here too (they are never sampled while u_level == 0).
@@ -52,6 +57,14 @@ uniform float u_colOffset;
 uniform float u_colScale;
 uniform float u_rowOffset;
 uniform float u_rowScale;
+uniform int u_priceProjection;
+uniform vec4 u_priceCore; // lower rows, core rows, native step, core low price
+uniform vec4 u_priceWings; // lower/upper log-per-row, viewport price delta, price span
+uniform float u_pricePixel;
+uniform int u_maxLevel;
+uniform int u_levelFloor;
+uniform int u_timeLevel;
+uniform int u_rowMipUsable;
 
 // Ring addressing.
 uniform int u_capacityCols;
@@ -99,8 +112,9 @@ uniform float u_lowSpan;
 // gamma curve below also keeps. At u_floor == 0 this is algebraically and
 // numerically the identity, so every existing pixel spec is untouched.
 //
-// NOTE u_floor arrives ALREADY scaled by the frame's rows-per-pixel footprint
-// (nRowTaps * blk). intensity SUMS rows and only divides the COLUMN dimension
+// Ordinary views receive u_floor scaled by the frame's nRowTaps * blk;
+// projected views receive the raw floor and apply each pixel's local footprint.
+// intensity SUMS rows and only divides the COLUMN dimension
 // by blk, so t grows with price zoom-out; an unscaled floor would silently mean
 // something different at every zoom level.
 uniform float u_floor;
@@ -369,13 +383,234 @@ vec2 sampleField0(float colf, float rowf) {
   return acc;
 }
 
+// log(1+x) without losing small price differences to float cancellation.
+float logNearOne(float x) {
+  return abs(x) < 0.01 ? x * (1.0 - x * 0.5 + x * x / 3.0) : log(1.0 + x);
+}
+
+float priceRow(float uv) {
+  float delta = u_priceWings.z + u_priceWings.w * uv;
+  if (u_priceCore.x < 0.0) return delta / u_priceCore.z;
+  float coreSpan = u_priceCore.y * u_priceCore.z;
+  if (delta < 0.0) return u_priceCore.x + logNearOne(delta / u_priceCore.w) / u_priceWings.x;
+  if (delta > coreSpan) return u_priceCore.x + u_priceCore.y + logNearOne((delta - coreSpan) / (u_priceCore.w + coreSpan)) / u_priceWings.y;
+  return u_priceCore.x + delta / u_priceCore.z;
+}
+
+// Each screen pixel has a different footprint in the storage grid. A core
+// pixel must never share a wing's row blur or vice versa. Keep coarse wing
+// cells constant over their true price interval; do not invent fine levels.
+int projectedRowLevel(float footprint) {
+  int level = min(u_levelFloor, u_maxLevel);
+  if (footprint >= 4.0) level = max(level, min(1, u_maxLevel));
+  if (footprint >= 16.0) level = max(level, min(2, u_maxLevel));
+  return level;
+}
+
+int projectedBlock(int level) {
+  return level == 2 ? 16 : (level == 1 ? 4 : 1);
+}
+
+// Sum only the chosen price rows. A square mip may contribute its column
+// average, but a time-only zoom must never widen the price interval. The
+// existing row-only mip also keeps native time resolution for coarse rows.
+vec2 projectedNativeRows(int col, int first, int taps, int rowLevel) {
+  int rowBlock = projectedBlock(rowLevel);
+  bool rowOnly = rowLevel > 0 && u_rowMipUsable == 1;
+  int sourceRows = rowOnly ? 4 : 1;
+  int rowGroups = rowBlock / sourceRows;
+  int slot = col % u_capacityCols;
+  int layer = slot / u_colsPerTile;
+  int x = slot % u_colsPerTile;
+  vec2 value = vec2(0.0);
+  for (int j = 0; j < 4; j++) {
+    if (j >= taps) break;
+    for (int r = 0; r < 16; r++) {
+      if (r >= rowGroups) break;
+      int y = (first + j) * rowGroups + r;
+      if (y < 0 || y >= u_rows / sourceRows) continue;
+      if (rowOnly) value += texelFetch(u_rowMip1, ivec3(x, y, layer), 0).rg;
+      else value += texelFetch(u_tiles, ivec3(x, y, layer), 0).rg;
+    }
+  }
+  return value;
+}
+
+vec2 projectedRows(int col, int first, int taps, int rowLevel, int timeLevel) {
+  if (timeLevel == 0) return projectedNativeRows(col, first, taps, rowLevel);
+  int rowBlock = projectedBlock(rowLevel);
+  int sourceLevel = min(rowLevel, timeLevel);
+  int columnBlock = projectedBlock(sourceLevel);
+  int sourceRows = columnBlock;
+  int rowGroups = rowBlock / sourceRows;
+  int slot = col % u_capacityCols;
+  int layer = slot / u_colsPerTile;
+  int x = (slot % u_colsPerTile) / columnBlock;
+  vec2 value = vec2(0.0);
+  for (int j = 0; j < 4; j++) {
+    if (j >= taps) break;
+    int rowGroup = first + j;
+    for (int r = 0; r < 4; r++) {
+      if (r >= rowGroups) break;
+      int y = rowGroup * rowGroups + r;
+      if (y < 0 || y >= u_rows / sourceRows) continue;
+      if (sourceLevel == 0) value += texelFetch(u_tiles, ivec3(x, y, layer), 0).rg;
+      else if (sourceLevel == 1) value += texelFetch(u_mip1, ivec3(x, y, layer), 0).rg;
+      else value += texelFetch(u_mip2, ivec3(x, y, layer), 0).rg;
+    }
+  }
+  return value / float(columnBlock);
+}
+
+void columnScale(int col, out vec4 core, out vec4 wings) {
+  core = u_priceCore;
+  wings = vec4(u_priceWings.xy, 3.0, u_priceOriginResidual);
+  if (u_geometryEnabled == 1) {
+    int slot = col % u_capacityCols;
+    int x = slot % u_colsPerTile;
+    int y = (slot / u_colsPerTile) * 2;
+    vec4 nativeCore = texelFetch(u_geometry, ivec2(x, y), 0);
+    if (nativeCore.z > 0.0) {
+      core = nativeCore;
+      wings = texelFetch(u_geometry, ivec2(x, y + 1), 0);
+    }
+  }
+}
+
+float nativeRow(float delta, vec4 core, vec4 wings) {
+  if (core.x < 0.0) return delta / core.z;
+  float span = core.y * core.z;
+  if (delta < 0.0) return core.x + logNearOne(delta / core.w) / wings.x;
+  if (delta > span) return core.x + core.y + logNearOne((delta - span) / (core.w + span)) / wings.y;
+  return core.x + delta / core.z;
+}
+
+float nativePrice(float row, vec4 core, vec4 wings) {
+  if (core.x < 0.0) return core.w + row * core.z;
+  if (row < core.x) return core.w * exp((row - core.x) * wings.x);
+  if (row > core.x + core.y) return (core.w + core.y * core.z) * exp((row - core.x - core.y) * wings.y);
+  return core.w + (row - core.x) * core.z;
+}
+
+float expNearZero(float x) {
+  return abs(x) < 0.01 ? x * (1.0 + x * 0.5 + x * x / 6.0) : exp(x) - 1.0;
+}
+
+float nativeSpan(float lo, float hi, vec4 core, vec4 wings) {
+  if (core.x < 0.0) return (hi - lo) * core.z;
+  float end = core.x + core.y;
+  float span = max(0.0, min(hi, end) - max(lo, core.x)) * core.z;
+  if (lo < core.x) span += core.w * exp((lo - core.x) * wings.x) * expNearZero((min(hi, core.x) - lo) * wings.x);
+  if (hi > end) {
+    float start = max(lo, end);
+    span += (core.w + core.y * core.z) * exp((start - end) * wings.y) * expNearZero((hi - start) * wings.y);
+  }
+  return span;
+}
+
+vec2 projectedDensity(int col, float priceDelta, int timeLevel, out int columnBlock, out float confidence) {
+  vec4 core; vec4 wings;
+  columnScale(col, core, wings);
+  float nativeDelta = priceDelta + (u_priceCore.w - core.w) + (u_priceOriginResidual - wings.w);
+  float row = nativeRow(nativeDelta, core, wings);
+  if (row < -0.5 || row >= float(u_rows) - 0.5) { columnBlock = 1; confidence = 1.0; return vec2(0.0); }
+  float width = nativeSpan(row - 0.5, row + 0.5, core, wings);
+  float footprint = u_pricePixel / max(width, 1e-30);
+  int rowLevel = projectedRowLevel(footprint);
+  int rowBlock = projectedBlock(rowLevel);
+  int taps = clamp(int(ceil(footprint / float(rowBlock))), 1, 4);
+  int first = int(floor((row + 0.5) / float(rowBlock))) - (taps - 1) / 2;
+  columnBlock = projectedBlock(min(rowLevel, timeLevel));
+  int homogeneous = int(wings.z);
+  if ((columnBlock == 4 && (homogeneous & 1) == 0) || (columnBlock == 16 && (homogeneous & 2) == 0)) columnBlock = 1;
+  // Resolution provenance can differ inside the same native geometry. Sample
+  // each column independently before the common time average in that case.
+  if (u_resolutionEnabled == 1) columnBlock = 1;
+  // Square mips are valid only inside a single native geometry. A boundary
+  // group falls back to independently projected native columns, never sums
+  // the same row ID from two different price frames.
+  if (columnBlock > 1) {
+    vec4 lastCore; vec4 lastWings;
+    columnScale(col + columnBlock - 1, lastCore, lastWings);
+    if (any(notEqual(core, lastCore)) || any(notEqual(wings, lastWings)) || col % columnBlock != 0 || col < u_validFrom || col + columnBlock - 1 > u_residentNewest) columnBlock = 1;
+  }
+  int firstRow = max(0, first * rowBlock);
+  int lastRow = min(u_rows, (first + taps) * rowBlock);
+  float span = nativeSpan(float(firstRow) - 0.5, float(lastRow) - 0.5, core, wings);
+  vec2 mass = columnBlock == 1 ? projectedNativeRows(col, first, taps, rowLevel)
+    : projectedRows(col, first, taps, rowLevel, timeLevel);
+  // Keep wide recorded buckets honest. They have no fine price resolution;
+  // do not present uncertain hundreds-of-dollar intervals as hot fine walls.
+  float sourceWidth = width;
+  if (u_resolutionEnabled == 1) {
+    int slot = col % u_capacityCols;
+    int x = slot % u_colsPerTile;
+    vec4 header = texelFetch(u_resolution, ivec2(x, slot / u_colsPerTile), 0);
+    int offset = int(header.x);
+    int count = int(header.y);
+    // Atlas intervals are sorted and disjoint. A price touches at most one;
+    // logarithmic lookup keeps thousands of intervals off the frame budget.
+    int low = 0;
+    int high = count;
+    while (low < high) {
+      int middle = low + (high - low) / 2;
+      int pixel = offset + middle;
+      vec4 band = texelFetch(u_resolution, ivec2(pixel % u_colsPerTile, pixel / u_colsPerTile), 0);
+      if (nativeDelta < band.x) high = middle;
+      else if (nativeDelta >= band.y) low = middle + 1;
+      else { sourceWidth = max(sourceWidth, band.z); break; }
+    }
+  }
+  confidence = max(0.3, min(1.0, sqrt(u_priceCore.z / max(sourceWidth, u_priceCore.z))));
+  return mass * u_priceCore.z / max(span, 1e-30);
+}
+
+vec2 projectedSample(float colf, float price, out float confidence) {
+  vec2 total = vec2(0.0);
+  float weight = 0.0;
+  confidence = 0.0;
+  if (u_timeLevel > 0) {
+    int timeBlock = projectedBlock(u_timeLevel);
+    int firstColumn = int(floor(colf / float(timeBlock))) * timeBlock;
+    int offset = 0;
+    for (int k = 0; k < 16; k++) {
+      if (offset >= timeBlock) break;
+      int c = firstColumn + offset;
+      if (c < u_validFrom || c > u_residentNewest) { offset++; continue; }
+      int block; float quality;
+      vec2 sampleValue = projectedDensity(c, price, u_timeLevel, block, quality);
+      total += sampleValue * float(block);
+      confidence += quality * float(block);
+      weight += float(block);
+      offset += block;
+    }
+    confidence /= max(weight, 1.0);
+    return total / max(weight, 1.0);
+  }
+  for (int k = 0; k < 9; k++) {
+    if (k >= u_smoothTaps) break;
+    float colAt = colf + u_smoothOffsets[k];
+    if (colAt < float(u_validFrom) || colAt > float(u_residentNewest + 1)) continue;
+    int c = clamp(int(floor(colAt)), u_validFrom, u_residentNewest);
+    int block; float quality;
+    total += projectedDensity(c, price, 0, block, quality) * u_smoothWeights[k];
+    confidence += quality * u_smoothWeights[k];
+    weight += u_smoothWeights[k];
+  }
+  confidence /= max(weight, 0.0001);
+  return total / max(weight, 0.0001);
+}
+
 void main() {
   float colf = u_colOffset + u_colScale * v_uv.x;
   float rowf = u_rowOffset + u_rowScale * v_uv.y;
+  // Depth is binned to the nearest storage row. Its real price interval is
+  // [r-0.5,r+0.5], while texel indices start at r: align the bucket center.
+  if (u_priceProjection == 1) rowf = priceRow(v_uv.y) + 0.5;
   int col = int(floor(colf));
   int row = int(floor(rowf));
 
-  if (row < 0 || row >= u_rows || col < u_validFrom || col > u_residentNewest) {
+  if ((u_priceProjection == 0 && (row < 0 || row >= u_rows)) || col < u_validFrom || col > u_residentNewest) {
     fragColor = background();
     return;
   }
@@ -391,7 +626,12 @@ void main() {
   int y0 = (row / blk) - (u_nRowTaps / 2);
 
   vec2 acc;
-  if (u_rowFade >= 0.999) {
+  float projectedConfidence = 1.0;
+  if (u_priceProjection == 1) {
+    float delta = u_priceWings.z + u_priceWings.w * v_uv.y;
+    acc = projectedSample(colf, delta, projectedConfidence);
+    acc *= float(blk); // common pipeline below undoes only the column average
+  } else if (u_rowFade >= 0.999) {
     // Full row-sum endpoint (lane P; exact legacy row-only mip, R2-M1): SUM
     // u_nRowTaps 4-row texels of THIS pixel's ONE column — a collapsing price
     // axis still groups rows, but the time axis keeps hard cell edges (no
@@ -541,8 +781,10 @@ void main() {
   // Row-only mip: blk is the 4-ROW block baked into each row-mip texel, but
   // the SUM path's /blk is a COLUMN average the row-mip never applied — undo
   // it so a row-mip view reads exactly like the SUM path at the same footprint.
-  if (u_rowOnly == 1) intensity *= float(blk);
-  float t = clamp(intensity / max(u_norm, 1e-9), 0.0, 1.0);
+  if (u_priceProjection == 0) {
+    if (u_rowOnly == 1) intensity *= float(blk);
+  }
+  float t = intensity / max(u_norm, 1e-9);
   // Black point, then the transfer curve. Order matters: clipping AFTER the
   // curve would clip a curve, not a density, and the floor would mean a
   // different amount of size at every contrast setting. The region mask
@@ -567,6 +809,7 @@ void main() {
   }
 
   int li = int(t * 255.0 + 0.5);
+  if (u_priceProjection == 1) li = int(t * projectedConfidence * 255.0 + 0.5);
   fragColor = texelFetch(u_lut, ivec2(li, u_ramp), 0);
 }
 `;

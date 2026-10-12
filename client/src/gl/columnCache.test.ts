@@ -53,6 +53,24 @@ describe('sizeAt — exact resting size', () => {
 });
 
 describe('metadata lookups', () => {
+  it('retains distinct native maps when the same epoch number is reused', () => {
+    const c = new ColumnCache({ capacity: 2 });
+    const old = Object.freeze({ p0: 100, step: .5, tick: .25,
+      scale: Object.freeze({ kind: 'linear' as const, rows: 4, p0: 100, step: .5 }) });
+    const current = Object.freeze({ p0: 300, step: .5, tick: .5,
+      scale: Object.freeze({ kind: 'linear' as const, rows: 4, p0: 300, step: .5 }) });
+    c.put(0, new Float32Array(4), null, 1n, 0, old);
+    c.put(1, new Float32Array(4), null, 2n, 0, current);
+    expect(c.priceAt(0)).toBe(old);
+    expect(c.priceAt(1)).toBe(current);
+    c.put(2, new Float32Array(4), null, 3n, 0, current);
+    expect(c.priceAt(0)).toBeNull();
+    expect(c.priceAt(2)).toBe(current);
+    c.reset();
+    expect(c.priceAt(1)).toBeNull();
+    expect(c.priceAt(2)).toBeNull();
+  });
+
   it('timeAt / epochAt return the stored values, null when absent', () => {
     const c = new ColumnCache();
     c.put(7, new Float32Array(4), null, 1234567890n, 3);

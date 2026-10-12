@@ -113,6 +113,10 @@ export interface HistoryRequestInit {
   req_id: number;
   before_t: bigint;
   n_cols: number;
+  start_col?: number;
+  end_col?: number;
+  stride?: number;
+  metadata_cursor?: string;
 }
 
 export function encodeHistoryRequest(h: HistoryRequestInit): Uint8Array {
@@ -121,6 +125,8 @@ export function encodeHistoryRequest(h: HistoryRequestInit): Uint8Array {
     req_id: h.req_id,
     before_t: h.before_t,
     n_cols: h.n_cols,
+    ...(h.start_col === undefined ? {} : { start_col: h.start_col, end_col: h.end_col, stride: h.stride }),
+    ...(h.metadata_cursor === undefined ? {} : { metadata_cursor: h.metadata_cursor }),
   });
 }
 

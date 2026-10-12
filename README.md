@@ -1,6 +1,6 @@
 # FlowMap
 
-[![CI](https://github.com/nazmiefearmutcu0/FlowMap/actions/workflows/ci.yml/badge.svg)](https://github.com/nazmiefearmutcu0/FlowMap/actions/workflows/ci.yml)
+[![CI](https://github.com/nazmiefearmutcu/flowmap/actions/workflows/ci.yml/badge.svg)](https://github.com/nazmiefearmutcu/flowmap/actions/workflows/ci.yml)
 
 FlowMap is an open-source order-flow depth heatmap for crypto and US equities: a WebGL2 chart
 that renders resting liquidity as a live column heatmap, with a DOM ladder, time &amp; sales tape,
@@ -277,10 +277,10 @@ Installers are self-contained (bundled client + relocatable Python; nothing else
 carry a SLSA build-provenance attestation you can verify locally:
 
 ```bash
-gh attestation verify <downloaded-file> -R nazmiefearmutcu0/FlowMap
+gh attestation verify <downloaded-file> -R nazmiefearmutcu/flowmap
 ```
 
-See the [releases page](https://github.com/nazmiefearmutcu0/FlowMap/releases/latest) for assets
+See the [releases page](https://github.com/nazmiefearmutcu/flowmap/releases/latest) for assets
 and [SECURITY.md](SECURITY.md) for what the app reads, writes, and connects to.
 
 ## Contributing
@@ -293,7 +293,7 @@ Bug reports, feature discussions and PRs are welcome — start with
 The sidecar binds loopback only and there is no authentication by design today; the full
 surface — endpoints contacted, files written, threat-model notes — is in
 [SECURITY.md](SECURITY.md). Please report vulnerabilities via a
-[private security advisory](https://github.com/nazmiefearmutcu0/FlowMap/security/advisories/new),
+[private security advisory](https://github.com/nazmiefearmutcu/flowmap/security/advisories/new),
 not a public issue.
 
 ## License

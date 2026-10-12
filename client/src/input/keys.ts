@@ -113,7 +113,7 @@ export function routeGlobalKey(
   if (key === 'a' || key === 'A') return { type: 'create-alert' };
   if (key === 'h' || key === 'H') return { type: 'toggle-hud' };
   if (key === 'c' || key === 'C') return { type: 'cycle-depth-channel' };
-  if (key === 'i' || key === 'I') return { type: 'toggle-intel' };
+  if (key === 'j' || key === 'J') return { type: 'toggle-intel' };
   return null;
 }
 
@@ -157,7 +157,7 @@ export interface GlobalKeyHandlers {
   onPriceAutoFit?: () => void;
   /** `R` — go live (re-pin the live edge). */
   onGoLive?: () => void;
-  /** `I` — toggle the Intelligence Terminal Drawer (<GO>). */
+  /** `J` — toggle Research; `I` belongs to the indicator picker. */
   onToggleIntel?: () => void;
 }
 

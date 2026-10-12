@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { DEFAULT_PERCENTILE } from '../gl/normalize';
+import { DEFAULT_WHITE_PERCENTILE } from '../gl/normalize';
 import {
   DEFAULT_SETTINGS,
   SETTINGS_KEY,
@@ -63,12 +63,8 @@ describe('saveSettings → loadSettings round-trip', () => {
 });
 
 describe('normalizeSettings', () => {
-  it('pins the default normalization percentile to the normalizer default (p97)', () => {
-    // p99 was the first-run "empty heatmap" culprit (heavy tail → the median
-    // cell sits below the default black point). The persisted default must stay
-    // in lockstep with the normalizer's DEFAULT_PERCENTILE.
-    expect(DEFAULT_PERCENTILE).toBe(97);
-    expect(DEFAULT_SETTINGS.normPercentile).toBe(DEFAULT_PERCENTILE);
+  it('pins the normalization control to the default white endpoint', () => {
+    expect(DEFAULT_SETTINGS.normPercentile).toBe(DEFAULT_WHITE_PERCENTILE);
   });
 
   it('merges a partial object over defaults', () => {
@@ -81,10 +77,20 @@ describe('normalizeSettings', () => {
 
   it('clamps out-of-range numbers and rounds tick grouping', () => {
     expect(normalizeSettings({ normPercentile: 999 }).normPercentile).toBe(100);
-    expect(normalizeSettings({ normPercentile: 10 }).normPercentile).toBe(50);
+    expect(normalizeSettings({ normPercentile: 10 }).normPercentile).toBe(80);
     expect(normalizeSettings({ tickGrouping: 3.7 }).tickGrouping).toBe(4);
     expect(normalizeSettings({ tickGrouping: 0 }).tickGrouping).toBe(1);
     expect(normalizeSettings({ bubbleMinSize: -5 }).bubbleMinSize).toBe(0);
+  });
+
+  it('rejects malformed numeric values and preserves the drawer normalization range and step', () => {
+    for (const invalid of [null, true, false, '', '  ', [], {}]) {
+      expect(normalizeSettings({ contrast: invalid, normPercentile: invalid })).toMatchObject({
+        contrast: DEFAULT_SETTINGS.contrast, normPercentile: DEFAULT_SETTINGS.normPercentile,
+      });
+    }
+    expect(normalizeSettings({ normPercentile: 94.37 }).normPercentile).toBe(94.4);
+    expect(normalizeSettings({ normPercentile: '98.5' }).normPercentile).toBe(98.5);
   });
 
   it('coerces the big-trade USD threshold (default off; 0..1e9; junk → default)', () => {

@@ -60,14 +60,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
+from pathlib import Path
+import uuid
 from bisect import bisect_left, insort
 from collections.abc import AsyncIterator, Callable
 
 import numpy as np
 
 from crocodile.core.connector import Connector
-from crocodile.core.ingest.transport import AiohttpWsTransport, Transport
+from crocodile.core.config import Settings
+from crocodile.core.errors import ConfigError
+from crocodile.core.ingest.transport import Transport
 from crocodile.core.schema.enums import Side
 from crocodile.core.schema.records import (
     BookDelta,
@@ -129,9 +134,7 @@ logger = logging.getLogger(__name__)
 # merely hidden in the picker: one exclusion, enforced at the routing boundary,
 # and every consumer (router, backfill dispatch, quote routing, discovery)
 # inherits it.
-NOT_STREAMABLE = frozenset(
-    {"coingecko", "base_onchain", "gmx_synthetix", "superchain", "derive"}
-)
+NOT_STREAMABLE = frozenset({"coingecko", "base_onchain", "gmx_synthetix", "superchain", "derive"})
 
 NATIVE_EXCHANGES = frozenset(list_exchanges()) - NOT_STREAMABLE
 CRYPTO_EXCHANGES = frozenset(list_all_exchanges()) - NOT_STREAMABLE
@@ -308,8 +311,12 @@ class _BridgeSink(Sink):
         snapshot_driven: bool = False,
         now_ns: Callable[[], int] | None = None,
         stats: object | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         self._emit = emit
+        self._metadata = metadata if metadata is not None else {}
+        self._record: BookSnapshot | BookDelta | None = None
+        self._revision = 0
         self._book_top_n = max(1, book_top_n)
         # Server-wide telemetry aggregate (campaign C1; duck-typed —
         # ``SessionStats`` is not imported so feeds stay import-light).
@@ -365,10 +372,12 @@ class _BridgeSink(Sink):
         if isinstance(record, BookDelta):
             if not self._initialized:
                 return  # pre-snapshot deltas carry no anchored state
+            self._observe_book(record, snapshot=False)
             self._bid_px = self._apply_levels(record.bids, self._bids, self._bid_px)
             self._ask_px = self._apply_levels(record.asks, self._asks, self._ask_px)
             self._emit_book(self._ts(record))
         elif isinstance(record, BookSnapshot):
+            self._observe_book(record, snapshot=True)
             if self._initialized and not self._snapshot_driven:
                 self._emit(
                     Marker(
@@ -430,6 +439,26 @@ class _BridgeSink(Sink):
         # Funding / DerivativeTicker / OpenInterest / ...: not part of the
         # canonical M1 dialect — dropped silently by design.
 
+    def _observe_book(self, record: BookSnapshot | BookDelta, *, snapshot: bool) -> None:
+        changed = not self._initialized
+        for levels, side in ((record.bids, self._bids), (record.asks, self._asks)):
+            valid = {
+                p: q
+                for p, q in levels
+                if math.isfinite(p) and math.isfinite(q) and p > 0 and q >= 0
+            }
+            if snapshot:
+                changed |= {p: q for p, q in valid.items() if q > 0} != side
+            else:
+                changed |= any(side.get(p, 0.0) != q for p, q in valid.items())
+        self._record = record
+        self._metadata["source_book_events"] = int(self._metadata.get("source_book_events", 0)) + 1
+        if changed:
+            self._revision += 1
+            self._metadata["unique_book_changes"] = (
+                int(self._metadata.get("unique_book_changes", 0)) + 1
+            )
+
     def _is_duplicate(self, trade_id: str) -> bool:
         """True when this polled feed already emitted *trade_id*."""
         if not trade_id:
@@ -470,7 +499,12 @@ class _BridgeSink(Sink):
         re-sorting the whole side. A ``None`` index (snapshot replace) leaves
         the book dirty; ``_emit_book`` rebuilds the index with one sort."""
         for price, amount in levels:
-            if not (price > 0.0) or amount < 0.0 or amount != amount:
+            if (
+                not math.isfinite(price)
+                or not math.isfinite(amount)
+                or not (price > 0.0)
+                or amount < 0.0
+            ):
                 logger.debug("skipping malformed level (%r, %r)", price, amount)
                 continue
             if amount == 0.0:
@@ -516,6 +550,14 @@ class _BridgeSink(Sink):
                 bid_sz=bid[:, 1],
                 ask_px=ask[:, 0],
                 ask_sz=ask[:, 1],
+                sequence_id=getattr(
+                    self._record, "seq_id", getattr(self._record, "sequence_id", None)
+                ),
+                prev_sequence_id=getattr(self._record, "prev_seq_id", None),
+                source=self._record.source if self._record else None,
+                provenance=self._record.prov.value if self._record else None,
+                observed_ns=self._record.local_ts if self._record else None,
+                revision=self._revision,
             )
         )
 
@@ -553,9 +595,7 @@ def _harden_rest_ssl(conn: Connector) -> None:
         import aiohttp
 
         if conn._session is None or conn._session.closed:
-            conn._session = aiohttp.ClientSession(
-                connector=aiohttp.TCPConnector(ssl=ctx)
-            )
+            conn._session = aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx))
         return await orig_http_get(
             url, params=params, max_retries=max_retries, timeout_sec=timeout_sec
         )
@@ -572,7 +612,8 @@ class CryptoFeed:
     iterator is running, the engine's own supervision handles ws reconnects
     internally — the stream only ends when the connector task itself
     finishes, and a connector crash re-raises here so the session's backoff
-    restart loop owns recovery.
+    restart loop owns recovery. A connection producing no canonical events for
+    45 seconds also unwinds through connector cleanup before that recovery.
     """
 
     # Crypto venues list instruments priced from cents to six figures, so the
@@ -591,9 +632,15 @@ class CryptoFeed:
         cfg: Config,
         *,
         connector_factory: Callable[[Sink], Connector] | None = None,
-        transport_factory: Callable[[str], Transport] = AiohttpWsTransport,
+        transport_factory: Callable[[str], Transport] | None = None,
         stats: object | None = None,
+        event_timeout_s: float = 45.0,
+        engine_settings: Settings | None = None,
     ) -> None:
+        if not math.isfinite(event_timeout_s) or event_timeout_s <= 0:
+            raise ValueError("event_timeout_s must be finite and positive")
+        self._event_timeout_s = event_timeout_s
+        self._engine_settings = engine_settings or Settings.from_env()
         self.exchange = exchange
         self.symbol = symbol
         # What the connector is actually subscribed with; resolved from
@@ -609,7 +656,9 @@ class CryptoFeed:
         # method builds a NEW object, so that identity test is always False and
         # the symbol translation below would silently never run.
         self._owns_connector = connector_factory is None
+        self.preferred_tick: float | None = None
         self._transport_factory = transport_factory
+        self._prepared_connection: tuple[Connector, BoundedFeedQueue] | None = None
         # Server-wide telemetry aggregate (campaign C1; duck-typed). Its drop
         # counters are fed at the source: queue evictions here, sink ts-gate
         # drops in the bridge sink.
@@ -637,9 +686,29 @@ class CryptoFeed:
             # Exchange-true aggressor side -> honest per-bar CVD (spec §7 parity).
             "cvd": "exchange",
             "markers": markers,
+            "book_top_n": self._cfg.book_top_n,
+            "raw_capture": self._engine_settings.raw_capture,
+            "source_book_events": 0,
+            "unique_book_changes": 0,
         }
+        if exchange in {"bitfinex", "kraken", "dydx"}:
+            self.capability.update(tape="unavailable", trade_side="unavailable", cvd="unavailable")
+
+    async def prepare(self) -> None:
+        """Resolve geometry before a grid or reconstructed history is created."""
+        if self._owns_connector:
+            from flowmap_server.data.venues import venue_price_tick
+
+            self._connector_symbol = await resolve_symbol_cached(self.market, self.symbol)
+            self.preferred_tick = await venue_price_tick(self.market, self._connector_symbol)
+        if self._prepared_connection is None:
+            # Constructors are network-free. The exact selected connector's
+            # public mode/source metadata must exist before Session Hello.
+            self._prepared_connection = self._make_connection()
 
     def _channels(self) -> list[str]:
+        if self.exchange in {"bitfinex", "kraken", "dydx"}:
+            return ["book_delta", "book_snapshot"]
         if not self.native:
             # The ccxt path answers book_delta and book_snapshot from the same
             # `fetch/watch_order_book` call, so asking for both would double the
@@ -666,20 +735,25 @@ class CryptoFeed:
         # subscription seam; upstream still owns resync and sequence checks.
         from flowmap_server.feeds.binance import RealtimeBinanceConnector
 
-        factory = RealtimeBinanceConnector if self.exchange == "binance" else make_connector
-        args = () if self.exchange == "binance" else (self.exchange,)
+        json_binance = (
+            self.exchange == "binance" and self._engine_settings.binance_wire_format == "json"
+        )
+        factory = RealtimeBinanceConnector if json_binance else make_connector
+        args = () if json_binance else (self.exchange,)
+        settings_kw = {} if json_binance else {"settings": self._engine_settings}
         conn = factory(
             *args,
             symbols=[self._connector_symbol],
             channels=self._channels(),
             out=sink,
             registry=InstrumentRegistry(),
+            **settings_kw,
             **self._connector_kwargs(),
         )
         _harden_rest_ssl(conn)
         return conn
 
-    async def events(self) -> AsyncIterator[FeedEvent]:
+    def _make_connection(self) -> tuple[Connector, BoundedFeedQueue]:
         # Bounded fan-in (A2-3): a stalled consumer drops OLDEST events (counted
         # on the queue) instead of growing RSS without limit. The connector's
         # end sentinel is never the dropped item (see BoundedFeedQueue).
@@ -691,8 +765,18 @@ class CryptoFeed:
             self._cfg.book_top_n,
             snapshot_driven=not self.native,
             stats=self._stats,
+            metadata=self.capability,
         )
-        if self._owns_connector:
+        conn = self._connector_factory(sink)
+        self.capability.update(
+            endpoint_id=getattr(conn, "capture_endpoint_id", f"{self.exchange}-public"),
+            wire_format=getattr(conn, "wire_format", "json"),
+            coverage=getattr(conn, "coverage", {"kind": "visible_l2"}),
+        )
+        return conn, queue
+
+    async def events(self) -> AsyncIterator[FeedEvent]:
+        if self._prepared_connection is None and self._owns_connector:
             # A symbol can arrive in either spelling — the venue's own
             # ("ETHBTC") or ccxt's unified ("ETH/BTC") — depending on which
             # enumerator the picker used. Translate once, here, so the same
@@ -704,19 +788,64 @@ class CryptoFeed:
             # (recording path, client-visible label) and must not shift under
             # a mid-session feed restart.
             self._connector_symbol = await resolve_symbol_cached(self.market, self.symbol)
-        conn = self._connector_factory(sink)
-        if conn.transport is None and conn.ws_url:
-            # Poll-only connectors (the ccxt path, CoinGecko, the on-chain
-            # readers) declare an empty ws_url and drive themselves; handing
-            # them a websocket transport for "" would be a connection to
-            # nowhere.
-            conn.transport = self._transport_factory(conn.ws_url)
-        runner = asyncio.create_task(
-            self._drive(conn, queue), name=f"crypto-feed-{self.market}:{self.symbol}"
-        )
+        conn, queue = self._prepared_connection or self._make_connection()
+        self._prepared_connection = None
+        capture = None
+        if self._engine_settings.raw_capture:
+            from crocodile.core.capture.native import stream_context
+            from crocodile.core.capture.schema import CaptureContext
+            from crocodile.core.capture.writer import CaptureWriter
+
+            try:
+                budget = int(self._engine_settings.raw_capture_queue_bytes)
+                if not 1 <= budget <= 32 << 20:
+                    raise ValueError
+            except (ValueError, TypeError):
+                raise ConfigError("Raw capture queue expects 1..33554432 bytes") from None
+            context = stream_context(conn, "s1")
+            capture_id = uuid.uuid4().hex
+            capture = await CaptureWriter.create(
+                Path(self._cfg.data_dir).expanduser() / "raw-capture" / capture_id,
+                CaptureContext(capture_id=capture_id, streams=(context,)),
+                queue_bytes=budget,
+            )
+            conn.capture, conn.capture_stream_id = capture, "s1"
+            self.capability.pop("capture_summary", None)
+            self.capability["capture_id"] = capture_id
+        try:
+            if conn.transport is None and conn.ws_url:
+                # Poll-only connectors (the ccxt path, CoinGecko, the on-chain
+                # readers) declare an empty ws_url and drive themselves; handing
+                # them a websocket transport for "" would be a connection to
+                # nowhere.
+                conn.transport = (
+                    self._transport_factory(conn.ws_url)
+                    if self._transport_factory
+                    else conn.make_transport()
+                )
+            runner = asyncio.create_task(
+                self._drive(conn, queue), name=f"crypto-feed-{self.market}:{self.symbol}"
+            )
+        except BaseException:
+            if capture is not None:
+                await capture.close()
+            raise
         try:
             while True:
-                ev = await queue.get()
+                try:
+                    # Bound the wait directly, without creating a second task
+                    # for every trade/depth update on an active market.
+                    async with asyncio.timeout(self._event_timeout_s):
+                        ev = await queue.get()
+                except TimeoutError as exc:
+                    # A transport may stay open while delivering nothing.
+                    # Unwind through the existing finally block, which cancels
+                    # the connector and closes its socket before Session's
+                    # bounded backoff starts a fresh live connection.
+                    raise TimeoutError(
+                        f"no crypto feed events for {self._event_timeout_s:g}s "
+                        f"({self.market}:{self.symbol})"
+                    ) from exc
                 if isinstance(ev, _FeedEnd):
                     # Sentinel is enqueued strictly after the connector's last
                     # record, so no translated event can be lost behind it.
@@ -728,11 +857,19 @@ class CryptoFeed:
             runner.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await runner
+            if capture is not None:
+                summary = await capture.close()
+                self.capability["capture_summary"] = {
+                    "capture_id": capture_id,
+                    "fsynced_records": summary.stats.fsynced_records,
+                    "received_frames": summary.stats.received_frames,
+                    "sealed": True,
+                    "peak_durable_lag_ns": summary.stats.peak_durable_lag_ns,
+                    "durable_lag_overruns": summary.stats.durable_lag_overruns,
+                }
 
     @staticmethod
-    async def _drive(
-        conn: Connector, queue: BoundedFeedQueue
-    ) -> None:
+    async def _drive(conn: Connector, queue: BoundedFeedQueue) -> None:
         try:
             await conn.run()
         except asyncio.CancelledError:

@@ -7,6 +7,7 @@ import { resetDrawingsForTest } from '../drawings/store';
 import { resetIndicatorStoreForTest } from '../indicators/store';
 import { setLocale } from '../i18n';
 import { setTheme, THEME_IDS } from '../theme';
+import { useFlowMapStore } from '../state/store';
 import { closeOnboarding, isOnboardingOpen } from './OnboardingCard';
 import { pushOverlay } from './overlayStack';
 import { SettingsDrawer } from './SettingsDrawer';
@@ -50,6 +51,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  useFlowMapStore.setState({ capability: null });
 });
 
 describe('SettingsDrawer switches', () => {
@@ -122,9 +124,33 @@ describe('SettingsDrawer range accessibility', () => {
     expect(norm.getAttribute('aria-label')).toBe('Normalization');
     expect(norm.getAttribute('aria-valuetext')).toBe('p95');
     expect(tick.getAttribute('aria-label')).toBe('Tick grouping');
-    expect(tick.getAttribute('aria-valuetext')).toBe('3 rows / cell');
+    expect(tick.getAttribute('aria-valuetext')).toBe('at least 4 rows / cell');
     expect(bubble.getAttribute('aria-label')).toBe('Bubble size threshold');
     expect(bubble.getAttribute('aria-valuetext')).toBe('all trades');
+  });
+});
+
+describe('SettingsDrawer effective depth display controls', () => {
+  it('explains and disables density-only controls in genuine Imbalance mode', () => {
+    setLocale('en');
+    useFlowMapStore.setState({ capability: { depth: 'L2' } as never });
+    const { container } = render(<SettingsDrawer settings={settings({ depthChannel: 'imbalance' })} onChange={() => {}} onClose={() => {}} />);
+    for (const id of ['setting-contrast', 'setting-normPercentile', 'setting-tolerance', 'colormap-theme']) {
+      expect((container.querySelector(`[data-testid="${id}"]`) as HTMLInputElement).disabled).toBe(true);
+    }
+    expect(container.querySelector('[data-testid="setting-imbalance-hint"]')?.textContent).toContain('fixed signed scale');
+    expect((container.querySelector('[data-testid="depthChannel-sum"]') as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('keeps density controls available and disallows invented channels for synthetic depth', () => {
+    setLocale('en');
+    useFlowMapStore.setState({ capability: { depth: 'SYNTH_PROFILE' } as never });
+    const { container } = render(<SettingsDrawer settings={settings({ depthChannel: 'imbalance' })} onChange={() => {}} onClose={() => {}} />);
+    expect((container.querySelector('[data-testid="setting-tolerance"]') as HTMLInputElement).disabled).toBe(false);
+    for (const channel of ['bid', 'ask', 'imbalance']) {
+      expect((container.querySelector(`[data-testid="depthChannel-${channel}"]`) as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect(container.textContent).toContain('Synthetic depth uses Sum');
   });
 });
 
@@ -159,6 +185,17 @@ describe('SettingsDrawer big-trade threshold', () => {
     });
   }
 
+  it('supports fractional bubble quantities and restored values beyond the former slider range', () => {
+    const patches: Array<Partial<FlowMapSettings>> = [];
+    const { container } = render(<SettingsDrawer settings={settings({ bubbleMinSize: 5000 })} onChange={(p) => patches.push(p)} onClose={() => {}} />);
+    const input = container.querySelector('[data-testid="setting-bubble"]') as HTMLInputElement;
+    expect(input.type).toBe('number');
+    expect(input.value).toBe('5000');
+    expect(input.step).toBe('any');
+    typeNumber(input, '0.001');
+    expect(patches).toEqual([{ bubbleMinSize: 0.001 }]);
+  });
+
   it('announces itself and emits a clamped bigTradeUsd patch on change', () => {
     const patches: Array<Partial<FlowMapSettings>> = [];
     const { container } = render(
@@ -166,7 +203,7 @@ describe('SettingsDrawer big-trade threshold', () => {
     );
     const num = container.querySelector('[data-testid="setting-bigTradeUsd"]') as HTMLInputElement;
     expect(num).not.toBeNull();
-    expect(num.getAttribute('aria-label')).toBe('Big trade size (USD, 0 = off)');
+    expect(num.getAttribute('aria-label')).toBe('Big trade threshold (price × quantity, 0 = off)');
 
     typeNumber(num, '25000');
     expect(patches).toEqual([{ bigTradeUsd: 25000 }]);

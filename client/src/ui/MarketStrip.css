@@ -1,0 +1,21 @@
+.market-strip { display: flex; align-items: center; gap: 18px; flex: 0 0 auto; min-height: 47px; padding: 5px 14px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.market-strip__quotes { display: flex; align-items: center; gap: 22px; margin: 0; min-width: 0; }
+.market-strip__quotes > div { min-width: 76px; }
+.market-strip dt { color: var(--text-2); font-size: 10px; line-height: 14px; }
+.market-strip dt span { margin-left: 6px; font-family: var(--font-mono); }
+.market-strip dd { margin: 0; color: var(--text-money); font: 13px/18px var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.market-strip__last dd { font-weight: 600; font-size: 17px; }
+.market-strip__bid dd { color: var(--accent-bright); }
+.market-strip__ask dd { color: var(--sell-bright, var(--sell)); }
+.market-strip__feed { display: grid; gap: 2px; border-left: 1px solid var(--line-2); padding-left: 15px; font-size: 10px; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.market-strip__feed > :first-child { color: var(--accent-bright); }
+.market-strip__feed[data-pending='true'] > :first-child, .market-strip__feed[data-quiet='true'] > :first-child { color: var(--warn); }
+.market-strip__windows { margin-left: auto; display: flex; gap: 3px; }
+.market-strip__windows button { border: 1px solid transparent; border-radius: var(--r-1); background: transparent; color: var(--text-2); padding: 5px 8px; cursor: pointer; font: 11px var(--font-mono); }
+.market-strip__windows button:hover, .market-strip__windows button[aria-pressed='true'] { border-color: var(--line-2); background: var(--bg-3); color: var(--text); }
+.market-strip__windows button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.panel__resolution { color: var(--text-2); font: 9px var(--font-mono); white-space: nowrap; }
+/* Frequent quantity changes update fixed nodes without replaying glow animations. */
+.dom-ladder .ladder__sz { animation: none; }
+@media (max-width: 850px) { .market-strip { gap: 10px; padding-inline: 8px; } .market-strip__quotes { gap: 10px; } .market-strip__quotes > div { min-width: 55px; } .market-strip__feed { display: none; } .market-strip__windows button { padding-inline: 5px; } }
+@media (max-width: 580px) { .market-strip { flex-wrap: wrap; } .market-strip__windows { width: 100%; justify-content: flex-end; } .market-strip__quotes { flex: 1; justify-content: space-between; } }

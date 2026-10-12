@@ -1,15 +1,16 @@
-import { act } from 'react';
+import { act, Profiler } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SIDE_BUY, SIDE_SELL, SIDE_UNKNOWN, type EpochParams } from '../proto/types';
-import { flushForTest, ingestForTest, resetForTest, type TapeTrade } from '../state/bookStore';
+import { flushForTest, ingestForTest, resetForSession, resetForTest, type TapeTrade } from '../state/bookStore';
 import { useFlowMapStore } from '../state/store';
 import {
   Tape,
   fmtTapeSize,
   fmtTapeTime,
+  filterTape,
   isBigTrade,
   largeThreshold,
   sideClass,
@@ -55,7 +56,7 @@ function click(el: Element): void {
 
 beforeEach(() => {
   resetForTest();
-  useFlowMapStore.setState({ capability: null, epochs: new Map(), gridEpoch: null });
+  useFlowMapStore.setState({ capability: null, epochs: new Map(), gridEpoch: null, subscription: null, sessionId: null, sessionRevision: 0 });
 });
 
 afterEach(() => {
@@ -288,5 +289,116 @@ describe('Tape render', () => {
     const rowsAfter = [...container.querySelectorAll('[data-testid="tape-row"]')];
     expect(rowsAfter).toHaveLength(4);
     expect(rowsAfter.slice(1)).toEqual(rowsBefore);
+  });
+});
+
+describe('Tape inspection controls', () => {
+  const print = (ts: bigint, price: number, side = SIDE_BUY): void => {
+    ingestForTest({ type: 5, ts_ns: ts, price, size: 2, side, side_src: 2, venue: 'binance' } as never);
+  };
+  const pointer = (el: Element, event: 'pointerover' | 'pointerout'): void => {
+    act(() => el.dispatchEvent(new MouseEvent(event, { bubbles: true, relatedTarget: document.body })));
+  };
+
+  it('filters unknown aggressors and includes the exact notional boundary', () => {
+    const trades = [
+      { ...tapeTrade(2), side: SIDE_UNKNOWN },
+      { ...tapeTrade(1.9999), side: SIDE_UNKNOWN },
+      tapeTrade(3),
+    ];
+    expect(filterTape(trades, 'unknown', 200)).toEqual([trades[0]]);
+    expect(filterTape(trades, 'buy', 0)).toEqual([trades[2]]);
+    expect(filterTape(trades, 'all', Number.NaN)).toHaveLength(3);
+  });
+
+  it('supports explicit hold, continues ingesting, and resumes to newest prints', () => {
+    print(1n, 100);
+    const { container } = render(<Tape />);
+    click(container.querySelector('[data-testid="tape-hold"]')!);
+    act(() => { print(2n, 101); flushForTest(); });
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="tape-held"]')).not.toBeNull();
+    pointer(container.querySelector('[data-testid="tape-body"]')!, 'pointerout');
+    expect(container.querySelector('[data-testid="tape-held"]')).not.toBeNull();
+    click(container.querySelector('[data-testid="tape-hold"]')!);
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(2);
+    expect(container.querySelector('[data-testid="tape-row"]')?.getAttribute('data-price')).toBe('101.00');
+  });
+
+  it('holds on hover and resumes on leave without stopping ingestion', () => {
+    print(1n, 100);
+    const { container } = render(<Tape />);
+    const body = container.querySelector('[data-testid="tape-body"]')!;
+    pointer(body, 'pointerover');
+    expect(container.querySelector('[data-testid="tape-held"]')).not.toBeNull();
+    act(() => { print(2n, 101); flushForTest(); });
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(1);
+    pointer(body, 'pointerout');
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(2);
+    expect(container.querySelector('[data-testid="tape-held"]')).toBeNull();
+  });
+
+  it('drops held rows immediately on symbol switch and resets filters/hold after reset', () => {
+    useFlowMapStore.setState({ subscription: { market: 'crypto', symbol: 'BTCUSDT', mode: 'live', band: 'native' } });
+    print(1n, 100, SIDE_UNKNOWN);
+    const { container } = render(<Tape />);
+    const select = container.querySelector('[data-testid="tape-side"]') as HTMLSelectElement;
+    act(() => { select.value = 'unknown'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    pointer(container.querySelector('[data-testid="tape-body"]')!, 'pointerover');
+    act(() => useFlowMapStore.setState({ subscription: { market: 'crypto', symbol: 'ETHUSDT', mode: 'live', band: 'native' } }));
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(0);
+    expect(select.value).toBe('all');
+    expect(container.querySelector('[data-testid="tape-held"]')).toBeNull();
+    act(() => { resetForSession(); print(2n, 25); flushForTest(); });
+    expect(container.querySelector('[data-testid="tape-row"]')?.getAttribute('data-price')).toBe('25.00');
+    act(() => { print(3n, 26); flushForTest(); });
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(2);
+  });
+
+  it('resets explicit hold even on a same-metadata session reset', () => {
+    print(1n, 100);
+    const { container } = render(<Tape />);
+    click(container.querySelector('[data-testid="tape-hold"]')!);
+    act(() => { resetForSession(); flushForTest(); });
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(0);
+    expect(container.querySelector('[data-testid="tape-held"]')).toBeNull();
+  });
+
+  it('shows the retained count and an honest no-match empty state', () => {
+    print(1n, 100, SIDE_BUY);
+    const { container } = render(<Tape />);
+    const select = container.querySelector('[data-testid="tape-side"]') as HTMLSelectElement;
+    act(() => { select.value = 'sell'; select.dispatchEvent(new Event('change', { bubbles: true })); });
+    expect(container.querySelector('[data-testid="tape-count"]')?.textContent).toBe('0/1');
+    expect(container.querySelector('.panel__empty')?.textContent).toBe('no prints match filters');
+  });
+
+  it('wires the numeric notional filter and clears it on a session change', () => {
+    print(1n, 100);
+    print(2n, 99.99);
+    const { container } = render(<Tape />);
+    const input = container.querySelector('[data-testid="tape-minimum"]') as HTMLInputElement;
+    expect(input.getAttribute('aria-label')).toBe('Minimum tape price × quantity');
+    expect(input.parentElement?.textContent).toContain('Min price × quantity');
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, '200');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(container.querySelectorAll('[data-testid="tape-row"]')).toHaveLength(1);
+    expect(container.querySelector('[data-testid="tape-count"]')?.textContent).toBe('1/2');
+    act(() => { resetForSession(); flushForTest(); });
+    expect(input.value).toBe('');
+  });
+
+  it('does not commit a Tape render for book-only flushes', () => {
+    print(1n, 100);
+    const onRender = vi.fn();
+    render(<Profiler id="tape" onRender={onRender}><Tape /></Profiler>);
+    onRender.mockClear();
+    act(() => {
+      ingestForTest({ type: 6, ts_ns: 2n, bid_px: 100, bid_sz: 2, ask_px: 101, ask_sz: 3 } as never);
+      flushForTest();
+    });
+    expect(onRender).not.toHaveBeenCalled();
   });
 });

@@ -90,9 +90,18 @@ from flowmap_server.core.backfill import (
     columns_from_candles,
 )
 from flowmap_server.core.grid import FinalizedColumn, Grid, GridCfg
+from flowmap_server.core.overview import (
+    SOURCE_BATCH_COLS,
+    OverviewBuilder,
+    OverviewCache,
+    add_recording,
+    native_group_epochs,
+)
 from flowmap_server.core.record import Recorder, SessionRecorder, TailData
+from flowmap_server.core.pyramid import metadata_page, pyramid_for
 from flowmap_server.core.stats import SessionStats
 from flowmap_server.feeds.base import BookState, Feed
+from flowmap_server.feeds.crypto import is_crypto_market
 from flowmap_server.feeds.equity import EQUITY_MARKETS
 from flowmap_server.feeds.replay import ReplayFeed
 from flowmap_server.feeds.router import build_feed
@@ -113,10 +122,12 @@ SNAPSHOT_COLS = 512  # last N finalized columns in the attach snapshot
 SNAPSHOT_CHUNK_COLS = 64  # ≤N columns per snapshot frame
 SNAPSHOT_TAPE = 500  # tape warm-up depth
 HISTORY_MAX_COLS = 256  # per-HistoryRequest clamp
+HISTORY_MAX_DISK_PARTS = 16  # one scroll-back page must not walk an entire recording
 LAG_DROP_NS = 2_000_000_000  # oldest-unsent column age that triggers drops
 NONCOL_CAP = 1000  # bounded non-column queue (latest-wins)
 GRACE_S = 60.0  # teardown grace after last detach
 FLUSH_INTERVAL_NS = 16_000_000  # forming-column refresh (~60 Hz; no fabricated ticks)
+CAPABILITY_STATUS_INTERVAL_NS = 1_000_000_000
 REC_FLUSH_COLS = 64  # recording flush cadence (finalized columns)
 _BACKOFF_CAP_S = 30.0
 # Recording flush-failure retry (cooldown with exponential backoff). One
@@ -426,6 +437,13 @@ class Session:
         self._recorder_root = recorder
         self._wall_clock = wall_clock
         self._rec: SessionRecorder | None = None
+        # Proven legacy cadence segments from successful preload only. A new
+        # writer UUID must not hide compatible old no-ID depth after eviction.
+        self._legacy_history_segments: list[tuple[int, int, int]] = []
+        self._overview_cache = OverviewCache()
+        self._overview_lock = asyncio.Lock()
+        self._overview_prewarm_task: asyncio.Task | None = None
+        self._overview_source_generation: str | None = None
         # Flush-failure retry state (see _REC_RETRY_* above): consecutive
         # failures size the cooldown; the retry is skipped while the cooldown
         # is active. Both reset on any successful flush.
@@ -490,11 +508,14 @@ class Session:
         self._last_col_seq: int | None = None  # dedup: grid may re-return a column
         self._last_flush_ns = clock()
         self._feed_state: str = "live"
+        self._next_capability_status_ns = clock() + CAPABILITY_STATUS_INTERVAL_NS
+        self._last_capability_status_payload: bytes | None = None
         self._recovery_start_ns = clock()
         self._recovery_events = 0
         self._tape: deque[events.Trade] = deque(maxlen=SNAPSHOT_TAPE)
         self._markers: deque[events.Marker] = deque(maxlen=_MARKERS_CAP)
         self._bbo: events.BBO | None = None
+        self._instant_book: bytes | None = None
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -528,10 +549,37 @@ class Session:
                     self._boot_done = True
                 if self._closed:
                     return None
-                self.run_task = asyncio.create_task(
-                    self.run(), name=f"session-{self.session_id}"
-                )
+                self.run_task = asyncio.create_task(self.run(), name=f"session-{self.session_id}")
+                if self._recorder_root is not None and self._overview_prewarm_task is None:
+                    self._overview_prewarm_task = asyncio.create_task(
+                        self._prewarm_overview_index(), name=f"history-index-{self.session_id}"
+                    )
         return self.run_task
+
+    async def _prewarm_overview_index(self) -> None:
+        # First live paint takes precedence. Only tiny scalar part metadata is
+        # warmed later; no density scans or awaiting in subscribe/start.
+        await asyncio.sleep(2.0)
+        if self._closed or self._recorder_root is None:
+            return
+        try:
+            store = await asyncio.to_thread(
+                pyramid_for,
+                self._recorder_root,
+                self._feed.market,
+                self._feed.symbol,
+                self._rec.recording_id if self._rec is not None else None,
+            )
+            await asyncio.to_thread(
+                store.prepare,
+                dict(self._grid._epoch_params),
+                list(self._legacy_history_segments),
+                stop=lambda: self._closed,
+            )
+        except Exception:
+            logger.exception(
+                "optional overview index warmup failed for session %s", self.session_id
+            )
 
     async def _boot(self) -> None:
         """Open the session recorder, rehydrate (spec §8.1) or backfill the grid.
@@ -585,6 +633,10 @@ class Session:
         """
         if self._backfill_fn is None or self._backfill_max_cols <= 0:
             return
+        # Banded geometry cannot consume candle backfill (converter contract).
+        # Avoid blocking the first live quote on a network fetch we discard.
+        if self._grid.cfg.band_up is not None or self._grid.cfg.band_down is not None:
+            return
         try:
             candles = await self._backfill_fn(
                 self._feed.market,
@@ -604,9 +656,7 @@ class Session:
         if not candles:
             return
         try:
-            result = columns_from_candles(
-                candles, self._grid.cfg, stretch=self._backfill_stretch
-            )
+            result = columns_from_candles(candles, self._grid.cfg, stretch=self._backfill_stretch)
             if result is None:
                 return
             columns, epoch = result
@@ -625,8 +675,7 @@ class Session:
             ts_ns=end_ns - 1,
             kind="gap",
             text=(
-                f"backfill: reconstructed history ends {end_ns}, "
-                f"live resumes ~{self._wall_clock()}"
+                f"backfill: reconstructed history ends {end_ns}, live resumes ~{self._wall_clock()}"
             ),
         )
         self._markers.append(gap)
@@ -654,6 +703,8 @@ class Session:
         cap["replay"] = True
         if self._history_reconstructed:
             cap["history"] = "reconstructed"
+        if self._recorder_root is not None:
+            cap["retention"] = dict(self._recorder_root.retention_status)
         return cap
 
     def _boot_blocking(self) -> tuple[SessionRecorder, TailData | None]:
@@ -667,7 +718,12 @@ class Session:
             symbol,
             max_age_ns=cfg.ring_columns * cfg.dt_ns,
             now_ns=self._wall_clock(),
-            limit_cols=cfg.ring_columns,
+            # Boot needs only the same active tail sent in the first attach.
+            # Eagerly decoding/packing an entire 32k ring delays the first
+            # live book and materializes a much larger, discarded tape. Keep
+            # ring capacity/freshness unchanged; older genuine history pages
+            # and overviews read the validated recording UUID on demand.
+            limit_cols=min(cfg.ring_columns, SNAPSHOT_COLS),
         )
         return rec, tail
 
@@ -687,6 +743,19 @@ class Session:
                 self.session_id,
             )
             return False
+        if tail.recording_id and self._rec is not None:
+            # A validated warm restart continues this logical recording. Its
+            # true timestamps may have a restart seam while col_seq continues.
+            self._rec.recording_id = tail.recording_id
+        elif not tail.recording_id:
+            segments: list[tuple[int, int, int]] = []
+            for col in tail.columns:
+                origin = col.t0_ns - col.col_seq * self._grid.cfg.dt_ns
+                if segments and segments[-1][0] == origin:
+                    segments[-1] = (origin, segments[-1][1], col.col_seq)
+                else:
+                    segments.append((origin, 0 if not segments else col.col_seq, col.col_seq))
+            self._legacy_history_segments = segments[-16:]
         self._tape.extend(tail.trades)
         self._markers.extend(tail.markers)
         dt = self._grid.cfg.dt_ns
@@ -718,9 +787,7 @@ class Session:
         try:
             op(self._rec)
         except Exception:
-            logger.exception(
-                "recording failed; disabled for session %s", self.session_id
-            )
+            logger.exception("recording failed; disabled for session %s", self.session_id)
             self._rec = None
             if self._stats is not None:
                 self._stats.note_recording(self.session_id, False)
@@ -824,6 +891,7 @@ class Session:
         if self._stats is not None:
             self._stats.note_flush()
         await self._enforce_retention_async()
+        self._schedule_summary_work()
 
     async def flush_recording_now(self) -> None:
         """Flush buffered recording rows and WAIT for the Parquet write.
@@ -880,6 +948,20 @@ class Session:
         if self._stats is not None:
             self._stats.note_flush()
         await self._enforce_retention_async()
+        self._schedule_summary_work()
+
+    def _schedule_summary_work(self) -> None:
+        """One coalesced worker; raw writes have already atomically landed.
+
+        A concurrent flush never adds another conversion task. A later flush
+        retries missed/new parts; every source part remains authoritative.
+        """
+        if self._closed or self._recorder_root is None:
+            return
+        if self._overview_prewarm_task is None or self._overview_prewarm_task.done():
+            self._overview_prewarm_task = asyncio.create_task(
+                self._prewarm_overview_index(), name=f"history-summary-{self.session_id}"
+            )
 
     def _close_recording(self) -> None:
         if self._rec is None:
@@ -888,9 +970,7 @@ class Session:
         try:
             rec.close()
         except Exception:
-            logger.exception(
-                "recording close failed for session %s", self.session_id
-            )
+            logger.exception("recording close failed for session %s", self.session_id)
             if self._stats is not None:
                 self._stats.note_recording(self.session_id, False)
             return
@@ -950,9 +1030,7 @@ class Session:
         # (campaign C1). Overwritten on every attach — a resubscribe moves the
         # client (and its counter) to the new session's stats, which is the
         # same aggregate for manager-built sessions.
-        client.on_lag_drop = (
-            self._stats.inc_tx_lag_drops if self._stats is not None else None
-        )
+        client.on_lag_drop = self._stats.inc_tx_lag_drops if self._stats is not None else None
         self._clients.add(client)
         return self._snapshot_frames()
 
@@ -993,6 +1071,8 @@ class Session:
         self._grace_handle = None
         if self.run_task is not None:
             self.run_task.cancel()
+        if self._overview_prewarm_task is not None:
+            self._overview_prewarm_task.cancel()
         # Teardown closes the recorder (flushes any buffered rows). The
         # cancelled run task's finally also flushes — idempotent, whichever
         # runs second sees an already-cleared recorder.
@@ -1013,7 +1093,8 @@ class Session:
     async def run(self) -> None:
         """Drain ``feed.events()`` into the grid and broadcast; restart the
         feed with exponential backoff (cap 30 s) on crash, reporting
-        transitions via ``Status``. Returns when the feed ends normally.
+        transitions via ``Status``. A real live crypto stream also restarts on
+        a clean socket EOF; finite replay/sim and market-closed feeds may end.
 
         On ANY exit (normal end, cancellation — teardown or server shutdown)
         buffered recording rows are flushed so the on-disk tail stays fresh
@@ -1027,6 +1108,16 @@ class Session:
             while True:
                 try:
                     await self._consume()
+                    if (
+                        is_crypto_market(self._feed.market)
+                        and not isinstance(self._feed, ReplayFeed)
+                        and not self._feed.capability.get("replay", False)
+                    ):
+                        # A clean websocket close is still loss of a live
+                        # stream. Reuse the bounded recovery path instead of
+                        # leaving attached clients on a permanently idle LIVE
+                        # session until their next subscription.
+                        raise RuntimeError("live crypto feed ended unexpectedly")
                     self._emit_closed_if_needed()
                     return
                 except asyncio.CancelledError:
@@ -1099,11 +1190,15 @@ class Session:
             if not self._clients:
                 continue
             try:
+                self._publish_capability_status()
+            except Exception:
+                logger.exception(
+                    "periodic capability Status failed for session %s", self.session_id
+                )
+            try:
                 self._flush_partial()
             except Exception:  # noqa: BLE001 — a flush must never kill the session
-                logger.exception(
-                    "periodic partial flush failed for session %s", self.session_id
-                )
+                logger.exception("periodic partial flush failed for session %s", self.session_id)
 
     async def _consume(self) -> None:
         async for ev in self._feed.events():
@@ -1136,8 +1231,9 @@ class Session:
                 self._record(lambda r, m=ev: r.record_marker(m))
                 self._broadcast(wire.encode(ev), col=False)
             elif isinstance(ev, events.BBO):
-                self._bbo = ev
-                self._broadcast(wire.encode(ev), col=False)
+                if self._bbo is None or ev.ts_ns >= self._bbo.ts_ns:
+                    self._bbo = ev
+                    self._broadcast(wire.encode(ev), col=False)
             else:
                 # Forward-compat: a feed speaking a newer FeedEvent dialect
                 # must not crash the session — log and skip.
@@ -1158,6 +1254,28 @@ class Session:
                 self._flush_recording()
 
     def _on_book(self, ev: BookState) -> None:
+        # The inside quote comes from raw venue prices, never from a grouped
+        # density row. Some connectors deliver depth before their ticker.
+        if self._feed.market != "sim" and self._feed.capability.get("depth") in (
+            "L2",
+            "L2-snapshot",
+        ):
+            if len(ev.bid_px) and len(ev.ask_px):
+                bi, ai = int(np.argmax(ev.bid_px)), int(np.argmin(ev.ask_px))
+                quote = events.BBO(
+                    ts_ns=ev.ts_ns,
+                    bid_px=float(ev.bid_px[bi]),
+                    bid_sz=float(ev.bid_sz[bi]),
+                    ask_px=float(ev.ask_px[ai]),
+                    ask_sz=float(ev.ask_sz[ai]),
+                )
+                if (
+                    quote.bid_px > 0
+                    and quote.ask_px >= quote.bid_px
+                    and (self._bbo is None or quote.ts_ns >= self._bbo.ts_ns)
+                ):
+                    self._bbo = quote
+                    self._broadcast(wire.encode(quote), col=False)
         cols = self._grid.on_book(ev.ts_ns, ev.bid_px, ev.bid_sz, ev.ask_px, ev.ask_sz)
         self._emit_finalized(cols)
         anchor = self._reanchor_ref(ev)
@@ -1169,6 +1287,12 @@ class Session:
                 self._record(lambda r, p=params: r.record_epoch(p))
                 start = events.EpochStart(epoch=params.epoch, epoch_params=params)
                 self._broadcast(wire.encode(start), col=False)
+        if self._feed.market != "sim" and self._feed.capability.get("depth") in (
+            "L2",
+            "L2-snapshot",
+        ):
+            self._instant_book = wire.encode(self._grid.book_update(ev.ts_ns))
+            self._broadcast(self._instant_book, col=False)
 
     @staticmethod
     def _reanchor_ref(ev: BookState) -> float | None:
@@ -1314,6 +1438,33 @@ class Session:
         )
         self._broadcast(wire.encode(status), col=False)
 
+    def _publish_capability_status(self) -> None:
+        """Changed public health/counters reach clients at most once a second.
+
+        The existing Status dialect carries this telemetry. It runs from the
+        clock task, so a quiet source can still expose capture finalization;
+        canonical book counters do not fabricate upstream frame counts.
+        """
+        if "source_book_events" not in self._feed.capability:
+            return
+        now = self._clock()
+        if now < self._next_capability_status_ns:
+            return
+        self._next_capability_status_ns = now + CAPABILITY_STATUS_INTERVAL_NS
+        capability = self._capability()
+        payload = msgspec.json.encode(capability)
+        if payload == self._last_capability_status_payload:
+            return
+        self._last_capability_status_payload = payload
+        latency_ms, skew_ms = self._conn_latency_skew()
+        status = events.Status(
+            feed_state=self._feed_state,
+            capability=capability,
+            latency_ms=latency_ms,
+            clock_skew_ms=skew_ms,
+        )
+        self._broadcast(wire.encode(status), col=False)
+
     def _broadcast(
         self,
         frame: bytes,
@@ -1348,9 +1499,7 @@ class Session:
         across snapshot/history responses are harmless: the client's epoch
         table is idempotent (spec §6.3)."""
         return [
-            wire.encode(
-                events.EpochStart(epoch=e, epoch_params=self._grid.epoch_params_for(e))
-            )
+            wire.encode(events.EpochStart(epoch=e, epoch_params=self._grid.epoch_params_for(e)))
             for e in sorted(epochs)
         ]
 
@@ -1391,6 +1540,8 @@ class Session:
             lo, hi = cols[0].t0_ns, cols[-1].t0_ns + ep.dt_ns
             tail.extend(wire.encode(m) for m in self._markers if lo <= m.ts_ns < hi)
         tail.extend(wire.encode(t) for t in self._tape)
+        if self._instant_book is not None:
+            tail.append(self._instant_book)
         if self._bbo is not None:
             tail.append(wire.encode(self._bbo))
         if tail:
@@ -1407,15 +1558,345 @@ class Session:
         """
         n = max(0, min(req.n_cols, HISTORY_MAX_COLS))
         cols = self._grid.history(req.before_t, n)
+        return self._history_frame(req, cols, self._grid.oldest_retained_t0_ns() or 0)
+
+    async def handle_history_async(self, req: events.HistoryRequest) -> bytes:
+        """Extend RAM scroll-back with bounded, compatible recorded columns.
+
+        The disk reader runs off the event loop so a history page cannot
+        stall the live feed. A recording is usable only when its exact epoch
+        geometry AND logical recording identity match this grid. A cold-start
+        recording with a reused epoch/sequence number is a separate timeline;
+        it belongs in Replay, never in this live ring. Legacy recordings have
+        no identity, so their sequence-to-time origin must match exactly.
+        """
+        if req.start_col is not None or req.end_col is not None:
+            return await self._handle_overview(req)
+        n = max(0, min(req.n_cols, HISTORY_MAX_COLS))
+        if self._recorder_root is None or n == 0:
+            return self.handle_history(req)
+        anchor = self._grid.history(_T_MAX, 1)
+        if not anchor:
+            return self.handle_history(req)
+        dt = self._grid.cfg.dt_ns
+        origin = anchor[0].t0_ns - anchor[0].col_seq * dt
+        recording_id = self._rec.recording_id if self._rec is not None else None
+        cols = self._grid.history(req.before_t, n)
+        # The RAM edge is a cache boundary, not necessarily the beginning of
+        # recorded history. Advertise the grid origin until an empty disk page
+        # proves exhaustion; otherwise clients latch at the RAM edge forever.
+        # A warm restart can add a real timestamp seam without resetting
+        # col_seq. Its newest affine origin is not the true beginning: leave
+        # the bound unknown for scoped recordings until seq zero/empty proves
+        # exhaustion. The part/column caps still strictly bound each read.
+        cutoff = 0 if recording_id else origin
+        oldest = cutoff
+        disk_markers: list[events.Marker] = []
+        if len(cols) < n:
+            upper = cols[0].t0_ns if cols else req.before_t
+            upper_seq = cols[0].col_seq if cols else anchor[0].col_seq + 1
+            legacy = self._legacy_segment_before(upper, upper_seq)
+            legacy_only = legacy is not None and upper <= legacy[0] + (legacy[2] + 1) * dt
+            primary_parts = HISTORY_MAX_DISK_PARTS // 2 if legacy else HISTORY_MAX_DISK_PARTS
+            if upper > cutoff and not legacy_only:
+                tail = await self._read_history_tail(
+                    cutoff, upper, n - len(cols), recording_id, primary_parts
+                )
+                if tail is not None and self._history_tail_matches(
+                    tail, origin, upper, upper_seq, recording_id
+                ):
+                    merged = {(c.col_seq, c.t0_ns): c for c in tail.columns}
+                    merged.update({(c.col_seq, c.t0_ns): c for c in cols})
+                    cols = sorted(merged.values(), key=lambda c: c.col_seq)[-n:]
+                    disk_markers = tail.markers
+            if len(cols) < n and legacy is not None:
+                # Legacy reads use only an actually preloaded cadence segment.
+                # Exact affine identity and geometry remain mandatory; no
+                # unrelated cold run can donate a same-numbered depth column.
+                legacy_origin, legacy_lo, legacy_hi = legacy
+                upper = min(
+                    cols[0].t0_ns if cols else req.before_t,
+                    legacy_origin + (legacy_hi + 1) * dt,
+                )
+                upper_seq = min(cols[0].col_seq if cols else upper_seq, legacy_hi + 1)
+                cutoff_legacy = legacy_origin + legacy_lo * dt
+                parts = (
+                    HISTORY_MAX_DISK_PARTS
+                    if legacy_only
+                    else HISTORY_MAX_DISK_PARTS - primary_parts
+                )
+                if upper > cutoff_legacy:
+                    tail = await self._read_history_tail(
+                        cutoff_legacy, upper, n - len(cols), "", parts
+                    )
+                    if tail is not None and self._history_tail_matches(
+                        tail, legacy_origin, upper, upper_seq, ""
+                    ):
+                        merged = {(c.col_seq, c.t0_ns): c for c in tail.columns}
+                        merged.update({(c.col_seq, c.t0_ns): c for c in cols})
+                        cols = sorted(merged.values(), key=lambda c: c.col_seq)[-n:]
+                        disk_markers.extend(tail.markers)
+        return self._history_frame(req, cols, oldest, disk_markers)
+
+    async def _handle_overview(self, req: events.HistoryRequest) -> bytes:
+        """Explicit ranges use an independent aggregate cache, never RAM span.
+
+        n_cols bounds output. IO, price projection, means and wire encoding
+        run off the live loop. Only small native-ring snapshots run on-loop;
+        no worker reads that mutable ring concurrently with feed writes.
+        """
+        async with self._overview_lock:
+            target = self._grid.current_epoch_params()
+            retained = self._grid.retained_sequence_range()
+            n = max(0, min(req.n_cols, HISTORY_MAX_COLS))
+            if (
+                req.start_col is None
+                or req.end_col is None
+                or req.stride < 1
+                or req.stride > 2**32
+                or n == 0
+                or retained is None
+            ):
+                return self._history_frame(req, [], 0)
+            start = max(0, req.start_col)
+            first_group = start // req.stride * req.stride
+            end = min(req.end_col, retained[1], 2**32 - 1, (first_group + n * req.stride) - 1)
+            if end < start:
+                return self._history_frame(req, [], 0)
+            epochs = dict(self._grid._epoch_params)
+            # Scalar metadata only: select the source frame near each time
+            # group's middle before streaming its density. A global current
+            # core would collapse old precise levels back into broad wings.
+            ram_refs = [
+                (
+                    seq,
+                    int(self._grid._ring_t0[seq % self._grid.cfg.ring_columns]),
+                    int(self._grid._ring_epoch[seq % self._grid.cfg.ring_columns]),
+                )
+                for seq in range(max(start, retained[0]), min(end, retained[1]) + 1)
+            ]
+            # Validate immutable part stamps once for this request. The scalar
+            # representative and density passes reuse this same snapshot;
+            # complete aggregate cache hits leave it empty and do no scan.
+            parts = []
+            if self._recorder_root is not None:
+                store = await asyncio.to_thread(
+                    pyramid_for,
+                    self._recorder_root,
+                    self._feed.market,
+                    self._feed.symbol,
+                    self._rec.recording_id if self._rec is not None else None,
+                )
+                parts = await asyncio.to_thread(store.parts, start, end)
+                generation = await asyncio.to_thread(store.generation, parts, start, end, epochs)
+                if (
+                    self._overview_source_generation is not None
+                    and generation != self._overview_source_generation
+                ):
+                    self._overview_cache = OverviewCache()
+                self._overview_source_generation = generation
+            group_targets = await asyncio.to_thread(
+                native_group_epochs,
+                target,
+                start,
+                end,
+                req.stride,
+                req.before_t,
+                self._overview_cache,
+                ram_refs,
+                self._recorder_root,
+                self._feed.market,
+                self._feed.symbol,
+                self._rec.recording_id if self._rec is not None else None,
+                epochs,
+                list(self._legacy_history_segments),
+                parts,
+            )
+            builder = OverviewBuilder(
+                target,
+                start,
+                end,
+                req.stride,
+                req.before_t,
+                retained[1],
+                self._overview_cache,
+                group_targets=group_targets,
+            )
+            # RAM wins over any already-flushed duplicate. Its copies are
+            # bounded at 2 MiB on the production grid, with a yield after each.
+            batch_size = max(1, min(SOURCE_BATCH_COLS, (2 * 1024 * 1024) // (target.rows * 8)))
+            for low, high in builder.missing_ranges():
+                cursor = max(low, retained[0])
+                stop = min(high, retained[1])
+                while cursor <= stop:
+                    last = min(stop, cursor + batch_size - 1)
+                    columns = self._grid.history_sequence_batch(cursor, last, batch_size)
+                    await asyncio.to_thread(builder.add, columns, epochs)
+                    cursor = last + 1
+                    await asyncio.sleep(0)
+            if self._recorder_root is not None and builder.missing_source_ranges():
+                try:
+                    await asyncio.to_thread(
+                        add_recording,
+                        builder,
+                        self._recorder_root,
+                        self._feed.market,
+                        self._feed.symbol,
+                        self._rec.recording_id if self._rec is not None else None,
+                        epochs,
+                        list(self._legacy_history_segments),
+                        parts,
+                    )
+                except Exception:
+                    logger.exception(
+                        "recorded overview read failed for session %s", self.session_id
+                    )
+                    # Do not silently render a recent-tail-only picture as a
+                    # completed overview. The client retries a failed request.
+                    raise
+            markers = list(self._markers)
+            mode = self._grid.cfg.mode
+
+            def finish_frame() -> bytes:
+                columns = builder.finish()
+                low_time = builder.first_time
+                high_time = builder.last_time
+                visible_markers = (
+                    []
+                    if low_time is None or high_time is None
+                    else [m for m in markers if low_time <= m.ts_ns < high_time + target.dt_ns]
+                )
+                visible_markers.extend(builder.gap_markers())
+                visible_markers.extend(builder.resolution_markers())
+                visible_markers.sort(key=lambda marker: marker.ts_ns)
+                visible_markers = metadata_page(
+                    visible_markers, req, self._overview_source_generation or ""
+                )
+                response = events.HistoryResponse(
+                    req_id=req.req_id,
+                    epoch=target.epoch,
+                    oldest_available_t_ns=0,
+                    depth_cols=[
+                        events.DepthColumn(
+                            epoch=c.epoch,
+                            col_seq=c.col_seq,
+                            t0_ns=c.t0_ns,
+                            mode=mode,
+                            final=True,
+                            bid=c.bid,
+                            ask=None if mode == events.MODE_SYNTH_PROFILE else c.ask,
+                        )
+                        for c in columns
+                    ]
+                    if req.metadata_cursor is None
+                    else [],
+                    bar_cols=[c.bar for c in columns] if req.metadata_cursor is None else [],
+                    markers=visible_markers,
+                    big_trades=[],
+                )
+                # Existing wire format already carries per-column epochs.
+                # Publish every used historical map, then the current map.
+                # Historical IDs are older; the client's monotone live epoch
+                # cannot move backwards when these params are registered.
+                announcements = dict(builder.output_epochs)
+                announcements[target.epoch] = target
+                return b"".join(
+                    wire.encode(events.EpochStart(epoch=epoch, epoch_params=params))
+                    for epoch, params in sorted(announcements.items())
+                ) + wire.encode(response)
+
+            return await asyncio.to_thread(finish_frame)
+
+    def _legacy_segment_before(self, upper: int, upper_seq: int) -> tuple[int, int, int] | None:
+        dt = self._grid.cfg.dt_ns
+        return next(
+            (
+                segment
+                for segment in reversed(self._legacy_history_segments)
+                if segment[1] < upper_seq and segment[0] + segment[1] * dt < upper
+            ),
+            None,
+        )
+
+    async def _read_history_tail(
+        self, cutoff: int, upper: int, n: int, recording_id: str | None, parts: int
+    ) -> TailData | None:
+        assert self._recorder_root is not None
+        try:
+            return await asyncio.to_thread(
+                self._recorder_root.load_tail,
+                self._feed.market,
+                self._feed.symbol,
+                max_age_ns=upper - cutoff,
+                now_ns=upper,
+                limit_cols=n,
+                end_ns=upper,
+                max_column_parts=parts,
+                recording_id=recording_id,
+                include_events=False,
+            )
+        except Exception:
+            logger.exception("recorded history read failed for session %s", self.session_id)
+            return None
+
+    def _history_tail_matches(
+        self,
+        tail: TailData,
+        origin: int,
+        upper: int,
+        upper_seq: int,
+        recording_id: str | None,
+    ) -> bool:
+        """Reject foreign timelines/geometry without reprojecting density."""
+        epoch_map = {e.epoch: e for e in tail.epochs}
+        if recording_id is not None and (tail.recording_id or "") != recording_id:
+            return False
+        current = self._grid.current_epoch_params()
+        previous: FinalizedColumn | None = None
+        for col in tail.columns:
+            params = epoch_map.get(col.epoch)
+            try:
+                expected = self._grid.epoch_params_for(col.epoch)
+            except KeyError:
+                return False
+            if (
+                params != expected
+                or params != msgspec.structs.replace(current, epoch=col.epoch)
+                or not 0 <= col.col_seq < min(2**32, upper_seq)
+                or (not recording_id and (col.t0_ns != origin + col.col_seq * expected.dt_ns))
+                or not (0 if recording_id else origin) <= col.t0_ns < upper
+                or len(col.bid) != expected.rows
+                or len(col.ask) != expected.rows
+                or (
+                    previous is not None
+                    and (col.col_seq <= previous.col_seq or col.t0_ns <= previous.t0_ns)
+                )
+            ):
+                return False
+            previous = col
+        return bool(tail.columns)
+
+    def _history_frame(
+        self,
+        req: events.HistoryRequest,
+        cols: list[FinalizedColumn],
+        oldest: int,
+        disk_markers: list[events.Marker] | None = None,
+    ) -> bytes:
         ep = self._grid.current_epoch_params()
         markers: list[events.Marker] = []
         if cols:
             lo, hi = cols[0].t0_ns, cols[-1].t0_ns + ep.dt_ns
-            markers = [m for m in self._markers if lo <= m.ts_ns < hi]
+            by_marker = {
+                (m.ts_ns, m.kind, m.text, m.price, m.size): m
+                for m in [*(disk_markers or []), *self._markers]
+                if lo <= m.ts_ns < hi
+            }
+            markers = sorted(by_marker.values(), key=lambda m: m.ts_ns)
         resp = events.HistoryResponse(
             req_id=req.req_id,
             epoch=ep.epoch,
-            oldest_available_t_ns=self._grid.oldest_retained_t0_ns() or 0,
+            oldest_available_t_ns=oldest,
             depth_cols=[self._grid.to_depth(c) for c in cols],
             bar_cols=[c.bar for c in cols],
             markers=markers,
@@ -1502,6 +1983,7 @@ def _crypto_tick_auto(feed: Feed, cfg_tick: float) -> bool:
             return False
     return bool(getattr(feed, "price_adaptive_tick", False))
 
+
 # Equity grid shape (spec §7/§7.1): a cent tick (SEC Rule 612, >=$1 stocks),
 # a ~$41 vertical span at 4096 rows, and a nominal $100 p0 that the grid
 # re-anchors to the symbol's real price on the first book. mode + cadence are
@@ -1523,6 +2005,7 @@ _EQUITY_DEPTH_MODE: dict[object, int] = {
 }
 # Synthetic (keyless) depth tiers run the slower Yahoo-friendly cadence.
 _EQUITY_SYNTH_DEPTHS = frozenset({"SYNTH", "SYNTH_PROFILE"})
+
 
 # Price-grid coverage presets, as (band_up, band_down) fractions of the
 # reference price. ``None`` = the legacy fixed-absolute-span grid.
@@ -1645,6 +2128,8 @@ class SessionManager:
         if spec is not None and spec.rows > 0:
             rows = min(spec.rows, self._cfg.max_rows)
             p0 = round((_SIM_MID0 - rows * step / 2.0) / step) * step
+        if feed.market != "sim":
+            p0 = max(0.0, p0)
         return Grid(
             GridCfg(
                 tick=tick,
@@ -1744,8 +2229,7 @@ class SessionManager:
             self._evict_other_bands(key)
             if len(self._sessions) >= self._cfg.max_sessions:
                 raise SessionLimitError(
-                    f"session limit reached ({self._cfg.max_sessions}); "
-                    f"cannot open {key!r}"
+                    f"session limit reached ({self._cfg.max_sessions}); cannot open {key!r}"
                 )
             if sub.mode == "replay":
                 # The recording-backed replay engine: the recorder IS the data
@@ -1754,6 +2238,9 @@ class SessionManager:
                 feed, replay_tail = await self._replay_feed(sub)
             else:
                 feed, replay_tail = self._feed_factory(sub), None
+                prepare = getattr(feed, "prepare", None)
+                if prepare is not None:
+                    await prepare()
             session = Session(
                 f"{sub.market}:{sub.symbol}:{sub.mode}:{uuid.uuid4().hex[:12]}",
                 feed=feed,
@@ -1766,9 +2253,7 @@ class SessionManager:
                 # Live mode only: a replay session reads its own recording, never
                 # a live candle backfill.
                 backfill_fn=self._backfill_fn if sub.mode == "live" else None,
-                backfill_max_cols=self._cfg.backfill_max_cols
-                if self._cfg.backfill_enabled
-                else 0,
+                backfill_max_cols=self._cfg.backfill_max_cols if self._cfg.backfill_enabled else 0,
                 backfill_stretch=self._cfg.backfill_stretch,
                 stats=self.stats,
                 rec_flush_interval_s=self._cfg.rec_flush_interval_s,
@@ -1853,9 +2338,7 @@ class SessionManager:
         doing it inline stalled the event loop — and every other session and
         client — for the whole Parquet read."""
         if self._recorder is None:
-            raise ReplayUnavailableError(
-                "replay needs a recording store; this manager has none"
-            )
+            raise ReplayUnavailableError("replay needs a recording store; this manager has none")
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
             None, self._replay_feed_blocking, sub.market, sub.symbol, sub.start_t, sub.end_t
@@ -1919,14 +2402,10 @@ class SessionManager:
                 end_ns=end_t,
             )
         if tail is None or not tail.columns:
-            raise ReplayUnavailableError(
-                f"no recording for {market}:{symbol} — replay unavailable"
-            )
+            raise ReplayUnavailableError(f"no recording for {market}:{symbol} — replay unavailable")
         return ReplayFeed(market=market, symbol=symbol, tail=tail), tail
 
-    async def _recheck_replay_freshness(
-        self, session: Session, sub: events.Subscribe
-    ) -> None:
+    async def _recheck_replay_freshness(self, session: Session, sub: events.Subscribe) -> None:
         """Re-validate an existing replay session's recording on re-attach.
 
         The replay feed replays the recording AS IT WAS when the session was

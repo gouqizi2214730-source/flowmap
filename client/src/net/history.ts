@@ -10,6 +10,11 @@
  *
  * Design notes upheld here:
  *
+ * - **Absolute requests.** When supported by the transport, missing pages are
+ *   requested by their true col_seq range. A restart can add a timestamp seam
+ *   without resetting col_seq, so the newest affine clock cannot locate an
+ *   arbitrary old page. A distant pan loads the wanted page directly.
+ *
  * - **col_seq ↔ before_t mapping.** Each column carries its own `t0_ns`, so the
  *   loader tracks `(col_seq → t0_ns)` for resident columns as they arrive (live
  *   or backfilled). To fetch the page immediately older than the oldest resident
@@ -30,10 +35,9 @@
  *   latches `startOfHistory` and stops spinning — scroll-back is exhausted, not a
  *   busy-loop.
  *
- * - **Deep zoom-out.** When the price mip level-2 is engaged (or the time span
- *   exceeds the full-res budget) the view renders from the SUM-mips and native
- *   full-res residency is neither achievable nor needed, so backfill is
- *   suppressed — we never try to re-populate the whole extent full-res.
+ * - **Zoom-independent residency.** SUM-mips share the native ring's bounded
+ *   time window. Price/time mip selection cannot replace missing columns, so
+ *   every viewport that fits the ring may backfill, including its full span.
  *
  * The loader is transport-agnostic: it depends only on an injected
  * `requestHistory` (the store's) and a `spliceColumn` sink (the renderer's), so
@@ -44,10 +48,6 @@ import type { DepthColumn, HistoryResponse } from '../proto/types';
 import type { ResidentRange } from '../gl/tileRing';
 import { detectDepthSeam, seamGapMarker, seamToleranceNs } from './seam';
 
-/** How close (in columns) the visible left edge must get to the oldest resident
- *  column before a prefetch fires. One viewport-ish margin so data is ready
- *  before the user reaches the edge. */
-const PREFETCH_MARGIN_COLS = 64;
 /** Max columns per HistoryRequest (mirrors the server's HISTORY_MAX_COLS clamp). */
 export const HISTORY_PAGE_COLS = 256;
 /**
@@ -95,10 +95,16 @@ const BAND_REFETCH_MAX_PAGES = 3;
 export interface HistoryLoaderDeps {
   /** Request a page of history (the store's `requestHistory`). */
   requestHistory: (before_t: bigint, n: number) => Promise<HistoryResponse>;
+  /** Optional exact finalized source range; timestamps may have restart seams. */
+  requestSequence?: (start: number, end: number, n: number) => Promise<HistoryResponse>;
   /** Splice one returned column into the ring + mips + CPU caches (renderer). */
   spliceColumn: (col: DepthColumn) => void;
   /** Current full-res resident window (renderer → ring). */
   residentRange: () => ResidentRange | null;
+  /** First actually valid column after an unfilled forward gap. */
+  validFromSeq?: () => number;
+  /** Latest source column, including live columns omitted during scroll-back. */
+  latestColumn?: () => { colSeq: number; t0Ns: bigint } | null;
   /** Full-res budget in columns (ring capacity). */
   budgetCols: () => number;
   /** Nominal column interval in ns for the before_t fallback (epoch dt_ns). */
@@ -120,10 +126,16 @@ export interface HistoryLoaderDeps {
   maxPageCols?: () => number;
   /** Called after a batch splices (renderer marks dirty / refits). Optional. */
   onSpliced?: (resp: HistoryResponse) => void;
+  /** Yield background uploads until a display frame has painted. */
+  yieldToFrame?: () => Promise<void>;
+  /** A detached renderer/ring must never receive a delayed history page. */
+  isActive?: () => boolean;
 }
 
 /** The view facts the per-frame guard needs (all O(1), no history scan). */
 export interface VisibleState {
+  /** Live follow may glide slightly behind a full ring; don't fight eviction. */
+  following?: boolean;
   /** Absolute column at the viewport's left edge (floor of colOffset). */
   leftCol: number;
   /** Columns across the viewport (time span). */
@@ -134,6 +146,7 @@ export interface VisibleState {
 
 export class HistoryLoader {
   private readonly deps: HistoryLoaderDeps;
+  private generation = 0;
 
   /** (col_seq → t0_ns) for columns we've seen — pruned to the resident window. */
   private readonly colT0 = new Map<number, bigint>();
@@ -147,6 +160,9 @@ export class HistoryLoader {
   private lastError: string | null = null;
   /** Server's oldest retained t0 (from the latest response); 0 until known. */
   private oldestAvailableT0 = 0n;
+  /** An empty exact page is a local hole, not exhaustion of the whole timeline. */
+  private emptySequenceRange: { start: number; end: number } | null = null;
+  private visibleView: VisibleState | null = null;
   /** Recently emitted synthetic seam t0s (bounded) — suppresses repeats. */
   private readonly recentSeams: bigint[] = [];
   /** Single-flight guard for {@link refetchBand} (the repaired-skip heal). */
@@ -165,6 +181,11 @@ export class HistoryLoader {
     const rows = this.deps.rows ? this.deps.rows() : 0;
     const cap = this.deps.maxPageCols ? this.deps.maxPageCols() : HISTORY_PAGE_COLS;
     return Math.min(cap, pageColsForRows(rows));
+  }
+
+  /** A claimed ring slot before this edge may still contain a previous column. */
+  private validOldest(range: ResidentRange): number {
+    return Math.max(range.oldest, this.deps.validFromSeq?.() ?? range.oldest);
   }
 
   /**
@@ -189,6 +210,7 @@ export class HistoryLoader {
       this.startOfHistoryFlag = false;
       this.lastError = null;
       this.recentSeams.length = 0;
+      this.emptySequenceRange = null;
     }
     this.colT0.set(colSeq, t0Ns);
     if (this.oldestKnownSeq < 0 || colSeq < this.oldestKnownSeq) {
@@ -203,43 +225,59 @@ export class HistoryLoader {
     const range = this.deps.residentRange();
     if (!range) return;
     const floor = range.oldest - HISTORY_PAGE_COLS * 2;
+    const ceiling = range.newest + HISTORY_PAGE_COLS * 2;
     if (this.colT0.size <= this.deps.budgetCols() + HISTORY_PAGE_COLS * 2) return;
     for (const seq of this.colT0.keys()) {
-      if (seq < floor) this.colT0.delete(seq);
+      if (seq < floor || seq > ceiling) this.colT0.delete(seq);
     }
   }
 
   /**
    * Per-frame guard (called only when the view moved). O(1): if the visible left
-   * edge has come within the prefetch margin of the oldest resident column and
-   * older data exists, fire one coalesced HistoryRequest. Deep zoom-out (level-2
-   * or span beyond the budget) renders from mips and never backfills.
+   * edge precedes the oldest valid column and older data exists, fire one
+   * coalesced HistoryRequest. Mip selection does not change data residency.
    */
   ensureVisible(v: VisibleState): void {
+    if (this.deps.requestSequence) this.visibleView = { ...v };
     if (this.inFlightBeforeT !== null) return; // one request at a time
-    if (this.startOfHistoryFlag) return; // scroll-back exhausted
-    // Deep zoom-out renders from the SUM-mips / shows the whole resident extent,
-    // so full-res backfill is neither achievable nor useful: never re-populate
-    // the whole extent. Suppressed when the price mip level-2 is engaged, or when
-    // the time span spans the entire budget (the whole ring is already on screen
-    // — backfilling would only evict what's being viewed).
-    if (v.level >= 2) return;
-    if (v.span >= this.deps.budgetCols()) return;
+    const budget = this.deps.budgetCols();
+    if (v.span > budget) return; // the whole requested view must fit one ring
 
     const range = this.deps.residentRange();
     if (!range) return;
+    if (this.deps.requestSequence) {
+      this.ensureSequenceVisible(v, range, budget);
+      return;
+    }
+    const right = v.leftCol + Math.ceil(v.span) - 1;
+    const latest = this.deps.latestColumn?.();
+    const sourceRight = latest ? Math.min(right, latest.colSeq) : range.newest;
+    if (latest && sourceRight > range.newest) {
+      // Manual right-pan can revisit columns evicted by an older backfill.
+      // Fetch the target's newest page, then the left guard fills any remaining
+      // gap on subsequent frames. Never request beyond the real source edge.
+      const dt = BigInt(Math.max(1, Math.round(this.deps.dtNs())));
+      const beforeT = latest.t0Ns + BigInt(sourceRight - latest.colSeq + 1) * dt;
+      const first = Math.max(0, v.leftCol, range.newest + 1);
+      const n = Math.min(this.pageCols(), sourceRight - first + 1);
+      if (n > 0) void this.fetch(beforeT, n, 'newer');
+      return;
+    }
+    if (this.startOfHistoryFlag) return; // only the older edge is exhausted
+    const oldest = this.validOldest(range);
+    if (v.following && range.count >= budget && oldest === range.oldest) return;
     // Nothing to do while the view is still comfortably inside the resident
     // window (this also means normal live-follow, where the left edge sits far
     // from the oldest column, never touches the scroll-back path).
-    if (v.leftCol > range.oldest - PREFETCH_MARGIN_COLS) return;
+    if (v.leftCol >= oldest) return;
     // We WANT older data but the window already reaches absolute col_seq 0 —
     // scroll-back is exhausted at the very start of the stream.
-    if (range.oldest <= 0) {
+    if (oldest <= 0) {
       this.startOfHistoryFlag = true;
       return;
     }
 
-    const beforeT = this.beforeTFor(range.oldest);
+    const beforeT = this.beforeTFor(oldest);
     if (beforeT === null) return;
     // Already at/behind the server's oldest retained column → exhausted.
     if (this.oldestAvailableT0 > 0n && beforeT <= this.oldestAvailableT0) {
@@ -247,12 +285,58 @@ export class HistoryLoader {
       return;
     }
 
-    // Page size: leave the visible span resident so it doesn't evict itself,
-    // capped by the per-frame transport budget (pageCols). Must be an integer —
-    // the wire `n_cols` field is a u32.
-    const room = this.deps.budgetCols() - Math.ceil(v.span) - RESIDENT_HEADROOM_COLS;
-    const n = Math.max(1, Math.min(this.pageCols(), Math.floor(room)));
+    // Clip the page to the actual requested interval. Sliding farther left than
+    // right - budget + 1 would overwrite its visible right edge. Spare capacity
+    // can hold a small prefetch reserve; a full-budget view stops at leftCol.
+    const pageFloor = Math.max(0, right - budget + 1, v.leftCol - RESIDENT_HEADROOM_COLS);
+    const n = Math.min(this.pageCols(), Math.floor(oldest - pageFloor));
+    if (n <= 0) return;
     void this.fetch(beforeT, n);
+  }
+
+  /** Load only the missing visible page, without walking from the live clock. */
+  private ensureSequenceVisible(v: VisibleState, range: ResidentRange, budget: number): void {
+    const left = Math.max(0, Math.floor(v.leftCol));
+    const right = Math.floor(v.leftCol + Math.ceil(v.span) - 1);
+    const latest = this.deps.latestColumn?.();
+    const sourceRight = latest ? Math.min(right, latest.colSeq) : Math.min(right, range.newest);
+    if (sourceRight < left) return;
+    const oldest = this.validOldest(range);
+    if (sourceRight > range.newest) {
+      const end = sourceRight;
+      const start = Math.max(left, range.newest + 1, end - this.pageCols() + 1);
+      this.fetchSequence(start, end, 'newer');
+      return;
+    }
+    if (v.following && range.count >= budget && oldest === range.oldest) return;
+    if (left >= oldest) return;
+    if (oldest <= 0) {
+      this.startOfHistoryFlag = true;
+      return;
+    }
+    // A page adjacent to the resident edge is useful only if the view overlaps
+    // that edge. For a distant jump, land at the requested right edge instead.
+    const end = Math.min(sourceRight, oldest - 1);
+    const pageFloor = Math.max(0, right - budget + 1, left - RESIDENT_HEADROOM_COLS);
+    const start = Math.max(pageFloor, end - this.pageCols() + 1);
+    if (end >= start) this.fetchSequence(start, end, 'older');
+  }
+
+  private fetchSequence(start: number, end: number, direction: 'older' | 'newer'): void {
+    if (this.emptySequenceRange?.start === start && this.emptySequenceRange.end === end) return;
+    // The sentinel only represents singleflight. It is never used as a clock
+    // for this request; the server receives the absolute sequence endpoints.
+    void this.fetch(0n, end - start + 1, direction, { start, end }, true);
+  }
+
+  private sequenceStillVisible(sequence: { start: number; end: number }): boolean {
+    const view = this.visibleView;
+    if (!view) return true;
+    const budget = this.deps.budgetCols();
+    const left = Math.max(0, Math.floor(view.leftCol));
+    const right = Math.floor(view.leftCol + Math.ceil(view.span) - 1);
+    return view.span <= budget && sequence.end >= left && sequence.start <= right &&
+      sequence.start >= Math.max(0, right - budget + 1);
   }
 
   /** before_t for the page immediately older than `oldestResidentSeq`. */
@@ -266,33 +350,50 @@ export class HistoryLoader {
     return this.oldestKnownT0 - gap * dt;
   }
 
-  private async fetch(beforeT: bigint, n: number): Promise<void> {
+  private async fetch(
+    beforeT: bigint, n: number, direction: 'older' | 'newer' = 'older',
+    sequence?: { start: number; end: number },
+    visibleOnly = false,
+  ): Promise<void> {
+    const generation = this.generation;
+    let abandonedView = false;
     this.inFlightBeforeT = beforeT;
     this.requestCountN += 1;
     try {
-      const resp = await this.deps.requestHistory(beforeT, n);
+      const resp = sequence && this.deps.requestSequence
+        ? await this.deps.requestSequence(sequence.start, sequence.end, n)
+        : await this.deps.requestHistory(beforeT, n);
+      if (!this.active(generation)) return;
+      if (visibleOnly && sequence && !this.sequenceStillVisible(sequence)) {
+        abandonedView = true;
+        return;
+      }
       this.oldestAvailableT0 = resp.oldest_available_t_ns;
       this.lastError = null; // the previous failure no longer describes the tail
-      // Splice ascending (oldest first) so each lands adjacent to the window.
-      // The server is expected to return the page in column order; sorting is a
-      // cheap defense so a deviant/OUT-OF-ORDER page still splices monotonically
-      // (each column sliding the ring backward one slot) instead of in arrival
-      // order. Overlap with already-resident columns is fine: the sink writes
-      // idempotently by absolute col_seq.
-      const cols = resp.depth_cols.slice().sort((a, b) => a.col_seq - b.col_seq);
+      // Sort for seam detection; splicePage then descends from the resident
+      // anchor. Each upload extends validity by one adjacent column, including
+      // during a yielded page, instead of claiming not-yet-uploaded slots.
+      const cols = resp.depth_cols
+        .filter(c => !sequence || (c.col_seq >= sequence.start && c.col_seq <= sequence.end))
+        .sort((a, b) => a.col_seq - b.col_seq);
       if (cols.length === 0) {
         // Nothing older on the server → scroll-back exhausted.
-        this.startOfHistoryFlag = true;
+        if (sequence) {
+          this.emptySequenceRange = sequence;
+          if (direction === 'older' && sequence.start === 0) this.startOfHistoryFlag = true;
+        } else if (direction === 'older') this.startOfHistoryFlag = true;
       } else {
+        this.emptySequenceRange = null;
         // Honesty (QA3 C-1): a page can belong to a different grid than the
         // resident window (reconstructed/backfilled pages, a session
         // replacement) and splice in with a seq→time break. Surface it as a
         // gap Marker — the renderer forwards `resp.markers` to the overlay
         // manager — instead of silently concatenating two timelines.
         this.markSeams(resp, cols);
-        for (const col of cols) {
-          this.noteColumn(col.col_seq, col.t0_ns);
-          this.deps.spliceColumn(col);
+        const stillWanted = visibleOnly && sequence ? () => this.sequenceStillVisible(sequence) : undefined;
+        if (!await this.splicePage(cols, generation, direction, stillWanted)) {
+          abandonedView = stillWanted !== undefined && !stillWanted();
+          return;
         }
         // If this batch already reaches the start of history — absolute col_seq
         // 0, or the server's oldest retained column — the next request would
@@ -301,17 +402,50 @@ export class HistoryLoader {
         // t0-only test would be ambiguous with the "no columns → 0" sentinel.)
         const reachedStart =
           cols.some((c) => c.col_seq === 0) ||
-          (this.oldestAvailableT0 > 0n && cols.some((c) => c.t0_ns <= this.oldestAvailableT0));
-        if (reachedStart) this.startOfHistoryFlag = true;
+          (!sequence && this.oldestAvailableT0 > 0n && cols.some((c) => c.t0_ns <= this.oldestAvailableT0));
+        this.startOfHistoryFlag = reachedStart;
         this.deps.onSpliced?.(resp);
       }
     } catch (err) {
+      if (!this.active(generation)) return;
       this.lastError = err instanceof Error ? err.message : String(err);
       // Transient (timeout / disconnect): do NOT latch exhaustion; a later pan
       // retries. Just clear in-flight so the next frame can re-issue.
     } finally {
-      this.inFlightBeforeT = null;
+      if (generation === this.generation) this.inFlightBeforeT = null;
+      // A view change consumed the renderer's moved flag while this page was
+      // pending. Hand off directly to that latest target after discarding it.
+      if (abandonedView && this.active(generation) && this.visibleView) this.ensureVisible(this.visibleView);
     }
+  }
+
+  private active(generation: number): boolean {
+    return generation === this.generation && (this.deps.isActive?.() ?? true);
+  }
+
+  private async splicePage(
+    cols: DepthColumn[], generation: number, direction: 'older' | 'newer' = 'older',
+    stillWanted?: () => boolean,
+  ): Promise<boolean> {
+    let start = performance.now();
+    let count = 0;
+    for (let step = 0; step < cols.length; step++) {
+      if (!this.active(generation) || (stillWanted && !stillWanted())) return false;
+      const i = direction === 'older' ? cols.length - 1 - step : step;
+      const col = cols[i];
+      this.noteColumn(col.col_seq, col.t0_ns);
+      this.deps.spliceColumn(col);
+      count++;
+      // A full page can upload several MB. Bound both CPU time and queued GPU
+      // work, then allow the live frame/stream to run before continuing.
+      if (this.deps.yieldToFrame && step + 1 < cols.length &&
+          (count >= 8 || performance.now() - start >= 4)) {
+        await this.deps.yieldToFrame();
+        start = performance.now();
+        count = 0;
+      }
+    }
+    return this.active(generation);
   }
 
   // --- repaired-skip band refetch (F24) ---------------------------------------
@@ -352,6 +486,7 @@ export class HistoryLoader {
   }
 
   private async runBandRefetch(lo: number, hi: number, anchorT0: bigint): Promise<void> {
+    const generation = this.generation;
     this.bandInFlight = true;
     try {
       let need = hi;
@@ -359,16 +494,16 @@ export class HistoryLoader {
       let lastResp: HistoryResponse | null = null;
       for (let page = 0; page < BAND_REFETCH_MAX_PAGES && need >= lo; page++) {
         const want = need - lo + 1;
-        const n = Math.min(this.pageCols(), want + BAND_REFETCH_SLACK);
-        const resp = await this.deps.requestHistory(beforeT, n);
+        const n = Math.min(this.pageCols(), want + (this.deps.requestSequence ? 0 : BAND_REFETCH_SLACK));
+        const resp = this.deps.requestSequence
+          ? await this.deps.requestSequence(need - n + 1, need, n)
+          : await this.deps.requestHistory(beforeT, n);
+        if (!this.active(generation)) return;
         const cols = resp.depth_cols
           .filter((c) => c.col_seq >= lo && c.col_seq <= need)
           .sort((a, b) => a.col_seq - b.col_seq);
         if (cols.length === 0) break; // the server does not hold the band — keep zeroes
-        for (const col of cols) {
-          this.noteColumn(col.col_seq, col.t0_ns);
-          this.deps.spliceColumn(col);
-        }
+        if (!await this.splicePage(cols, generation)) return;
         lastResp = resp;
         // The next page must be strictly older than everything this page held.
         let oldestT = cols[0].t0_ns;
@@ -379,10 +514,12 @@ export class HistoryLoader {
       }
       if (lastResp !== null) this.deps.onSpliced?.(lastResp);
     } catch (err) {
+      if (!this.active(generation)) return;
       // Transient failure: the zeroed band stays the honest fallback; do not
       // latch anything — the next skip gets its own attempt.
       this.lastError = err instanceof Error ? err.message : String(err);
     } finally {
+      if (generation !== this.generation) return;
       this.bandInFlight = false;
       const p = this.pendingBand;
       this.pendingBand = null;
@@ -437,10 +574,11 @@ export class HistoryLoader {
 
     const range = this.deps.residentRange();
     if (range !== null && dtNs !== null) {
-      const anchorT0 = this.colT0.get(range.oldest);
+      const oldest = this.validOldest(range);
+      const anchorT0 = this.colT0.get(oldest);
       const newest = cols[cols.length - 1];
-      if (anchorT0 !== undefined && newest.col_seq < range.oldest) {
-        const expected = anchorT0 - BigInt(range.oldest - newest.col_seq) * dtNs;
+      if (anchorT0 !== undefined && newest.col_seq < oldest) {
+        const expected = anchorT0 - BigInt(oldest - newest.col_seq) * dtNs;
         const delta = newest.t0_ns - expected;
         const dev = delta > 0n ? delta : -delta;
         if (dev > tol) {
@@ -497,27 +635,39 @@ export class HistoryLoader {
    * ever spinning. Yields immediately if a scroll-back fetch is already active.
    */
   async prefetch(targetCols: number): Promise<void> {
+    const generation = this.generation;
     if (!(targetCols > 0)) return;
     // Never ask for more than the ring can hold alongside a resident live window.
     const budget = this.deps.budgetCols();
     const effTarget = Math.min(targetCols, Math.max(1, budget - RESIDENT_HEADROOM_COLS));
     for (let page = 0; page < 64; page++) {
+      if (!this.active(generation)) return;
       if (this.startOfHistoryFlag) return;
       if (this.inFlightBeforeT !== null) return; // a scroll-back fetch owns the channel
       const range = this.deps.residentRange();
       if (!range) return;
-      if (range.count >= effTarget) return; // enough loaded (and ring-safe)
-      if (range.oldest <= 0) {
+      const oldest = this.validOldest(range);
+      const count = range.newest - oldest + 1;
+      if (count >= effTarget) return; // enough actually loaded (and ring-safe)
+      if (oldest <= 0) {
         this.startOfHistoryFlag = true;
         return;
       }
-      const beforeT = this.beforeTFor(range.oldest);
+      if (this.deps.requestSequence) {
+        const end = oldest - 1;
+        const n = Math.max(1, Math.min(this.pageCols(), Math.ceil(effTarget - count), oldest));
+        const start = end - n + 1;
+        if (this.emptySequenceRange?.start === start && this.emptySequenceRange.end === end) return;
+        await this.fetch(0n, n, 'older', { start, end });
+        continue;
+      }
+      const beforeT = this.beforeTFor(oldest);
       if (beforeT === null) return;
       if (this.oldestAvailableT0 > 0n && beforeT <= this.oldestAvailableT0) {
         this.startOfHistoryFlag = true;
         return;
       }
-      const n = Math.max(1, Math.min(this.pageCols(), Math.ceil(effTarget - range.count)));
+      const n = Math.max(1, Math.min(this.pageCols(), Math.ceil(effTarget - count)));
       await this.fetch(beforeT, n);
     }
   }
@@ -538,12 +688,17 @@ export class HistoryLoader {
    * go-live.
    */
   reset(): void {
+    this.generation++;
+    this.bandInFlight = false;
+    this.pendingBand = null;
     this.inFlightBeforeT = null;
     this.startOfHistoryFlag = false;
     this.colT0.clear();
     this.oldestKnownSeq = -1;
     this.oldestKnownT0 = 0n;
     this.oldestAvailableT0 = 0n;
+    this.emptySequenceRange = null;
+    this.visibleView = null;
     this.lastError = null;
   }
 

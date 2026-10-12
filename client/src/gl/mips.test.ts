@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { COLS_PER_TILE, TileRing } from './tileRing';
 import { DOWNSAMPLE_FRAG, mipGroupCols, MipChain } from './mips';
@@ -149,6 +149,26 @@ describe('validFrom gating of the downsample (B-2)', () => {
 });
 
 describe('FBO completeness fallback (B-7c)', () => {
+  it('validates immutable destinations once, including each new tile layer', () => {
+    const gl = makeFakeGL({ colorBufferFloat: true });
+    const check = vi.spyOn(gl, 'checkFramebufferStatus');
+    const ctx: GLContext = { gl, caps: { maxTextureImageUnits: 16,
+      maxArrayTextureLayers: 2048, maxTextureSize: 8192, colorBufferFloat: true } };
+    const ring = new TileRing(gl, ROWS, 2);
+    const chain = new MipChain(ctx, COLS_PER_TILE, ROWS, 2);
+    for (let s = 0; s < 32; s++) { append(ring, s); chain.updateFrom(ring, s); }
+    expect(check).toHaveBeenCalledTimes(3); // row-only, level 1, level 2
+    // Repeated partial updates to the four-second boundary need no GPU query.
+    for (let i = 0; i < 20; i++) chain.updateFrom(ring, 31);
+    expect(check).toHaveBeenCalledTimes(3);
+    append(ring, COLS_PER_TILE);
+    chain.updateFrom(ring, COLS_PER_TILE);
+    expect(check).toHaveBeenCalledTimes(4); // first row destination in layer 1
+    chain.dispose();
+    const replacement = new MipChain(ctx, COLS_PER_TILE, ROWS, 2);
+    replacement.updateFrom(ring, COLS_PER_TILE);
+    expect(check).toHaveBeenCalledTimes(5); // restoration validates fresh storage
+  });
   it('an incomplete FBO disables the chain instead of baking broken mips', () => {
     const { chain, ring, gl } = makeChain({ incompleteFBO: true });
     expect(chain.usable).toBe(true);

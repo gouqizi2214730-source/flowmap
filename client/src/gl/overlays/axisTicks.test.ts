@@ -67,6 +67,15 @@ describe('priceDecimals', () => {
 });
 
 describe('time ticks', () => {
+  it('keeps whole-day and longer histories within the requested tick count', () => {
+    for (const hours of [25, 72, 240, 2400]) {
+      const span = BigInt(hours) * 3_600_000_000_000n;
+      const model = timeTickModel(0n, span, 7);
+      expect(model.step).toBeGreaterThanOrEqual(span / 7n);
+      expect(model.ticks.length).toBeLessThanOrEqual(8);
+      expect(model.ticks.every(t => t % model.step === 0n)).toBe(true);
+    }
+  });
   it('snaps to a human interval ≥ the wanted spacing', () => {
     expect(niceTimeStepNs(1e9, 5)).toBe(2.5e8); // want 2e8 → 250 ms
     expect(niceTimeStepNs(6e10, 6)).toBe(1e10); // want 1e10 → 10 s

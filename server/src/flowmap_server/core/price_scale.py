@@ -207,7 +207,9 @@ def make_hybrid(
         return None
 
     core_span = core_rows * core_step
-    core_p0 = mid - core_span / 2.0
+    # BBO midpoint is often HALF a venue tick. An unsnapped origin then puts
+    # adjacent prices on x.5 rows, where ties-to-even merges two levels.
+    core_p0 = round((mid - core_span / 2.0) / core_step) * core_step
     core_hi = core_p0 + core_span
     lo_price = mid * dn_floor
     hi_price = mid * up_mult

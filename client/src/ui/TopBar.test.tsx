@@ -5,6 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { setLocale } from '../i18n';
 import { useFlowMapStore } from '../state/store';
+import { useIntelligenceStore } from '../state/intelligenceStore';
+import { MsgType } from '../proto/types';
 import type { SymbolSearchHandle } from './SymbolSearch';
 import { TopBar } from './TopBar';
 import { capabilityChipClass } from './symbols';
@@ -57,6 +59,7 @@ function topbar(
 }
 
 beforeEach(() => {
+  useIntelligenceStore.setState(useIntelligenceStore.getInitialState(), true);
   useFlowMapStore.setState({ capability: null, subscription: undefined, feedState: undefined, replayUnavailable: false });
 });
 
@@ -347,6 +350,8 @@ describe('TopBar i18n shell (C7)', () => {
     expect(ticker!.textContent).toContain('SOFR');
     expect(ticker!.textContent).toContain('HY OAS');
     expect(ticker!.textContent).toContain('10Y-2Y');
+    expect(ticker!.textContent).toContain('UNAVAILABLE');
+    expect(ticker!.textContent).not.toContain('0.00%');
 
     const intelBtn = container.querySelector('[data-testid="intel-toggle"]');
     expect(intelBtn).not.toBeNull();
@@ -354,5 +359,16 @@ describe('TopBar i18n shell (C7)', () => {
       intelBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onToggleIntel).toHaveBeenCalledTimes(1);
+  });
+
+  it('displays macro values only after a valid current-wire message arrives', () => {
+    const { container } = render(topbar());
+    act(() => useIntelligenceStore.getState().ingestMacro({ type: MsgType.MACRO_STRESS, ts_ns: 1n, sofr: 5.32, hy_spread: 3.42, yield_10y2y: -0.18, stress_score: 0.4, status: 'ELEVATED' }));
+    const ticker = container.querySelector('[data-testid="institutional-stress-ticker"]');
+    expect(ticker?.textContent).toContain('5.32%');
+    expect(ticker?.textContent).toContain('342 bps');
+    expect(ticker?.textContent).toContain('-0.18%');
+    expect(ticker?.textContent).toContain('ELEVATED');
+    expect(ticker?.textContent).not.toContain('UNAVAILABLE');
   });
 });

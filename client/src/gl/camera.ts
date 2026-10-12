@@ -23,24 +23,16 @@
  * zooming price keeps the right edge pinned to now. The pure `applyKill` below
  * is the single place that encodes which gesture releases which axis.
  *
- * **Overscroll.** `rowCenter` is clamped to a SPAN-RELATIVE band that extends a
- * full viewport past each edge of the price grid ({@link rowCenterBounds}), so
- * the user can push the grid entirely off screen in either direction — the
- * "look infinitely far up/down" gesture. That is visually safe with no shader
- * change: the fragment shader already paints the LUT floor (`background()`) for
- * any row outside `[0, rows)`. `rowSpan` tops out at the USER zoom-out cap
- * `maxRowSpanZoom`, which is now the GRID HEIGHT: "the whole market in one
- * view" is exactly the full band, and zooming further only added black margins
- * plus a sub-sampled mip image (owner-reported "dashed rows" past ~16
- * rows/pixel where level 2 ran out of footprint coverage). Panning past the
- * band stays allowed; zooming past it does not. See {@link limitsFor}.
+ * **Storage and navigation are independent.** The tile ring's row/column
+ * capacities bound allocations and automatic framing. They do not bound a
+ * user's zoom. The renderer chooses a history resolution appropriate to the
+ * viewport; reducing residency must never shrink the readable history window.
  *
  * **Time bounds.** The TIME axis is bounded by the KNOWN DATA window the
  * renderer keeps in {@link CameraLimits.timeWindow}: `colOffset` is clamped so
  * the view cannot leave the history ends by more than one small overscroll band
- * ({@link COL_OVERSCROLL}, also capped at one viewport), and the manual
- * zoom-out cap is halved-to-`resident.count` scale ({@link maxColSpanFor}) so
- * the resident field can never be squeezed sub-pixel blank. Both are OPT-IN:
+ * ({@link COL_OVERSCROLL}, also capped at one viewport). These end bounds use
+ * known history, never just GPU residency. The bounds are OPT-IN:
  * a limits object without a `timeWindow` behaves exactly like the legacy free
  * camera (all the pure-math tests), and the renderer refreshes the window via
  * {@link Camera.setTimeWindow} without re-clamping a state the e2e harness
@@ -60,6 +52,8 @@
 
 import type { HeatmapView } from './heatmap';
 import type { ResidentRange } from './tileRing';
+import { priceToRow, rowToPrice, type HybridScale, type PriceScale } from './priceScale';
+import { fractionRow } from './priceProjection';
 
 /**
  * How the price axis auto-scales.
@@ -126,13 +120,18 @@ export interface TimeWindow {
   /** Newest absolute col_seq the client has SEEN (the live edge), inclusive.
    *  −1 before the first column. */
   newest: number;
-  /** Full-res resident window — the zoom-out visibility floor. Null before the
-   *  first column. */
+  /** Full-res GPU resident window, retained for diagnostics. It never limits
+   *  the user's time span. Null before the first column. */
   resident: ResidentRange | null;
 }
 
 /** Bounds the clamps enforce (from the tile ring geometry). */
 export interface CameraLimits {
+  /** Hybrid storage wings can represent a useful viewport in less than a row. */
+  minRowSpan?: number;
+  /** Navigable physical price domain in storage coordinates. Hybrid scales
+   * extrapolate beyond the texture edges; those edges are not pan bounds. */
+  rowDomain?: { lo: number; hi: number };
   /** Price grid height — caps the FRAMING span (fit/reset) and bounds
    *  rowCenter. Deliberately NOT the user zoom-out cap: see
    *  {@link maxRowSpanZoom}. */
@@ -151,9 +150,8 @@ export interface CameraLimits {
    * the wheel out never hits an artificial wall: past the resident window the
    * shader simply paints background / SUM-mips, and the history backfill fills it
    * in. Decoupling this from the ring capacity costs no GPU memory (it is only a
-   * clamp bound, not an allocation). NOTE: when {@link timeWindow} is known this
-   * is reduced by {@link maxColSpanFor} so the resident field never squeezes
-   * sub-pixel (the M3 max-zoom-out blank).
+   * clamp bound, not an allocation). {@link timeWindow} does not reduce this
+   * numeric bound to the resident cache size.
    */
   maxColSpanZoom: number;
   /**
@@ -173,10 +171,8 @@ export interface CameraLimits {
    *    edge with the oldest data still on screen, never the unbounded col_seq
    *    void the QA3 probe measured (`colOffset −92 129` / `−192 129` at
    *    `oldest 0`, 0.31 % painted);
-   *  - the zoom-out cap becomes the full-res resident window over
-   *    {@link MIN_RESIDENT_COVERAGE} of the viewport, so a wheel-out can never
-   *    squeeze the resident field under half the screen (M3 H-1: 60 notches →
-   *    colScale 1 048 576 with 2 717 resident columns → 0/420 probes painted).
+   * The resident cache does not impose a zoom-out cap. Loading/aggregating the
+   * history is the renderer's responsibility.
    * Omitted (undefined) on bare unit limits and before the first column.
    */
   timeWindow?: TimeWindow | null;
@@ -185,14 +181,6 @@ export interface CameraLimits {
 /** Absolute col_seq the stream starts at — the pan clamp's hard floor (the
  *  backfill loader's start-of-history contract, net/history.ts). */
 export const COL_SEQ_FLOOR = 0;
-
-/**
- * How much of the viewport the full-res resident window must still cover at the
- * widest manual time zoom-out. 0.5 = "you can always zoom out until the
- * resident data fills half the screen"; below that the columns squeeze to
- * sub-pixel and the field reads blank (M3 H-1).
- */
-export const MIN_RESIDENT_COVERAGE = 0.5;
 
 /**
  * How far past either end of the known history a pan may overscroll, in
@@ -208,21 +196,29 @@ export const MIN_COL_SPAN = 1;
 export const MIN_ROW_SPAN = 1;
 /**
  * Absolute ceiling on the USER time zoom-out (columns across the viewport).
- * ~1.05M columns is effectively "infinite" for an order-flow chart (days-to-
- * months of history in one view depending on the epoch cadence) while staying
- * well inside f32's exact-integer range (2^24), so column indices and the
- * colScale uniform never lose precision.
+ * Camera math is CPU double precision. The overview renderer normalizes its
+ * GPU coordinates, so texture precision does not impose a manual history cap.
  */
-export const MAX_COL_SPAN = 1_048_576;
-/**
- * The USER price zoom-out cap (rows across the viewport) is the GRID HEIGHT —
- * see {@link limitsFor}. There is deliberately no larger constant: zooming out
- * past the full band only produced black margins and a sub-sampled mip image
- * (dashed price rows), so the cap and the framing height coincide. Panning
- * (overscroll) still lets the user push the band off screen.
- */
+export const MAX_COL_SPAN = Number.MAX_SAFE_INTEGER;
+/** Numeric price-row ceiling; independent of texture height. */
+export const MAX_ROW_SPAN = 1_048_576;
+/** Full available history plus a small end margin at maximum manual zoom. */
+export const HISTORY_VIEW_PADDING = 0.1;
+/** Normal positive float32 prices accepted by the price-projection uniforms.
+ * Leave headroom for shader additions/subtractions at the upper boundary. */
+const PRICE_DOMAIN_MIN = 2 ** -126;
+const PRICE_DOMAIN_MAX = 3.4028234663852886e38 / 4;
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/** Positive physical prices beyond the stored band remain navigable. Avoid
+ * zero/log(0) and floating-point overflow rather than capping at book extent. */
+function hybridNavigationBounds(scale: HybridScale): { low: number; high: number } {
+  return {
+    low: Math.min(scale.loPrice, PRICE_DOMAIN_MIN),
+    high: Math.max(scale.hiPrice, PRICE_DOMAIN_MAX),
+  };
 }
 
 /** Build limits from the ring geometry: rows tall, up to `capacityCols` wide. */
@@ -235,9 +231,7 @@ export function limitsFor(rows: number, capacityCols: number): CameraLimits {
     maxColSpan: framing,
     // Manual zoom-out may go far past the ring — no wall.
     maxColSpanZoom: Math.max(framing, MAX_COL_SPAN),
-    // Manual price zoom-out stops at the full band: past it the view is black
-    // margins + a sub-sampled mip (the owner-reported dashed-rows artifact).
-    maxRowSpanZoom: rows,
+    maxRowSpanZoom: Math.max(rows, MAX_ROW_SPAN),
   };
 }
 
@@ -251,27 +245,24 @@ export function limitsFor(rows: number, capacityCols: number): CameraLimits {
  * than a fixed row count so the gesture feels the same at every price zoom.
  */
 export function rowCenterBounds(rowSpan: number, limits: CameraLimits): { lo: number; hi: number } {
-  return { lo: -rowSpan, hi: limits.rows + rowSpan };
+  return {
+    lo: (limits.rowDomain?.lo ?? 0) - rowSpan,
+    hi: (limits.rowDomain?.hi ?? limits.rows) + rowSpan,
+  };
 }
 
 /**
  * The EFFECTIVE user time zoom-out cap for these limits. Without a known
- * {@link TimeWindow} this is {@link CameraLimits.maxColSpanZoom} (the legacy
- * "no wall" behavior pinned by the pre-resident unit tests). With one, it is
- * the full-res resident window divided by {@link MIN_RESIDENT_COVERAGE}: at the
- * widest allowed zoom the resident columns still cover at least half the
- * viewport, so they can never be squeezed into the sub-pixel blank the M3
- * repro captured (2 717 resident columns under a 1 048 576-column span).
- *
- * The span cap is `count / coverage` — e.g. 2× the resident count at 0.5 — so
- * it grows with residency: deep scroll-back that loads more history widens
- * what you may zoom out to, automatically.
+ * {@link TimeWindow} this is {@link CameraLimits.maxColSpanZoom}. Once the
+ * complete logical history bounds are known, the maximum shows all available
+ * history with 10% context. Cache eviction/backfill cannot alter the bound.
  */
 export function maxColSpanFor(limits: CameraLimits): number {
-  const resident = limits.timeWindow?.resident ?? null;
-  if (resident === null) return limits.maxColSpanZoom;
-  const count = Math.max(1, resident.count);
-  return clamp(count / MIN_RESIDENT_COVERAGE, limits.minColSpan, limits.maxColSpanZoom);
+  const window = limits.timeWindow;
+  if (window === null || window === undefined) return limits.maxColSpanZoom;
+  const count = window.newest - (window.floor ?? COL_SEQ_FLOOR) + 1;
+  if (!(count > 0) || !Number.isFinite(count)) return limits.maxColSpanZoom;
+  return clamp(count * (1 + HISTORY_VIEW_PADDING), limits.minColSpan, limits.maxColSpanZoom);
 }
 
 /**
@@ -284,7 +275,7 @@ export function maxColSpanFor(limits: CameraLimits): number {
  * {@link TimeWindow} (unbounded, the legacy behavior) or before the first
  * column (`newest < floor`).
  *
- * When the view is wider than the whole extent plus both overscroll bands the
+ * When the view is at least as wide as the whole logical history extent the
  * band collapses; the centre is then returned as a single point — the extent
  * centred in the viewport — the continuous limit of the shrinking band.
  */
@@ -296,6 +287,10 @@ export function colCenterBounds(
   if (tw === null || tw === undefined) return null;
   const floor = tw.floor ?? COL_SEQ_FLOOR;
   if (!(tw.newest >= floor) || !Number.isFinite(colSpan)) return null;
+  if (colSpan >= tw.newest + 1 - floor) {
+    const centered = (floor + tw.newest + 1) / 2;
+    return { lo: centered, hi: centered };
+  }
   const slack = Math.min(colSpan, COL_OVERSCROLL);
   const loLeft = floor - slack;
   const hiLeft = tw.newest + 1 + slack - colSpan;
@@ -323,7 +318,7 @@ export function clampCamera(s: CameraState, limits: CameraLimits): CameraState {
   // USER zoom-out bound, not the framing bound: a state produced by fit/reset/
   // setPriceFrame is already ≤ rows ≤ maxRowSpanZoom, so this never shrinks a
   // framed span. (The colSpan branch below is the same decoupling for time.)
-  const rowSpan = clamp(s.rowSpan, MIN_ROW_SPAN, limits.maxRowSpanZoom);
+  const rowSpan = clamp(s.rowSpan, limits.minRowSpan ?? MIN_ROW_SPAN, limits.maxRowSpanZoom);
   const bounds = rowCenterBounds(rowSpan, limits);
   // Zoom-out bound, not the framing bound: a state produced by fit/reset is
   // already ≤ maxColSpan ≤ maxColSpanFor, so this never shrinks a framed span.
@@ -405,7 +400,7 @@ export function pan(
  * post-clamp span ratio `eff = newSpan/oldSpan`, the new center is
  * `anchorCol + eff·(oldCenter − anchorCol)` — so the anchor is exact even when
  * the span clamps. The span clamps against {@link maxColSpanFor} (the
- * resident-aware cap) BEFORE the anchor math so the zoom-out floor does not
+ * numeric cap) BEFORE the anchor math so the zoom-out ceiling does not
  * re-shrink the span afterwards and break the anchoring; the remaining
  * colCenter bound from {@link colCenterBounds} is inherent, exactly like the
  * price overscroll bounds.
@@ -432,8 +427,7 @@ export function zoomTime(
  * overscroll bounds where rowCenter clamps). Does NOT touch time follow, and
  * does not switch price follow off — it promotes `'fit'` to `'track'` so the
  * span the user just chose is kept and only the centre keeps tracking.
- * Zoom-out runs to `maxRowSpanZoom`, which equals the grid height — the full
- * band is the widest meaningful view (see {@link limitsFor}).
+ * Zoom-out runs to the numeric `maxRowSpanZoom`, independently of grid height.
  */
 export function zoomPrice(
   s: CameraState,
@@ -443,7 +437,7 @@ export function zoomPrice(
 ): CameraState {
   // Same NaN/0/negative guard as zoomTime — poison-proof by construction.
   if (!Number.isFinite(factor) || factor <= 0 || !Number.isFinite(anchorRow)) return s;
-  const newSpan = clamp(s.rowSpan * factor, MIN_ROW_SPAN, limits.maxRowSpanZoom);
+  const newSpan = clamp(s.rowSpan * factor, limits.minRowSpan ?? MIN_ROW_SPAN, limits.maxRowSpanZoom);
   const eff = newSpan / s.rowSpan;
   const rowCenter = anchorRow + eff * (s.rowCenter - anchorRow);
   return clampCamera(adoptPriceSpan({ ...s, rowSpan: newSpan, rowCenter }), limits);
@@ -461,7 +455,18 @@ export function priceFrame(
   rows: number,
   padFraction: number,
   minPad: number,
+  scale?: PriceScale,
 ): { rowBottom: number; rowSpan: number } {
+  if (scale?.kind === 'hybrid') {
+    // A few rows in a log wing can mean thousands of dollars. Pad the
+    // actual price interval, then map those boundaries back to grid rows.
+    const low = rowToPrice(scale, lo);
+    const high = rowToPrice(scale, hi + 1);
+    const pad = Math.max(minPad * scale.coreStep, (high - low) * padFraction);
+    const bottom = Math.max(0, priceToRow(scale, Math.max(rowToPrice(scale, 0), low - pad)));
+    const top = Math.min(rows, priceToRow(scale, Math.min(rowToPrice(scale, rows), high + pad)));
+    return { rowBottom: bottom, rowSpan: Math.max(1e-8, top - bottom) };
+  }
   const pad = Math.max(minPad, Math.round((hi - lo) * padFraction));
   const bottom = Math.max(0, lo - pad);
   const top = Math.min(rows, hi + pad + 1);
@@ -551,10 +556,10 @@ export interface GridPoint {
  * exact algebraic inverse of {@link toView}, so mapping a cursor back through it
  * lands on the same cell the fragment shader filled at that pixel.
  */
-export function viewToGrid(view: HeatmapView, uvX: number, uvY: number): GridPoint {
+export function viewToGrid(view: HeatmapView, uvX: number, uvY: number, scale: PriceScale | null = null): GridPoint {
   return {
     colf: view.colOffset + view.colScale * uvX,
-    rowf: view.rowOffset + view.rowScale * uvY,
+    rowf: fractionRow(view, scale, uvY),
   };
 }
 
@@ -570,10 +575,11 @@ export function screenToGrid(
   cssY: number,
   cssW: number,
   cssH: number,
+  scale: PriceScale | null = null,
 ): GridPoint {
   const w = cssW > 0 ? cssW : 1;
   const h = cssH > 0 ? cssH : 1;
-  return viewToGrid(view, cssX / w, 1 - cssY / h);
+  return viewToGrid(view, cssX / w, 1 - cssY / h, scale);
 }
 
 /**
@@ -584,6 +590,21 @@ export function screenToGrid(
 export class Camera {
   state: CameraState;
   limits: CameraLimits;
+  private priceScaleValue: PriceScale | null = null;
+  get priceScale(): PriceScale | null { return this.priceScaleValue; }
+  set priceScale(scale: PriceScale | null) {
+    this.priceScaleValue = scale;
+    const domain = scale?.kind === 'hybrid' ? hybridNavigationBounds(scale) : null;
+    this.limits = {
+      ...this.limits,
+      minRowSpan: domain === null ? MIN_ROW_SPAN : 1e-8,
+      rowDomain: domain !== null && scale !== null
+        ? { lo: priceToRow(scale, domain.low), hi: priceToRow(scale, domain.high) }
+        : undefined,
+    };
+  }
+  /** Suggested explicit overview frame; manual gestures do not use it. */
+  priceZoomBounds: { low: number; high: number } | null = null;
 
   constructor(limits: CameraLimits, state?: CameraState) {
     this.limits = limits;
@@ -602,8 +623,9 @@ export class Camera {
 
   setLimits(limits: CameraLimits): void {
     this.limits = limits;
+    this.priceScale = this.priceScaleValue;
     // Re-clamp so a shrunk grid can't leave the view out of bounds.
-    this.state = clampCamera(this.state, limits);
+    this.state = clampCamera(this.state, this.limits);
   }
 
   /**
@@ -622,6 +644,22 @@ export class Camera {
   }
 
   pan(dCols: number, dRows: number, kill: FollowKill = KILL_BOTH): void {
+    if (!Number.isFinite(dCols) || !Number.isFinite(dRows)) return;
+    if (this.priceScale?.kind === 'hybrid' && dRows !== 0) {
+      const scale = this.priceScale;
+      const view = this.toView();
+      const low = rowToPrice(scale, view.rowOffset);
+      const high = rowToPrice(scale, view.rowOffset + view.rowScale);
+      const span = high - low;
+      if (!(span > 0) || !Number.isFinite(span)) return;
+      const delta = span * (dRows / view.rowScale);
+      const domain = hybridNavigationBounds(scale);
+      const bottomPrice = clamp(low + delta, domain.low, domain.high - span);
+      const bottom = priceToRow(scale, bottomPrice);
+      const top = priceToRow(scale, bottomPrice + span);
+      this.state = pan({ ...this.state, rowCenter: (bottom + top) / 2, rowSpan: top - bottom }, this.limits, dCols, 0, kill);
+      return;
+    }
     this.state = pan(this.state, this.limits, dCols, dRows, kill);
   }
 
@@ -630,6 +668,26 @@ export class Camera {
   }
 
   zoomPrice(factor: number, anchorRow: number): void {
+    if (this.priceScale?.kind === 'hybrid') {
+      if (!Number.isFinite(factor) || factor <= 0 || !Number.isFinite(anchorRow)) return;
+      const scale = this.priceScale;
+      const view = this.toView();
+      const low = rowToPrice(scale, view.rowOffset);
+      const high = rowToPrice(scale, view.rowOffset + view.rowScale);
+      const anchor = rowToPrice(scale, anchorRow);
+      const currentSpan = high - low;
+      if (!(currentSpan > 0) || !Number.isFinite(currentSpan) || !Number.isFinite(anchor)) return;
+      const domain = hybridNavigationBounds(scale);
+      const span = clamp(currentSpan * factor, scale.coreStep, domain.high - domain.low);
+      // Overview bounds belong to explicit Fit, never manual scale gestures.
+      // Preserve the cursor's physical-price fraction before domain clipping.
+      let bottomPrice = anchor + (low - anchor) * (span / currentSpan);
+      bottomPrice = clamp(bottomPrice, domain.low, domain.high - span);
+      const bottom = priceToRow(scale, bottomPrice);
+      const top = priceToRow(scale, bottomPrice + span);
+      this.state = clampCamera(adoptPriceSpan({ ...this.state, rowCenter: (bottom + top) / 2, rowSpan: top - bottom }), this.limits);
+      return;
+    }
     this.state = zoomPrice(this.state, this.limits, factor, anchorRow);
   }
 
@@ -659,7 +717,7 @@ export class Camera {
    *  maxRowSpanZoom is a user-gesture cap only, so it is not applied here
    *  (fit/reset share the same rows lock). */
   setPriceFrame(rowBottom: number, rowSpan: number): void {
-    const span = clamp(rowSpan, MIN_ROW_SPAN, this.limits.rows);
+    const span = clamp(rowSpan, this.limits.minRowSpan ?? MIN_ROW_SPAN, this.limits.rows);
     this.state = clampCamera(
       { ...this.state, rowCenter: rowBottom + span / 2, rowSpan: span },
       this.limits,

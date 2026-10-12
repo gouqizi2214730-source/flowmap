@@ -363,8 +363,8 @@ wheels = [
 
 [[package]]
 name = "crocodile"
-version = "0.3.0"
-source = { git = "https://github.com/nazmiefearmutcu/Crocodile.git?rev=2e22c901dff7f0b4ec98ef7e66b8a10de4464d9c#2e22c901dff7f0b4ec98ef7e66b8a10de4464d9c" }
+version = "0.3.1"
+source = { path = "vendor/crocodile-0.3.1-py3-none-any.whl" }
 dependencies = [
     { name = "aiohttp" },
     { name = "beautifulsoup4" },
@@ -382,11 +382,51 @@ dependencies = [
     { name = "websockets" },
     { name = "yfinance" },
 ]
+wheels = [
+    { filename = "crocodile-0.3.1-py3-none-any.whl", hash = "sha256:e1beefc4c176e54c2a5148880a307141ff8b676c3e183f6ea2a3cae363006aca" },
+]
 
 [package.optional-dependencies]
 market = [
     { name = "ccxt" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp", specifier = ">=3.9" },
+    { name = "beautifulsoup4", specifier = ">=4.12" },
+    { name = "ccxt", marker = "extra == 'full'", specifier = ">=4.5" },
+    { name = "ccxt", marker = "extra == 'market'", specifier = ">=4.5" },
+    { name = "duckdb", specifier = ">=1.0" },
+    { name = "fastapi", marker = "extra == 'full'", specifier = ">=0.100.0" },
+    { name = "fastapi", marker = "extra == 'web'", specifier = ">=0.100.0" },
+    { name = "matplotlib", marker = "extra == 'full'", specifier = ">=3.7.0" },
+    { name = "matplotlib", marker = "extra == 'ml'", specifier = ">=3.7.0" },
+    { name = "mmh3", specifier = ">=5.2.1" },
+    { name = "msgspec", specifier = ">=0.18" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "pandas", specifier = ">=2.0" },
+    { name = "polars", specifier = ">=1.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0.52" },
+    { name = "pyarrow", specifier = ">=16" },
+    { name = "python-dateutil", specifier = ">=2.9" },
+    { name = "rich", specifier = ">=13" },
+    { name = "scipy", marker = "extra == 'full'", specifier = ">=1.10.0" },
+    { name = "scipy", marker = "extra == 'ml'", specifier = ">=1.10.0" },
+    { name = "streamlit", marker = "extra == 'full'", specifier = ">=1.58.0" },
+    { name = "streamlit", marker = "extra == 'web'", specifier = ">=1.58.0" },
+    { name = "typer", specifier = ">=0.12" },
+    { name = "uvicorn", marker = "extra == 'full'", specifier = ">=0.20.0" },
+    { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.20.0" },
+    { name = "web3", marker = "extra == 'full'", specifier = ">=6.0.0" },
+    { name = "web3", marker = "extra == 'onchain'", specifier = ">=6.0.0" },
+    { name = "web3", marker = "extra == 'web'", specifier = ">=6.0.0" },
+    { name = "websockets", specifier = ">=12" },
+    { name = "xgboost", marker = "extra == 'full'", specifier = ">=1.7.0" },
+    { name = "xgboost", marker = "extra == 'ml'", specifier = ">=1.7.0" },
+    { name = "yfinance", specifier = ">=1.4.1" },
+]
+provides-extras = ["evasion", "full", "market", "ml", "onchain", "web"]
 
 [[package]]
 name = "cryptography"
@@ -511,7 +551,7 @@ wheels = [
 
 [[package]]
 name = "flowmap-server"
-version = "1.4.0"
+version = "1.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -538,7 +578,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "certifi" },
-    { name = "crocodile", extras = ["market"], git = "https://github.com/nazmiefearmutcu/Crocodile.git?rev=2e22c901dff7f0b4ec98ef7e66b8a10de4464d9c" },
+    { name = "crocodile", extras = ["market"], path = "vendor/crocodile-0.3.1-py3-none-any.whl" },
     { name = "fastapi", specifier = ">=0.111" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "numpy", specifier = ">=1.26" },

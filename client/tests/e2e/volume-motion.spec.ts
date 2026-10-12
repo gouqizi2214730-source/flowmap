@@ -1,5 +1,43 @@
 import { expect, test } from '@playwright/test';
 
+test('dense volume history becomes readable averaged groups with distinct heights', async ({ page }) => {
+  await page.goto('/?test=heatmap');
+  const result = await page.evaluate(async () => {
+    const { VolBars } = await import('/src/gl/overlays/volbars.ts');
+    const { TextLayer } = await import('/src/gl/textLayer.ts');
+    const { GridMap } = await import('/src/gl/overlays/coords.ts');
+    const canvas = document.createElement('canvas');
+    const text = new TextLayer(canvas);
+    text.syncSize(96, 640, 1);
+    const bars = new VolBars();
+    for (let col = 0; col < 4096; col++) {
+      const group = Math.floor(col / 128);
+      const volume = [1, 4, 16, 64][group % 4];
+      bars.add({ col_seq: col, vol_buy: group % 2 ? 0 : volume, vol_sell: group % 2 ? volume : 0 });
+    }
+    const rects: Array<{ x: number; y: number; w: number; h: number }> = [];
+    const paint = text.rect.bind(text);
+    text.rect = (x, y, w, h, ...rest) => { rects.push({ x, y, w, h }); paint(x, y, w, h, ...rest); };
+    const gm = new GridMap({ colOffset: 0, colScale: 4096, rowOffset: 0, rowScale: 10 },
+      { cssW: 96, cssH: 640, drawW: 96, drawH: 640 }, null, null);
+    bars.draw({ gm, text, resident: { oldest: 0, newest: 4095 } });
+    const px = canvas.getContext('2d')!.getImageData(0, 594, 96, 46).data;
+    const rasterHeights: number[] = [];
+    for (const rect of rects) {
+      const x = Math.floor(rect.x + rect.w / 2);
+      let first = 46;
+      for (let y = 0; y < 46; y++) if (px[(y * 96 + x) * 4 + 3] > 127) { first = y; break; }
+      rasterHeights.push(45 - first);
+    }
+    return { groups: rects.length, distinctHeights: new Set(rasterHeights).size,
+      smallest: Math.min(...rasterHeights), largest: Math.max(...rasterHeights) };
+  });
+  expect(result.groups).toBe(32); // 128 real source intervals averaged per bar
+  expect(result.distinctHeights).toBe(4);
+  expect(result.smallest).toBeGreaterThan(0);
+  expect(result.largest - result.smallest).toBeGreaterThan(20);
+});
+
 test('the full live app gives volume its own opaque area below the price chart', async ({ page }) => {
   await page.goto('/?spy=1');
   await page.waitForFunction(() => (window as any).__flowmapLive?.renderer?.newestColSeq > 8);
@@ -116,7 +154,7 @@ test('completed volume bars keep their pixel height while the time viewport move
   expect(result.spread, JSON.stringify(result)).toBeLessThanOrEqual(1);
 });
 
-test('a thin volume bar moves at fractional pixel positions without hairline snapping', async ({ page }) => {
+test('an aggregated volume group moves at fractional pixel positions without snapping', async ({ page }) => {
   await page.goto('/?test=heatmap');
   const result = await page.evaluate(async () => {
     const { VolBars } = await import('/src/gl/overlays/volbars.ts');
@@ -139,7 +177,8 @@ test('a thin volume bar moves at fractional pixel positions without hairline sna
       const px = canvas.getContext('2d')!.getImageData(0, 95, 30, 1).data;
       let mass = 0; let moment = 0;
       for (let x = 0; x < 30; x++) { mass += px[x * 4 + 3]; moment += (x + 0.5) * px[x * 4 + 3]; }
-      errors.push(Math.abs(moment / mass - gm.cssX(15.5)));
+      // At this zoom four source intervals form the group [12..15].
+      errors.push(Math.abs(moment / mass - gm.cssX(14)));
     }
     return Math.max(...errors);
   });

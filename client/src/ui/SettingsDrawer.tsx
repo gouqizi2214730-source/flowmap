@@ -14,6 +14,7 @@ import { useEffect, useRef } from 'react';
 import type { OverlayVisibility } from '../gl/overlays/frame';
 import { LOCALES, getLocale, localeLabel, setLocale } from '../i18n';
 import { useT } from '../i18n/useT';
+import { useFlowMapStore } from '../state/store';
 import { THEME_IDS, THEMES, useTheme } from '../theme';
 import { toggleDrawToolbar, useDrawingsStore } from '../drawings/store';
 import { useIndicatorStore } from '../indicators/store';
@@ -110,6 +111,9 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
   const { theme, setTheme } = useTheme();
   const toolbarVisible = useDrawingsStore((s) => s.toolbarVisible);
   const pickerOpen = useIndicatorStore((s) => s.pickerOpen);
+  const depthTier = useFlowMapStore((s) => s.capability?.depth);
+  const synthetic = typeof depthTier === 'string' && depthTier.startsWith('SYNTH');
+  const densityControlsDisabled = settings.depthChannel === 'imbalance' && !synthetic;
   const asideRef = useRef<HTMLElement | null>(null);
   const closeRef = useRef<HTMLButtonElement | null>(null);
 
@@ -185,7 +189,7 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
   const rowsPerCell =
     settings.tickGrouping === 1
       ? t('settings.rowsPerCellOne')
-      : t('settings.rowsPerCell', { n: settings.tickGrouping });
+      : t('settings.rowsPerCell', { n: 4 ** Math.ceil(Math.log2(settings.tickGrouping) / 2) });
 
   return (
     <>
@@ -309,6 +313,11 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
           <span className="drawer__section" data-testid="section-display">
             {t('drawer.sectionDisplay')}
           </span>
+          {densityControlsDisabled && (
+            <span className="setting__hint" data-testid="setting-imbalance-hint">
+              {t('settings.imbalanceDisplayHint')}
+            </span>
+          )}
 
           {/* heatmap contrast (drives the perceptual display gamma; live) */}
           <div className="setting">
@@ -326,6 +335,7 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
               aria-label={t('settings.contrast')}
               aria-valuetext={`${settings.contrast}`}
               data-testid="setting-contrast"
+              disabled={densityControlsDisabled}
               onChange={(e) => onChange({ contrast: Number(e.target.value) })}
             />
             <span className="setting__hint">{t('settings.contrastHint')}</span>
@@ -342,6 +352,7 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
                   className={`segrow__btn${settings.colormap === c ? ' is-on' : ''}`}
                   aria-pressed={settings.colormap === c}
                   data-testid={`colormap-${c}`}
+                  disabled={densityControlsDisabled}
                   onClick={() => onChange({ colormap: c })}
                 >
                   {COLORMAP_LABELS[c]}
@@ -362,13 +373,14 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
                   className={`segrow__btn${settings.depthChannel === c ? ' is-on' : ''}`}
                   aria-pressed={settings.depthChannel === c}
                   data-testid={`depthChannel-${c}`}
+                  disabled={synthetic && c !== 'sum'}
                   onClick={() => onChange({ depthChannel: c })}
                 >
                   {t(CHANNEL_LABEL_KEY[c])}
                 </button>
               ))}
             </div>
-            <span className="setting__hint">{t(CHANNEL_HINT_KEY[settings.depthChannel])}</span>
+            <span className="setting__hint">{t(synthetic ? 'settings.channelSyntheticHint' : CHANNEL_HINT_KEY[settings.depthChannel])}</span>
           </div>
 
           {/* normalization percentile */}
@@ -382,17 +394,18 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
               className="range"
               min={80}
               max={100}
-              step={0.5}
+              step={0.1}
               value={settings.normPercentile}
               aria-label={t('settings.normalization')}
               aria-valuetext={`p${settings.normPercentile}`}
               data-testid="setting-normPercentile"
+              disabled={densityControlsDisabled}
               onChange={(e) => onChange({ normPercentile: Number(e.target.value) })}
             />
             <span className="setting__hint">{t('settings.normalizationHint')}</span>
           </div>
 
-          {/* heatmap tolerance — the black point on normalized density (live) */}
+          {/* Raw slider position; the visible depth CDF calibrates its cut. */}
           <div className="setting">
             <span className="setting__label">
               {t('settings.tolerance')}
@@ -410,6 +423,7 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
               aria-label={t('settings.tolerance')}
               aria-valuetext={settings.tolerance > 0 ? `${settings.tolerance}` : t('settings.off')}
               data-testid="setting-tolerance"
+              disabled={densityControlsDisabled}
               onChange={(e) => onChange({ tolerance: Number(e.target.value) })}
             />
             <span className="setting__hint">{t('settings.toleranceHint')}</span>
@@ -437,6 +451,7 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
               data-testid="setting-tickGrouping"
               onChange={(e) => onChange({ tickGrouping: Number(e.target.value) })}
             />
+            <span className="setting__hint">{t('settings.tickGroupingHint')}</span>
           </div>
 
           {/* bubble threshold */}
@@ -448,20 +463,24 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
               </span>
             </span>
             <input
-              type="range"
-              className="range"
+              type="number"
+              className="setting__num"
               min={0}
-              max={100}
-              step={1}
+              max={1e9}
+              step="any"
               value={settings.bubbleMinSize}
               aria-label={t('settings.bubbleThreshold')}
               aria-valuetext={settings.bubbleMinSize > 0 ? `≥ ${settings.bubbleMinSize}` : t('settings.allTrades')}
               data-testid="setting-bubble"
-              onChange={(e) => onChange({ bubbleMinSize: Number(e.target.value) })}
+              onChange={(e) => {
+                const value = Number(e.target.value);
+                onChange({ bubbleMinSize: Number.isFinite(value) ? Math.min(1e9, Math.max(0, value)) : 0 });
+              }}
             />
+            <span className="setting__hint">{t('settings.bubbleHint')}</span>
           </div>
 
-          {/* big-trade tape highlight — absolute USD notional, 0 = off */}
+          {/* Price × native quantity threshold; the stored key is historical. */}
           <div className="setting">
             <span className="setting__label">
               {t('settings.bigTradeLabel')}

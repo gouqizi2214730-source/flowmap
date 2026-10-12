@@ -51,6 +51,12 @@ class BookState(msgspec.Struct):
     bid_sz: np.ndarray
     ask_px: np.ndarray
     ask_sz: np.ndarray
+    sequence_id: int | None = None
+    prev_sequence_id: int | None = None
+    source: str | None = None
+    provenance: str | None = None
+    observed_ns: int | None = None
+    revision: int = 0
 
 
 FeedEvent = BookState | Trade | Marker | BBO

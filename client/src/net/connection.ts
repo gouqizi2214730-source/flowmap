@@ -45,6 +45,7 @@ import {
   type BarColumn,
   type BBO,
   type DepthColumn,
+  type BookUpdate,
   type EpochParams,
   type EpochStart,
   type Hello,
@@ -72,6 +73,7 @@ export interface CloseInfo {
 /** The high-frequency messages forwarded to the renderer (never React state). */
 export type StreamMsg =
   | DepthColumn
+  | BookUpdate
   | BarColumn
   | Trade
   | BBO
@@ -395,7 +397,7 @@ export class Connection {
    * Request a page of history. Resolves when the HistoryResponse with the
    * assigned req_id arrives, rejects on timeout (or if not connected).
    */
-  requestHistory(before_t: bigint, n: number): Promise<HistoryResponse> {
+  requestHistory(before_t: bigint, n: number, overview?: import('../proto/types').HistoryOverviewRequest): Promise<HistoryResponse> {
     return new Promise<HistoryResponse>((resolve, reject) => {
       if (this.socket === null || !this.socketOpen) {
         reject(new Error('flowmap: cannot request history — not connected'));
@@ -407,11 +409,11 @@ export class Connection {
       const timer = this.setTimeoutFn(() => {
         this.historyWaiters.delete(reqId);
         reject(new Error(`flowmap: history request ${reqId} timed out`));
-      }, this.historyTimeoutMs);
+      }, overview ? Math.max(this.historyTimeoutMs, 60_000) : this.historyTimeoutMs);
       this.historyWaiters.set(reqId, { resolve, reject, timer });
 
       try {
-        this.rawSend(encodeHistoryRequest({ req_id: reqId, before_t, n_cols: n }));
+        this.rawSend(encodeHistoryRequest({ req_id: reqId, before_t, n_cols: n, ...overview }));
       } catch (err) {
         this.clearTimeoutFn(timer);
         this.historyWaiters.delete(reqId);
@@ -697,6 +699,7 @@ export class Connection {
         // forming bars carry the live CVD/VWAP edge — forward unconditionally.
         this.handlers.onStream?.(msg);
         return;
+      case MsgType.BOOK_UPDATE:
       case MsgType.TRADE:
       case MsgType.BBO:
       case MsgType.MARKER:

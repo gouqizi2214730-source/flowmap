@@ -12,10 +12,12 @@ connector lifecycle, end-of-stream) is exercised end to end.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 
 import numpy as np
+import pytest
 
 from crocodile.core.ingest.transport import FakeTransport
 from crocodile.core.schema.enums import AssetClass, Side
@@ -129,6 +131,10 @@ def test_capability_shape() -> None:
         "trade_side": "exchange",
         "cvd": "exchange",  # GOAL 3: exchange-true aggressor -> honest CVD
         "markers": ["liquidation", "gap"],
+        "book_top_n": feed._cfg.book_top_n,
+        "raw_capture": False,
+        "source_book_events": 0,
+        "unique_book_changes": 0,
     }
     assert feed.market == "binance-usdm"
     assert feed.symbol == "BTCUSDT"
@@ -302,6 +308,53 @@ async def test_events_recall_builds_fresh_connector() -> None:
     assert isinstance(first[0], Trade) and isinstance(second[0], Trade)
 
 
+async def test_event_timeout_cancels_connector_and_allows_fresh_restart() -> None:
+    calls = []
+
+    class StalledConnector:
+        ws_url = "wss://fake.invalid/stream"
+
+        def __init__(self, sink):
+            self.sink = sink
+            self.transport = FakeTransport([])
+            self.closed = asyncio.Event()
+
+        async def run(self):
+            try:
+                if len(calls) > 1:
+                    await self.sink.put(CTrade(
+                        source="binance-spot", symbol="binance-spot:BTCUSDT",
+                        symbol_raw="BTCUSDT", asset_class=AssetClass.CRYPTO,
+                        source_ts=1_700_000_000_000_000_000,
+                        local_ts=1_700_000_000_000_000_001,
+                        id="fresh", price=50001.0, amount=0.5, side=Side.BUY))
+                await asyncio.Event().wait()
+            finally:
+                self.closed.set()
+
+    def factory(sink):
+        conn = StalledConnector(sink)
+        calls.append(conn)
+        return conn
+
+    feed = CryptoFeed("binance", "BTCUSDT", "spot", Config(),
+                      connector_factory=factory, event_timeout_s=0.01)
+    first = feed.events()
+    with pytest.raises(TimeoutError, match="no crypto feed events"):
+        await anext(first)
+    assert calls[0].closed.is_set()
+    assert len(calls) == 1
+
+    second = feed.events()
+    try:
+        trade = await asyncio.wait_for(anext(second), timeout=1)
+        assert isinstance(trade, Trade) and trade.price == 50001.0
+        assert len(calls) == 2 and calls[0] is not calls[1]
+    finally:
+        await second.aclose()
+    assert calls[1].closed.is_set()
+
+
 # ---------------------------------------------------------------------------
 # translation unit edge: top-N cap and best-first ordering
 # ---------------------------------------------------------------------------
@@ -368,7 +421,7 @@ def test_session_factory_routing() -> None:
 
     # A native venue with a segment, a native venue without one, and a
     # ccxt-only venue all route to CryptoFeed and keep their market string.
-    for market in ("binance-spot", "binance-usdm", "okx", "kraken", "bybit-linear"):
+    for market in ("binance-spot", "binance-usdm", "okx", "kucoin", "bybit-linear"):
         assert is_crypto_market(market)
         feed = mgr._default_feed_factory(
             pe.Subscribe(market=market, symbol="BTCUSDT", mode="live")
@@ -383,7 +436,7 @@ def test_session_factory_routing() -> None:
         pe.Subscribe(market="binance-spot", symbol="BTCUSDT", mode="live")
     )
     ccxt_only = mgr._default_feed_factory(
-        pe.Subscribe(market="kraken", symbol="BTCUSDT", mode="live")
+        pe.Subscribe(market="kucoin", symbol="BTCUSDT", mode="live")
     )
     assert native.native and native.capability["depth"] == "L2"
     assert not ccxt_only.native and ccxt_only.capability["depth"] == "L2-snapshot"

@@ -102,7 +102,7 @@ class FakeTimer:
 # A1 --------------------------------------------------------------------------
 
 
-def test_a1_live_density_saturates_at_f16_max():
+def test_a1_live_density_preserves_large_sizes_without_infinity():
     g = Grid(_cfg())
     px = np.array([100.0])
     huge = np.array([1e9])
@@ -111,7 +111,8 @@ def test_a1_live_density_saturates_at_f16_max():
     assert cols, "interval jump must finalize at least one column"
     for c in cols:
         assert np.isfinite(c.bid).all() and np.isfinite(c.ask).all()
-        assert c.bid.max() == np.float16(65504)
+        np.testing.assert_allclose(c.bid.max(), 1e9, rtol=0.001)
+        np.testing.assert_allclose(c.ask.max(), 1e9, rtol=0.001)
 
 
 # B1a -------------------------------------------------------------------------
@@ -161,14 +162,28 @@ def test_b1b_legacy_six_column_epochs_still_load(tmp_path):
             "p0": [90.0],
             "rows": [2048],
         },
-        schema={k: _EPOCHS_SCHEMA[k] for k in (
-            "epoch", "tick", "tick_multiple", "dt_ns", "p0", "rows",
-        )},
+        schema={
+            k: _EPOCHS_SCHEMA[k]
+            for k in (
+                "epoch",
+                "tick",
+                "tick_multiple",
+                "dt_ns",
+                "p0",
+                "rows",
+            )
+        },
     )
     sym_dir = tmp_path / "rec" / MARKET / SYMBOL
+    legacy_part = next(sym_dir.glob("*-epochs-*.parquet"))
     for f in sym_dir.glob("*-epochs-*.parquet"):
         f.unlink()
-    legacy.write_parquet(sym_dir / "0001-epochs-legacy.parquet")
+    # A pre-identity archive had neither scoped epochs nor scoped columns.
+    # Keeping modern UUID columns with unscoped epochs would be an ambiguous
+    # mixed-generation archive, which production correctly rejects.
+    for f in sym_dir.glob("*-columns-*.parquet"):
+        pl.read_parquet(f).drop("recording_id").write_parquet(f)
+    legacy.write_parquet(legacy_part)
 
     rec = Recorder(tmp_path / "rec", 20.0)
     tail = rec.load_tail(MARKET, SYMBOL, max_age_ns=10**15, now_ns=10 * DT_NS, limit_cols=10)
@@ -227,9 +242,11 @@ async def test_b2_manager_resubscribes_after_midboot_teardown(monkeypatch):
 
 def test_b3_ragged_bid_block_degrades_to_none(tmp_path):
     cols = SimFeed.generate_history(seed=3, n_cols=8)
-    _record_all(tmp_path / "rec", cols, [
-        EpochParams(epoch=0, tick=0.5, tick_multiple=1, dt_ns=DT_NS, p0=90.0, rows=2048)
-    ])
+    _record_all(
+        tmp_path / "rec",
+        cols,
+        [EpochParams(epoch=0, tick=0.5, tick_multiple=1, dt_ns=DT_NS, p0=90.0, rows=2048)],
+    )
     f = next((tmp_path / "rec" / MARKET / SYMBOL).glob("*-columns-*.parquet"))
     df = pl.read_parquet(f)
     bids = df["bid"].to_list()

@@ -1,6 +1,6 @@
 [package]
 name = "flowmap"
-version = "1.4.0"
+version = "1.5.0"
 description = "FlowMap — dual-market order-flow terminal"
 authors = ["nazmiefearmutcu"]
 edition = "2021"
@@ -22,6 +22,8 @@ libc = "0.2"
 # spawn-failure MessageBox and the single-instance PID liveness probe.
 windows = { version = "0.61", features = [
   "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
   "Win32_System_Threading",
   "Win32_UI_WindowsAndMessaging",
 ] }

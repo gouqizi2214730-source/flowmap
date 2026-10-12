@@ -52,55 +52,36 @@ function remap(t: number, floor: number): number {
   return out < 0 ? 0 : out > 1 ? 1 : out;
 }
 
-describe('floorForTolerance — the Tolerance slider → shader black point', () => {
-  it('defaults to slider 0 (exact no-op) — the F2-measured continuity endpoint', () => {
-    // Wave 3 / F10: the default moved 5 → 0. F2's frozen-BTC A/B measured the
-    // floor policy as the only candidate reaching the Bookmap continuity target
-    // (rows carrying ink 59.2% → 98.6%, non-bg 45.2% → 95.6%, specks 5 → 1);
-    // the low-end brightening that makes the added fill legible is the
-    // below-knee gamma (see the gammaForContrast pins), NOT this slider.
-    expect(floorForTolerance(0)).toBe(0);
+describe('floorForTolerance — calibrated visible-density cut', () => {
+  function fixture(): ViewportNormalizer {
+    const n = new ViewportNormalizer({ floor: 0, emaAlpha: 1 });
+    n.addColumn(0, Float32Array.from({ length: 2048 }, (_, i) => 10 ** (-5 + i / 256)), null);
+    n.updateNorm({ oldest: 0, newest: 0 }, { lo: 0, hi: 2047 }, 0);
+    return n;
+  }
+
+  it('keeps zero exact and waits for a real distribution instead of a white-point guess', () => {
     expect(DEFAULT_TOLERANCE).toBe(0);
-    // The default floor is the identity: nothing is hidden out of the box.
-    expect(floorForTolerance(DEFAULT_TOLERANCE)).toBe(0);
-    // The old gentler defaults stay reachable and still separate the specks —
-    // the eased curve keeps fine low-end control for anyone who wants a cut.
-    expect(floorForTolerance(2)).toBeGreaterThan(0.003);
-    expect(floorForTolerance(2)).toBeLessThan(0.005);
-    expect(floorForTolerance(5)).toBeGreaterThan(0.005);
-    expect(floorForTolerance(5)).toBeLessThan(0.02);
+    const n = fixture();
+    expect(floorForTolerance(0, n)).toBe(0);
+    expect(floorForTolerance(100)).toBe(0);
+    expect(floorForTolerance(100, new ViewportNormalizer())).toBe(0);
   });
 
-  it('is monotonically increasing across the slider', () => {
-    let prev = -1;
-    for (let v = 0; v <= 100; v += 5) {
-      const f = floorForTolerance(v);
-      expect(f).toBeGreaterThan(prev);
-      prev = f;
-    }
+  it('increases gradually against one distribution and keeps the wall ceiling safe', () => {
+    const n = fixture();
+    const cuts = [0, 1, 25, 50, 75, 100].map((value) => floorForTolerance(value, n));
+    expect(cuts[1]).toBeGreaterThan(0);
+    for (let i = 1; i < cuts.length; i++) expect(cuts[i]).toBeGreaterThan(cuts[i - 1]);
+    expect(cuts[5]).toBeLessThan(TOLERANCE_MAX_FLOOR);
+    expect(floorForTolerance(1e9, n)).toBe(cuts[5]);
   });
 
-  it('reaches exactly the (raised) cap at 100 and never exceeds it', () => {
-    expect(TOLERANCE_MAX_FLOOR).toBeGreaterThan(0.5); // stronger reach than before
-    expect(TOLERANCE_MAX_FLOOR).toBeLessThan(1); // but never degenerate
-    expect(floorForTolerance(100)).toBeCloseTo(TOLERANCE_MAX_FLOOR, 12);
-    expect(floorForTolerance(1e9)).toBeCloseTo(TOLERANCE_MAX_FLOOR, 12);
-  });
-
-  it('is eased (between linear and square) for mid-slider bite + low-end control', () => {
-    // Mid-slider sits between pure-quadratic (0.25 of the cap) and linear (0.5),
-    // so the middle of the travel actually cleans the field up â€” the old square
-    // wasted it. The low end still stays fine-grained.
-    const midFrac = floorForTolerance(50) / TOLERANCE_MAX_FLOOR;
-    expect(midFrac).toBeGreaterThan(0.25);
-    expect(midFrac).toBeLessThan(0.5);
-    expect(floorForTolerance(10)).toBeLessThan(floorForTolerance(50) / 3);
-  });
-
-  it('clamps negatives and refuses NaN (a NaN floor blanks the heatmap)', () => {
-    expect(floorForTolerance(-40)).toBe(0);
-    expect(floorForTolerance(Number.NaN)).toBe(0);
-    expect(floorForTolerance(Number.POSITIVE_INFINITY)).toBe(0);
+  it('clamps negatives and refuses nonfinite slider input', () => {
+    const n = fixture();
+    expect(floorForTolerance(-40, n)).toBe(0);
+    expect(floorForTolerance(Number.NaN, n)).toBe(0);
+    expect(floorForTolerance(Number.POSITIVE_INFINITY, n)).toBe(0);
   });
 });
 
@@ -112,7 +93,7 @@ describe('the black-point remap the fragment shader applies', () => {
   });
 
   it('collapses everything at or below the floor to LUT entry 0 (= background)', () => {
-    const f = floorForTolerance(60);
+    const f = 0.35;
     expect(remap(0, f)).toBe(0);
     expect(remap(f, f)).toBe(0);
     expect(remap(f * 0.5, f)).toBe(0);
@@ -122,12 +103,12 @@ describe('the black-point remap the fragment shader applies', () => {
     // Without the re-expansion, the survivors would land on [f,1] of the LUT and
     // the whole field would darken as the slider rises.
     for (const v of [0, 25, 50, 75, 100]) {
-      expect(remap(1, floorForTolerance(v))).toBeCloseTo(1, 12);
+      expect(remap(1, (v / 100) * TOLERANCE_MAX_FLOOR)).toBeCloseTo(1, 12);
     }
   });
 
   it('re-expands the survivors monotonically', () => {
-    const f = floorForTolerance(50);
+    const f = 0.2;
     let prev = -1;
     for (let t = f; t <= 1; t += 0.05) {
       const out = remap(t, f);
@@ -222,7 +203,7 @@ describe('default visibility â€” the boxed heatmap must show the field, not
   it('keeps the whole field visible — the tol-0 default hides no active cell', () => {
     const floor = floorForTolerance(DEFAULT_TOLERANCE);
     const after = visibleFraction(floor, P99_7); // now: tol 0 + p99.7 white
-    const before = visibleFraction(floorForTolerance(15), P99); // pre-fix: tol 15 + p99
+    const before = visibleFraction(0.85 * Math.pow(0.15, 1.4), P99); // pre-fix: tol 15 + p99
     // F2's measurement, in model terms: tol 5 still hid ≈56% of active cells;
     // tol 0 hides exactly none — every cell with data paints. The pre-fix
     // default (the "empty heatmap") hid ≈74%.
@@ -263,9 +244,9 @@ describe('default visibility â€” the boxed heatmap must show the field, not
     expect(p90Lut).toBeGreaterThanOrEqual(104);
     expect(p90Lut).toBeLessThanOrEqual(120);
     // Pre-fix regression pin: with floor ≈0.06 + p99 the median maps to LUT 0.
-    expect(lut(cell(0), P99, floorForTolerance(15), gamma)).toBe(0);
-    // The tol-5 floor (a user-chosen denoise) still hides the median exactly.
-    expect(lut(cell(0), P99_7, floorForTolerance(5), gamma)).toBe(0);
+    expect(lut(cell(0), P99, 0.85 * Math.pow(0.15, 1.4), gamma)).toBe(0);
+    // The retired white-point-share tol-5 floor hid the median exactly.
+    expect(lut(cell(0), P99_7, 0.85 * Math.pow(0.05, 1.4), gamma)).toBe(0);
   });
 });
 
@@ -1383,6 +1364,30 @@ describe('Heatmap.draw â€” SUM-path level cross-fade uniform wiring (wave P
     const knee = lastFloat(gl, 'u_knee')!;
     expect(knee).toBeGreaterThanOrEqual(0.05);
     expect(knee).toBeLessThanOrEqual(0.95);
+  });
+
+  it('calibrates raw slider values and applies the same projected row footprint', () => {
+    const { heatmap, gl } = makeMipHeatmap();
+    const n = new ViewportNormalizer({ colsPerTile: COLS_PER_TILE, emaAlpha: 1 });
+    n.addColumn(0, Float32Array.from({ length: 2048 }, (_, i) => 10 ** (-4 + i / 400)), null);
+    n.updateNorm({ oldest: 0, newest: 255 }, { lo: 0, hi: 2047 }, 0);
+    heatmap.normalizer = n;
+    heatmap.floor = 0.7;
+    for (const value of [0, 1, 50, 100]) {
+      heatmap.toleranceValue = value;
+      heatmap.draw({ colOffset: 0, colScale: 320, rowOffset: 0, rowScale: 240 });
+      expect(lastFloat(gl, 'u_floor')).toBeCloseTo(n.floorForTolerance(value), 12);
+      heatmap.draw({ colOffset: 0, colScale: 320, rowOffset: 0, rowScale: 16 * 240 });
+      expect(lastFloat(gl, 'u_floor')).toBeCloseTo(Math.min(0.85, n.floorForTolerance(value) * 16), 12);
+    }
+  });
+
+  it('does not apply a guessed filter before the visible distribution arrives', () => {
+    const { heatmap, gl } = makeMipHeatmap();
+    heatmap.floor = 0.7;
+    heatmap.toleranceValue = 100;
+    heatmap.draw({ colOffset: 0, colScale: 320, rowOffset: 0, rowScale: 240 });
+    expect(lastFloat(gl, 'u_floor')).toBe(0);
   });
 });
 

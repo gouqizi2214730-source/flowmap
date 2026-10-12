@@ -17,6 +17,7 @@ import {
   VolBars,
   barColor,
   scatterVolumes,
+  volumeHeight,
   type VolBarPoint,
 } from './volbars';
 import { OVERLAY } from './palette';
@@ -73,6 +74,30 @@ function harness(
 }
 
 describe('scatterVolumes (bucket math)', () => {
+  it('a zero correction removes old volume while still closing the preceding candle', () => {
+    const bars = new VolBars();
+    bars.add(bar(0, 20, 0));
+    bars.add(bar(5, 9, 2));
+    bars.add(bar(5, 0, 0));
+    expect(bars.valueAt(5)).toBeNull();
+    expect(bars.valueAt(0)?.span).toBe(5);
+    expect(bars.size).toBe(1);
+  });
+  it('recalibrates on a different static historical regime at the same zoom', () => {
+    const bars = new VolBars();
+    for (let i = 0; i < 40; i++) bars.add(bar(i, i < 10 ? (i + 1) * 100 : (i - 9), 0));
+    const a = harness({ colOffset: 0 }, undefined, { oldest: 0, newest: 39 });
+    bars.draw(a.frame);
+    const b = harness({ colOffset: 20 }, undefined, { oldest: 0, newest: 39 });
+    bars.draw(b.frame);
+    const lowRegimeHeight = b.calls.map(c => c.y0 - c.y1);
+    const fresh = new VolBars();
+    for (let i = 0; i < 40; i++) fresh.add(bar(i, i < 10 ? (i + 1) * 100 : (i - 9), 0));
+    const c = harness({ colOffset: 20 }, undefined, { oldest: 0, newest: 39 });
+    fresh.draw(c.frame);
+    expect(lowRegimeHeight).toEqual(c.calls.map(c => c.y0 - c.y1));
+    expect(Math.max(...lowRegimeHeight)).toBeGreaterThan(8);
+  });
   it('assigns every column to its own address without float-rounding collisions', () => {
     for (const count of [100, 300, 367, 400, 447, 448, 449, 480, 481, 482, 1118]) {
       const lo = 100_000;
@@ -192,6 +217,36 @@ describe('VolBars data store', () => {
 });
 
 describe('VolBars.draw (bottom strip pass)', () => {
+  it('recovers from a tiny first print and keeps later volume differences readable', () => {
+    const vb = new VolBars();
+    vb.add(bar(0, 0.000001, 0));
+    const initial = harness({ colScale: 40 }, { cssW: 120 }, { oldest: 0, newest: 39 });
+    vb.draw(initial.frame);
+    for (let col = 1; col < 40; col++) vb.add(bar(col, col * col, 0));
+    const grown = harness({ colScale: 40 }, { cssW: 120 }, { oldest: 0, newest: 39 });
+    vb.draw(grown.frame);
+    const heights = grown.calls.map(c => c.y0 - c.y1);
+    expect(new Set(heights.map(h => h.toFixed(3))).size).toBeGreaterThan(30);
+    expect(heights[20]).toBeGreaterThan(4);
+    expect(Math.max(...heights)).toBeLessThan(VOLBAR_MIN_STRIP_PX);
+  });
+
+  it('merges dense histories into readable, absolute groups including more than 100 intervals', () => {
+    const vb = new VolBars();
+    for (let col = 0; col < 4096; col++) vb.add(bar(col, Math.floor(col / 128) === 9 ? 10 : 1, 0));
+    const dense = harness({ colScale: 4096 }, { cssW: 96 }, { oldest: 0, newest: 4095 });
+    vb.draw(dense.frame);
+    expect(dense.calls).toHaveLength(32); // 128 original intervals per group
+    expect(dense.calls[0].x0).toBeCloseTo(1.5);
+    expect(dense.calls[9].y1).toBeLessThan(dense.calls[8].y1);
+    const glide = harness({ colOffset: 0.25, colScale: 4096 }, { cssW: 96 }, { oldest: 0, newest: 4095 });
+    vb.draw(glide.frame);
+    for (let i = 0; i < dense.calls.length; i++) {
+      expect(glide.calls[i].y1).toBe(dense.calls[i].y1);
+      expect(glide.calls[i].x0 - dense.calls[i].x0).toBeCloseTo(-0.25 * 96 / 4096);
+    }
+  });
+
   it('keeps bucket volumes and colors fixed while the time camera glides', () => {
     const vb = new VolBars();
     for (let c = 0; c < 40; c++) vb.add(bar(c, c % 4 === 0 ? 10 : 1, c % 4 === 1 ? 20 : 0));
@@ -272,7 +327,7 @@ describe('VolBars.draw (bottom strip pass)', () => {
     expect(calls).toHaveLength(0);
   });
 
-  it('draws one bottom-anchored bar per non-empty bucket, height by the visible p90 + sqrt curve', () => {
+  it('draws bottom-anchored bars with soft height scaling', () => {
     const vb = new VolBars();
     vb.add(bar(0, 10, 0)); // bucket 0, total 10 (the visible p90 cap)
     vb.add(bar(1, 0, 5)); // bucket 1, total 5 (half the cap)
@@ -285,17 +340,17 @@ describe('VolBars.draw (bottom strip pass)', () => {
     expect(a.x0).toBe(5);
     expect(a.x1).toBe(5);
     expect(a.y0).toBe(99);
-    expect(a.y1).toBe(99 - VOLBAR_MIN_STRIP_PX); // at/above the cap -> full height
+    expect(a.y1).toBeCloseTo(99 - volumeHeight(10, 10, VOLBAR_MIN_STRIP_PX));
     expect(a.color).toBe(OVERLAY.buy.css);
     expect(a.alpha).toBe(VOLBAR_ALPHA);
     expect(a.width).toBe(Math.min(VOLBAR_MAX_BAR_PX, 10 - 2)); // gap 2 when wide
     // Bucket 1: sqrt(0.5) of the strip (monotonic lift of the mids), sell color.
     expect(b.x0).toBe(15);
-    expect(b.y1).toBeCloseTo(99 - Math.sqrt(0.5) * VOLBAR_MIN_STRIP_PX, 6);
+    expect(b.y1).toBeCloseTo(99 - volumeHeight(5, 10, VOLBAR_MIN_STRIP_PX), 6);
     expect(b.color).toBe(OVERLAY.sell.css);
   });
 
-  it('clamps a whale to full height instead of crushing the other bars (auto-contrast)', () => {
+  it('keeps a whale and the ordinary bars distinguishable without a hard ceiling', () => {
     const vb = new VolBars();
     for (let c = 0; c < 9; c++) vb.add(bar(c, c + 1, 0)); // totals 1..9
     vb.add(bar(9, 100, 0)); // one whale: linear-vs-max would crush everything
@@ -303,10 +358,10 @@ describe('VolBars.draw (bottom strip pass)', () => {
     vb.draw(frame);
 
     expect(calls).toHaveLength(10);
-    expect(calls[9].y1).toBe(99 - VOLBAR_MIN_STRIP_PX); // whale -> clamped full
+    expect(calls[9].y1).toBeCloseTo(99 - volumeHeight(100, 9, VOLBAR_MIN_STRIP_PX));
     // The p90 cap (~9) keeps the mids readable: total 4 -> sqrt(4/9) of the strip.
     const mid = calls[3];
-    expect(mid.y1).toBeCloseTo(99 - Math.sqrt(4 / 9) * VOLBAR_MIN_STRIP_PX, 6);
+    expect(mid.y1).toBeCloseTo(99 - volumeHeight(4, 9, VOLBAR_MIN_STRIP_PX), 6);
   });
 
   it('spreads a reconstructed candle across its columns (no 16x spike)', () => {
@@ -321,23 +376,23 @@ describe('VolBars.draw (bottom strip pass)', () => {
     expect(calls.length).toBe(10);
     // All A buckets (0..9) have equal height; B (col 16, bucket 16) is out of
     // the resident clamp here, so every drawn bucket is an A slice of 1.
-    for (const c of calls) expect(c.y1).toBe(99 - VOLBAR_MIN_STRIP_PX);
+    for (const c of calls) expect(c.y1).toBeCloseTo(99 - volumeHeight(1, 1, VOLBAR_MIN_STRIP_PX));
   });
 
-  it('aggregates per pixel when the view is wider than the canvas; gaps stay gaps', () => {
+  it('aggregates dense groups while keeping empty time groups empty', () => {
     const vb = new VolBars();
     // 10 visible columns over a 5-px canvas -> 5 buckets of 2 columns.
     vb.add(bar(0, 1, 1));
     vb.add(bar(1, 2, 0)); // joins bucket 0 -> total 4
-    for (let c = 2; c <= 6; c++) vb.add(bar(c, 0, 0)); // no trades: span closers only
-    vb.add(bar(7, 3, 0)); // bucket 3
-    const { frame, calls } = harness(undefined, { cssW: 5 });
+    for (let c = 2; c <= 30; c++) vb.add(bar(c, 0, 0)); // no trades: span closers only
+    vb.add(bar(31, 3, 0)); // bucket 3
+    const { frame, calls } = harness({ colScale: 40 }, { cssW: 20 }, { oldest: 0, newest: 39 });
     vb.draw(frame);
     expect(calls).toHaveLength(2); // buckets 1,2,4 stay empty: no ink
     // Bucket width 1 px: centre = xLo + (b + 0.5) * bw.
-    expect(calls[0].x0).toBe(0.5);
-    expect(calls[1].x0).toBe(3.5);
-    expect(calls[0].width).toBe(1);
+    expect(calls[0].x0).toBe(2);
+    expect(calls[1].x0).toBe(14);
+    expect(calls[0].width).toBe(3);
     expect(calls[0].color).toBe(OVERLAY.buy.css); // 3 buy vs 1 sell
   });
 

@@ -46,11 +46,11 @@ describe('Residency window (T8 LRU)', () => {
     r.note(11);
     r.note(12);
     expect(r.range()).toEqual({ oldest: 10, newest: 12, count: 3 });
-    // Backfill [7, 8, 9] ascending: with room in the budget, BOTH the fetched
+    // Backfill [9, 8, 7] descending: with room in the budget, BOTH the fetched
     // and the live columns stay resident.
-    r.note(7);
-    r.note(8);
     r.note(9);
+    r.note(8);
+    r.note(7);
     expect(r.range()).toEqual({ oldest: 7, newest: 12, count: 6 });
     expect(r.isResident(7)).toBe(true);
     expect(r.isResident(12)).toBe(true);
@@ -61,8 +61,8 @@ describe('Residency window (T8 LRU)', () => {
     // Full window [10, 17] (count 8 == capacity), live edge at 17.
     for (let s = 10; s <= 17; s++) r.note(s);
     expect(r.range()).toEqual({ oldest: 10, newest: 17, count: cap });
-    // Backfill 6: backward growth overruns → the far (live) end 17 falls out.
-    r.note(6);
+    // Each adjacent backfill evicts only the far end, reaching [6, 13].
+    for (let s = 9; s >= 6; s--) r.note(s);
     expect(r.range()).toEqual({ oldest: 6, newest: 13, count: cap });
     expect(r.isResident(17)).toBe(false); // live edge evicted (LRU — not viewed)
     expect(r.isResident(6)).toBe(true);
@@ -147,13 +147,12 @@ describe('Residency validFrom — the stale-slot gate across a gap', () => {
     r.note(10);
     r.note(11);
     r.note(12);
-    // A backfill page ascending [7,8,9]: the window grows backward and the
-    // page's not-yet-written slots are zeroed texture, so claiming validity
-    // down to 7 immediately is honest.
-    r.note(7);
-    expect(r.validFromSeq()).toBe(7);
-    r.note(8);
+    // A newest-first backfill validates only the columns actually written.
     r.note(9);
+    expect(r.validFromSeq()).toBe(9);
+    r.note(8);
+    expect(r.validFromSeq()).toBe(8);
+    r.note(7);
     expect(r.validFromSeq()).toBe(7);
     expect(r.range()).toEqual({ oldest: 7, newest: 12, count: 6 });
   });
@@ -164,14 +163,13 @@ describe('Residency validFrom — the stale-slot gate across a gap', () => {
     r.note(60); // gap forward growth (go-live) → window [53, 60], validFrom 60
     expect(r.validFromSeq()).toBe(60);
     // Post-gap backfill descends from the window's oldest (53), far below the
-    // gap edge: the band is unfetched and must not be claimed. The backward
-    // budget clamp pulls newest down to 58, and validity bounds at newest —
-    // at worst a ONE-column claim, never the whole stale band.
+    // gap edge: the band is unfetched and must not be claimed. Retain only
+    // the real column instead of inventing a valid suffix in stale slots.
     r.note(51);
-    expect(r.range()).toEqual({ oldest: 51, newest: 58, count: 8 });
-    expect(r.validFromSeq()).toBe(58);
+    expect(r.range()).toEqual({ oldest: 51, newest: 51, count: 1 });
+    expect(r.validFromSeq()).toBe(51);
     r.note(52);
-    expect(r.validFromSeq()).toBe(58);
+    expect(r.validFromSeq()).toBe(51);
   });
 
   it('never starts before the window oldest after a budget clamp', () => {
@@ -195,11 +193,10 @@ describe('Residency validFrom — the stale-slot gate across a gap', () => {
     r.note(40); // gap → window [33, 40], validFrom 40
     expect(r.validFromSeq()).toBe(40);
     // A stray backfill page lands below the window: backward growth clamps
-    // newest down to oldest+cap-1 = 37, below the gap edge. The invariant
-    // validFrom ≤ newest must hold (the clamp bounds it at newest).
+    // away from the valid suffix. Only the just-written column is known.
     r.note(30);
-    expect(r.range()!.newest).toBe(37);
-    expect(r.validFromSeq()).toBe(37);
+    expect(r.range()).toEqual({ oldest: 30, newest: 30, count: 1 });
+    expect(r.validFromSeq()).toBe(30);
   });
 
   it('an in-place rewrite inside a gap band does not validate the band', () => {
@@ -208,6 +205,31 @@ describe('Residency validFrom — the stale-slot gate across a gap', () => {
     r.note(40); // gap → window [33, 40], validFrom 40
     r.note(35); // one stray backfilled column inside the claimed band
     expect(r.validFromSeq()).toBe(40);
+  });
+
+  it('heals a forward gap one adjacent historical column at a time', () => {
+    const r = make();
+    for (let s = 10; s <= 17; s++) r.note(s);
+    r.note(100);
+    r.note(97); // an isolated real column cannot validate 98 or 99
+    expect(r.validFromSeq()).toBe(100);
+    for (let s = 99; s >= 93; s--) {
+      r.note(s);
+      expect(r.validFromSeq()).toBe(s);
+    }
+    expect(r.range()).toEqual({ oldest: 93, newest: 100, count: 8 });
+  });
+
+  it('never exposes an overwritten slot between yielded backward uploads', () => {
+    const r = make();
+    const slotSeq = new Int32Array(cap).fill(-1);
+    for (const seq of [...Array.from({ length: 8 }, (_, i) => 10 + i), 9, 8, 7]) {
+      slotSeq[seq % cap] = seq;
+      r.note(seq);
+      for (let s = r.validFromSeq(); s <= r.range()!.newest; s++) {
+        expect(slotSeq[s % cap]).toBe(s);
+      }
+    }
   });
 });
 

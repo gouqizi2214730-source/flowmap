@@ -157,23 +157,24 @@ export const TopBar = forwardRef<SymbolSearchHandle, TopBarProps>(function TopBa
       {/* Institutional Macro & Liquidity Stress Ticker (MACRO <GO>) */}
       <div
         className="macro-ticker"
+        data-available={macro !== null}
         data-testid="institutional-stress-ticker"
-        title="Cross-Asset Credit & Liquidity Stress (FRED SOFR / HY OAS / 10Y-2Y Inversion)"
+        title={macro ? 'Received macro data: SOFR / HY OAS / 10Y-2Y' : 'Unavailable — no connected source supplied macro data.'}
       >
         <span className="macro-ticker__lbl">MACRO:</span>
         <span className="macro-ticker__item">
-          SOFR <strong>{macro.sofrRate.toFixed(2)}%</strong>
+          SOFR <strong>{macro ? `${macro.sofrRate.toFixed(2)}%` : '—'}</strong>
         </span>
         <span className="macro-ticker__div">|</span>
         <span className="macro-ticker__item">
-          HY OAS <strong>{macro.hySpreadBps.toFixed(0)} bps</strong>
+          HY OAS <strong>{macro ? `${macro.hySpreadBps.toFixed(0)} bps` : '—'}</strong>
         </span>
         <span className="macro-ticker__div">|</span>
-        <span className={`macro-ticker__item ${macro.yieldCurve10Y2Y < 0 ? 'is-neg' : 'is-pos'}`}>
-          10Y-2Y <strong>{macro.yieldCurve10Y2Y < 0 ? '' : '+'}{macro.yieldCurve10Y2Y.toFixed(2)}%</strong>
+        <span className={`macro-ticker__item ${macro ? (macro.yieldCurve10Y2Y < 0 ? 'is-neg' : 'is-pos') : ''}`}>
+          10Y-2Y <strong>{macro ? `${macro.yieldCurve10Y2Y < 0 ? '' : '+'}${macro.yieldCurve10Y2Y.toFixed(2)}%` : '—'}</strong>
         </span>
-        <span className={`macro-ticker__badge is-${macro.stressRegime.toLowerCase()}`}>
-          {macro.stressRegime}
+        <span className={`macro-ticker__badge is-${macro?.stressRegime.toLowerCase() ?? 'unavailable'}`} title={macro?.status}>
+          {macro?.stressRegime ?? 'UNAVAILABLE'}
         </span>
       </div>
 
@@ -311,9 +312,9 @@ export const TopBar = forwardRef<SymbolSearchHandle, TopBarProps>(function TopBa
           className="tbtn is-intel"
           onClick={onToggleIntel}
           data-testid="intel-toggle"
-          title="Toggle Deep Market Intelligence Terminal (DOCS, GOV, FLOW, GEO) <GO>"
+          title="Research (J): DOCS, GOV, FLOW, GEO"
         >
-          ⚡ INTEL &lt;GO&gt;
+          {t('topbar.intelligence')}
         </button>
       )}
 

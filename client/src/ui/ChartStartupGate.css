@@ -1,0 +1,27 @@
+.chart-startup {
+  grid-column: 1 / -1;
+  grid-row: 1 / -1;
+  position: relative;
+  z-index: 20;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  background: var(--bg-1, #05080e);
+  color: var(--text-2);
+  pointer-events: auto;
+}
+
+.chart-startup__message {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+}
+
+.chart-startup__message strong { color: var(--text); font-weight: 500; }
+.chart-startup__mark { width: 8px; height: 8px; border: 1px solid var(--accent); transform: rotate(45deg); }
+.chart-startup__instrument { color: var(--text-money); font: 11px var(--font-mono); }
+.chart-startup__instrument span { margin-left: 8px; color: var(--text-2); }

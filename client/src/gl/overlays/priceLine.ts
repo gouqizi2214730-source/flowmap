@@ -78,6 +78,7 @@ export interface LastClose {
 export class PriceLine {
   /** Absolute col_seq → close price. */
   private readonly closes = new Map<number, number>();
+  private readonly extremes = new Map<number, { low: number; high: number }>();
   /** Newest close (highest col_seq seen) — O(1) maintenance, O(1) read. */
   private lastClose: LastClose | null = null;
 
@@ -85,6 +86,11 @@ export class PriceLine {
   add(bar: BarColumn): void {
     if (!Number.isFinite(bar.c)) return;
     this.closes.set(bar.col_seq, bar.c);
+    const low = Number.isFinite(bar.l) && bar.l > 0 ? Math.min(bar.l, bar.c) : bar.c;
+    const high = Number.isFinite(bar.h) && bar.h > 0 ? Math.max(bar.h, bar.c) : bar.c;
+    const extent = this.extremes.get(bar.col_seq);
+    if (extent === undefined) this.extremes.set(bar.col_seq, { low, high });
+    else { extent.low = low; extent.high = high; }
     if (this.lastClose === null || bar.col_seq >= this.lastClose.col) {
       this.lastClose = { col: bar.col_seq, price: bar.c };
     }
@@ -94,12 +100,25 @@ export class PriceLine {
     return this.closes.size;
   }
 
+  /** Real prices in an overview, never the depth grid's arbitrary coverage. */
+  priceRange(lo: number, hi: number): { low: number; high: number } | null {
+    let low = Infinity;
+    let high = -Infinity;
+    for (const [col, price] of this.closes) {
+      if (col < lo || col > hi || !(price > 0)) continue;
+      const extent = this.extremes.get(col);
+      low = Math.min(low, extent?.low ?? price);
+      high = Math.max(high, extent?.high ?? price);
+    }
+    return high >= low ? { low, high } : null;
+  }
+
   /** Drop columns outside `[oldest-pad, newest+pad]` (bounds memory to the window). */
   prune(oldest: number, newest: number, pad = 0): void {
     const lo = oldest - pad;
     const hi = newest + pad;
     for (const seq of this.closes.keys()) {
-      if (seq < lo || seq > hi) this.closes.delete(seq);
+      if (seq < lo || seq > hi) { this.closes.delete(seq); this.extremes.delete(seq); }
     }
   }
 
@@ -115,6 +134,7 @@ export class PriceLine {
 
   reset(): void {
     this.closes.clear();
+    this.extremes.clear();
     this.resetCursor();
   }
 
@@ -136,14 +156,13 @@ export class PriceLine {
     if (range === null) return;
 
     // One vertex per visible column, in ascending column order. `+0.5` puts the
-    // line on the row-CELL CENTRE — the same convention bubbles/markers use — so
-    // the trace rides the density cell the heatmap paints instead of its top
-    // boundary (survey S2 D3: the boundary convention split line and dots ~7px).
+    // line on the uniform row's cell centre. Hybrid grids use the exact price
+    // coordinate because half a log-wing row can be a large price difference.
     const pts: Pt[] = [];
     for (let c = range.lo; c <= range.hi; c++) {
       const close = this.closes.get(c);
       if (close === undefined || !Number.isFinite(close)) continue;
-      pts.push({ x: gm.cssX(c + 0.5), y: gm.cssY(gm.priceToRow(close) + 0.5) });
+      pts.push({ x: gm.cssX(c + 0.5), y: gm.cssY(gm.priceEventToRow(close)) });
     }
     if (pts.length === 0) return;
 
@@ -180,10 +199,10 @@ export class PriceLine {
 
     // Dashed last-price level marker across the chart, with a solid right-edge
     // stub that meets the axis pill drawn by drawPriceAxis. Row-cell centre,
-    // matching the trace and the pill.
+    // matching the trace and the pill through the shared event-price map.
     const last = this.lastClose;
     if (last !== null && gm.price !== null) {
-      const y = gm.cssY(gm.priceToRow(last.price) + 0.5);
+      const y = gm.cssY(gm.priceEventToRow(last.price));
       if (y >= -1 && y <= gm.dims.cssH + 1) {
         text.dashedLine(
           0,

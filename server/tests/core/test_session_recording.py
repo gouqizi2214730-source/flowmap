@@ -485,6 +485,137 @@ async def test_rehydration_snapshot_gap_marker_and_live_continuation(tmp_path):
     await asyncio.wait_for(sess.run_task, timeout=5)
 
 
+async def test_bootstrap_only_loads_attach_tail_and_preserves_disk_history_and_live_cumulative_base(tmp_path, monkeypatch):
+    from flowmap_server.proto.events import HistoryRequest, HistoryResponse
+
+    cfg = _cfg(rows=64, ring_columns=32768)
+    root = Recorder(tmp_path / "bootstrap", 20.0)
+    originals = _prerecord_tail(root, cfg, n_cols=1024)
+    now = originals[-1].t0_ns + 40 * DT
+    feed = DrivenFeed()
+    grid = Grid(cfg)
+    session = Session("bounded-bootstrap", feed=feed, grid=grid, recorder=root,
+                      wall_clock=lambda: now, timer=FakeTimer())
+    actual_load, calls = root.load_tail, []
+
+    def inspect_load(*args, **kwargs):
+        calls.append(kwargs)
+        return actual_load(*args, **kwargs)
+
+    monkeypatch.setattr(root, "load_tail", inspect_load)
+    await session.start()
+    client = ClientTx()
+    snapshot = _decode_frames(session.attach(client))
+    assert calls[0]["limit_cols"] == session_mod.SNAPSHOT_COLS == 512
+    assert calls[0]["max_age_ns"] == cfg.ring_columns * DT
+    assert grid.cfg.ring_columns == 32768
+    assert grid.retained_sequence_range() == (512, 1023)
+    assert [e.col_seq for e in snapshot if isinstance(e, DepthColumn)] == list(range(512, 1024))
+    last = originals[-1].bar
+    assert grid._cvd_cum == last.cvd_cum
+    assert grid._vwap_num_cum == last.vwap_num_cum
+    assert grid._vwap_den_cum == last.vwap_den_cum
+    assert session._rec is not None
+    assert session._rec.recording_id == actual_load(
+        MARKET, SYMBOL, max_age_ns=cfg.ring_columns * DT, now_ns=now, limit_cols=1
+    ).recording_id
+
+    # Deliberately hold an old disk page. Live feed events must still be
+    # consumed and continue the true absolute sequence/cumulative bar base.
+    started, release = threading.Event(), threading.Event()
+
+    def held_load(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return actual_load(*args, **kwargs)
+
+    monkeypatch.setattr(root, "load_tail", held_load)
+    old_page = asyncio.create_task(session.handle_history_async(
+        HistoryRequest(req_id=20, before_t=originals[256].t0_ns, n_cols=64)
+    ))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        feed.q.put_nowait(BookState(now, *_book(100)))
+        feed.q.put_nowait(Trade(ts_ns=now + DT // 2, price=100, size=2,
+                               side=SIDE_BUY, side_src=SIDE_SRC_EXCHANGE, venue=MARKET))
+        feed.q.put_nowait(BookState(now + DT, *_book(100)))
+        await _wait_for(lambda: grid.retained_sequence_range()[1] == 1024)
+        assert not old_page.done()
+        live = grid.history(now + 2 * DT, 1)[0]
+        assert live.col_seq == 1024 and live.t0_ns == now
+        assert live.bar.cvd_cum == last.cvd_cum + 2
+        assert live.bar.vwap_num_cum == last.vwap_num_cum + 200
+        assert live.bar.vwap_den_cum == last.vwap_den_cum + 2
+    finally:
+        release.set()
+    response = _decode_frames([await old_page])[-1]
+    assert isinstance(response, HistoryResponse)
+    assert [c.col_seq for c in response.depth_cols] == list(range(192, 256))
+    np.testing.assert_array_equal(response.depth_cols[0].bid, originals[192].bid)
+    assert response.oldest_available_t_ns == 0
+    monkeypatch.setattr(root, "load_tail", actual_load)
+    overview = _decode_frames([await session.handle_history_async(HistoryRequest(
+        req_id=21, before_t=2**63 - 1, n_cols=256, start_col=0, end_col=1023, stride=4
+    ))])[-1]
+    assert [c.col_seq for c in overview.depth_cols] == list(range(0, 1024, 4))
+    np.testing.assert_array_equal(overview.depth_cols[0].bid, originals[0].bid)
+    feed.q.put_nowait(None)
+    await asyncio.wait_for(session.run_task, timeout=5)
+
+
+async def test_bounded_bootstrap_restores_native_hybrid_epoch_and_fine_resolution(tmp_path):
+    from flowmap_server.proto.events import HistoryRequest
+
+    cfg = GridCfg(tick=.01, tick_multiple=50, dt_ns=DT, p0=0,
+                  rows=128, ring_columns=2048, mode=MODE_L2,
+                  band_up=10, band_down=.99, band_hybrid=True, core_rows=64)
+    source = Grid(cfg)
+    initial = source.maybe_reanchor(100)
+    assert initial is not None
+    source.on_book(0, *_book(100))
+    columns = []
+    latest, mid = initial, 100
+    for seq in range(1, 701):
+        if seq == 189:
+            latest = source.maybe_reanchor(111)
+            assert latest is not None
+            mid = 111
+        source.on_trade(seq * DT - 5, mid, 1.5, SIDE_BUY)
+        columns.extend(source.on_book(seq * DT, *_book(mid)))
+    root = Recorder(tmp_path / "hybrid-bootstrap", 20.0)
+    writer = root.open_session(MARKET, SYMBOL)
+    writer.record_epoch(initial)
+    writer.record_epoch(latest)
+    for col in columns:
+        writer.record_column(col)
+    writer.close()
+    feed, grid = DrivenFeed(), Grid(cfg)
+    session = Session("native-bootstrap", feed=feed, grid=grid, recorder=root,
+                      wall_clock=lambda: columns[-1].t0_ns + DT, timer=FakeTimer())
+    await session.start()
+    assert grid.retained_sequence_range() == (188, 699)
+    assert grid.current_epoch_params() == latest
+    assert grid.scale.core_step == .5 and grid.scale.core_rows == latest.core_rows
+    assert grid._cvd_cum == columns[-1].bar.cvd_cum
+    assert grid._vwap_num_cum == columns[-1].bar.vwap_num_cum
+    assert grid._vwap_den_cum == columns[-1].bar.vwap_den_cum
+    np.testing.assert_array_equal(grid.history(700 * DT, 1)[0].bid, columns[-1].bid)
+    assert initial.epoch not in grid._epoch_params, "the bootstrap did not eagerly preload the older native map"
+    historical = _decode_frames([await session.handle_history_async(HistoryRequest(
+        req_id=22, before_t=2**63 - 1, n_cols=188, start_col=0, end_col=187, stride=1
+    ))])
+    old_columns = historical[-1].depth_cols
+    assert [col.col_seq for col in old_columns] == list(range(188))
+    assert {col.epoch for col in old_columns} == {initial.epoch}
+    assert {ev.epoch for ev in historical[:-1] if isinstance(ev, EpochStart)} == {initial.epoch, latest.epoch}
+    np.testing.assert_array_equal(old_columns[0].bid, columns[0].bid)
+    assert grid.current_epoch_params() == latest
+    rolled = grid.maybe_reanchor(122)
+    assert rolled is not None and rolled.core_step == latest.core_step
+    feed.q.put_nowait(None)
+    await asyncio.wait_for(session.run_task, timeout=5)
+
+
 # ---------------------------------------------------------------------------
 # d. stale tail -> cold start, no crash
 

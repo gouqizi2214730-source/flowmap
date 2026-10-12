@@ -205,8 +205,17 @@ export function DrawingLayer({
   const dataAt = useCallback(
     (clientX: number, clientY: number): ChartPoint | null => {
       const local = localXY(clientX, clientY);
-      const proj = projRef.current;
-      if (local === null || proj === null) return null;
+      const wrapper = wrapperRef.current;
+      if (local === null || wrapper === null) return null;
+      // Empty layers sleep between interactions. A tool's very first click
+      // must use today's epoch/camera, even before the next animation frame.
+      const st = useFlowMapStore.getState();
+      const params = st.gridEpoch === null ? null : (st.epochs.get(st.gridEpoch) ?? null);
+      const proj = makeProjection(propsRef.current.chartMap ?? IDENTITY,
+        propsRef.current.getTimeBase?.() ?? null, params,
+        Math.max(1, wrapper.clientWidth), Math.max(1, wrapper.clientHeight));
+      projRef.current = proj;
+      if (proj === null) return null;
       const tNs = proj.tNsAt(local.x);
       const price = proj.priceAt(local.y);
       if (tNs === null || price === null || !Number.isFinite(price)) return null;
@@ -222,6 +231,14 @@ export function DrawingLayer({
       const canvas = canvasRef.current;
       const wrapper = wrapperRef.current;
       if (canvas === null || wrapper === null) return;
+
+      const drawings = useDrawingsStore.getState();
+      if (drawings.tool === null && drawings.items.length === 0 && drawings.draftPoints.length === 0 &&
+          projRef.current !== null && !dirtyRef.current) {
+        // Initialize the pointer projection and clear removed drawings on a
+        // dirty frame. A clean empty layer needs no per-frame layout/projection.
+        return;
+      }
 
       // Frame inputs: time anchor + epoch params + size + DPR.
       const st = useFlowMapStore.getState();

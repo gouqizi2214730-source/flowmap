@@ -1,7 +1,7 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MODE_L1_BAND, MODE_L2, MODE_SYNTH_PROFILE, type EpochParams } from '../proto/types';
 import {
@@ -11,7 +11,7 @@ import {
   type BookSnapshot,
 } from '../state/bookStore';
 import { useFlowMapStore } from '../state/store';
-import { DomLadder, buildLadder, depthTier, ladderShape, fmtSz, priceDecimals } from './DomLadder';
+import { DomLadder, buildLadder, depthBucket, depthTier, ladderShape, fmtSz, priceDecimals } from './DomLadder';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -70,7 +70,7 @@ function click(el: Element): void {
 
 beforeEach(() => {
   resetForTest();
-  useFlowMapStore.setState({ capability: null, epochs: new Map(), gridEpoch: null });
+  useFlowMapStore.setState({ capability: null, epochs: new Map(), gridEpoch: null, subscription: null, sessionId: null, sessionRevision: 0 });
 });
 
 afterEach(() => {
@@ -80,6 +80,82 @@ afterEach(() => {
     container.remove();
   }
   resetForTest();
+  vi.unstubAllGlobals();
+});
+
+describe('DOM price browsing and panel measurement', () => {
+  function seed(): void {
+    useFlowMapStore.setState({ capability: { depth: 'L2' }, epochs: new Map([[1, PARAMS]]), gridEpoch: 1 });
+    const { bid, ask } = makeBook();
+    ingestForTest({ type: 3, epoch: 1, col_seq: 1, t0_ns: 1n, mode: MODE_L2, final: true, bid, ask } as never);
+  }
+
+  it('reattaches ResizeObserver to the new body after collapse/expand', () => {
+    const instances: Array<{ callback: () => void; observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }> = [];
+    vi.stubGlobal('ResizeObserver', class {
+      observe = vi.fn();
+      disconnect = vi.fn();
+      constructor(readonly callback: () => void) { instances.push(this); }
+    });
+    seed();
+    const { container } = render(<DomLadder />);
+    const first = container.querySelector('[data-testid="ladder-body"]')!;
+    expect(instances[0].observe).toHaveBeenCalledWith(first);
+    click(container.querySelector('[data-testid="ladder-collapse"]')!);
+    expect(instances[0].disconnect).toHaveBeenCalledOnce();
+    click(container.querySelector('[data-testid="ladder-collapse"]')!);
+    const second = container.querySelector('[data-testid="ladder-body"]')!;
+    expect(second).not.toBe(first);
+    expect(instances[1].observe).toHaveBeenCalledWith(second);
+    Object.defineProperty(second, 'clientHeight', { value: 85 });
+    act(() => instances[1].callback());
+    expect(container.querySelectorAll('[data-testid="ladder-row"]')).toHaveLength(5);
+  });
+
+  it('browses grouped rungs while locked, retains price as market moves, and centers explicitly', () => {
+    seed();
+    const { container } = render(<DomLadder />);
+    const middle = (): string | null => {
+      const rows = container.querySelectorAll('[data-testid="ladder-row"]');
+      return rows[Math.floor(rows.length / 2)].getAttribute('data-price');
+    };
+    const body = container.querySelector('[data-testid="ladder-body"]')!;
+    const initial = middle();
+    act(() => body.dispatchEvent(new WheelEvent('wheel', { deltaY: 34, bubbles: true, cancelable: true })));
+    expect(middle()).toBe(initial); // following mode does not browse
+    click(container.querySelector('[data-testid="ladder-lock"]')!);
+    const event = new WheelEvent('wheel', { deltaY: 34, bubbles: true, cancelable: true });
+    act(() => body.dispatchEvent(event));
+    const inspected = middle();
+    expect(event.defaultPrevented).toBe(true);
+    expect(inspected).not.toBe(initial);
+    act(() => {
+      ingestForTest({ type: 6, ts_ns: 2n, bid_px: 110, bid_sz: 2, ask_px: 110.5, ask_sz: 3 } as never);
+      flushForTest();
+    });
+    expect(middle()).toBe(inspected);
+    // A re-anchor changes the row geometry but keeps the pinned price.
+    act(() => {
+      const params = { ...PARAMS, epoch: 2, p0: 49 };
+      useFlowMapStore.setState({ gridEpoch: 2, epochs: new Map([[2, params]]) });
+      const { bid, ask } = makeBook();
+      ingestForTest({ type: 3, epoch: 2, col_seq: 1, t0_ns: 3n, mode: MODE_L2, final: true, bid, ask } as never);
+      flushForTest();
+    });
+    expect(middle()).toBe(inspected);
+    click(container.querySelector('[data-testid="ladder-center"]')!);
+    expect(container.querySelector('[data-testid="ladder-lock"]')?.getAttribute('aria-pressed')).toBe('false');
+    expect(middle()).not.toBe(inspected);
+  });
+
+  it('labels totals as visible grouped rungs and sums only the displayed real sizes', () => {
+    seed();
+    const { container } = render(<DomLadder />);
+    const totals = container.querySelector('[data-testid="ladder-totals"]')!;
+    expect(totals.textContent).toContain('Visible Σ');
+    expect(totals.textContent).toContain('B 16.00');
+    expect(totals.getAttribute('title')).toContain('not the full book');
+  });
 });
 
 describe('depthTier', () => {
@@ -137,6 +213,7 @@ describe('fmtSz', () => {
 describe('priceDecimals', () => {
   it('derives decimals from the price step', () => {
     expect(priceDecimals(0.5)).toBe(1);
+    expect(priceDecimals(0.25)).toBe(2);
     expect(priceDecimals(0.01)).toBe(2);
     expect(priceDecimals(1)).toBe(0);
     expect(priceDecimals(0.0001)).toBe(4);
@@ -146,9 +223,9 @@ describe('priceDecimals', () => {
     // A 1e-9 step used to cap at 8 → every price printed 0.00000000.
     expect(priceDecimals(1e-8)).toBe(8);
     expect(priceDecimals(1e-9)).toBe(9);
-    expect(priceDecimals(1.2e-9)).toBe(9);
+    expect(priceDecimals(1.2e-9)).toBe(10);
     // A 1.2e-9 price at 9 decimals renders a NONZERO honest value.
-    expect((1.2e-9).toFixed(priceDecimals(1.2e-9))).toBe('0.000000001');
+    expect((1.2e-9).toFixed(priceDecimals(1.2e-9))).toBe('0.0000000012');
     // Defensive ceiling so a pathological step cannot print an endless string.
     expect(priceDecimals(1e-15)).toBe(12);
   });
@@ -178,6 +255,15 @@ describe('priceDecimals', () => {
 });
 
 describe('buildLadder', () => {
+  it('uses the server nearest bucket for quotes inside a grouped price interval', () => {
+    const snap = snapWithBook();
+    snap.bbo = { tsNs: 1n, bidPx: 100.39, bidSz: 12, askPx: 100.4, askSz: 9 };
+    const row = buildLadder(snap, PARAMS, 'book', 7, null).rows.find(r => r.row === 101)!;
+    expect(row.isBestBid).toBe(true);
+    expect(row.isBestAsk).toBe(true);
+    expect(depthBucket(100.5)).toBe(100);
+    expect(depthBucket(101.5)).toBe(102);
+  });
   it('centers on the derived mid and flags best bid/ask (L2, no BBO)', () => {
     const model = buildLadder(snapWithBook(), PARAMS, 'book', 5, null);
     expect(model.priceDecimals).toBe(1);
@@ -464,7 +550,7 @@ describe('DomLadder states (A5)', () => {
     expect(msg).not.toContain('waiting');
   });
 
-  it('remounts a size cell only when its quantity changes (flash-on-change)', () => {
+  it('updates quantities in stable cells without replaying flash animations', () => {
     useFlowMapStore.setState({
       capability: { depth: 'L2', tape: 'tick' },
       epochs: new Map([[1, PARAMS]]),
@@ -495,13 +581,14 @@ describe('DomLadder states (A5)', () => {
     });
     expect(szAt()).toBe(first);
 
-    // Quantity changed at row 100: a NEW node — remount replays the CSS flash.
+    // Quantity changes keep the same readout node.
     const bid2 = bid.slice();
     bid2[100] = 9;
     act(() => {
       ingestForTest(col(3, bid2) as never);
       flushForTest();
     });
-    expect(szAt()).not.toBe(first);
+    expect(szAt()).toBe(first);
+    expect(szAt()?.textContent).toBe("9.00");
   });
 });

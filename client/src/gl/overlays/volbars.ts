@@ -4,7 +4,7 @@
  * A histogram of TRADED volume along the chart's bottom edge, directly above
  * the time axis — the Bookmap "volume bars" component our chart lacked
  * (reference decomposition D3 §H7 scored it 1.5/10: "we have none"). One bar
- * per visible time bucket: height ∝ buy+sell volume aggregated into the bucket,
+ * per visible time bucket: height follows its average buy+sell volume,
  * color = the bucket's dominant aggressor side (theme `buy`/`sell` tokens).
  *
  * Data: every {@link BarColumn} already carries the per-interval taker split
@@ -13,10 +13,10 @@
  * taker volumes. Columns WITHOUT a split (keyless equity, SIDE_UNKNOWN-only
  * trades) are never drawn: absence stays a gap, never a fake bar (§7 honesty).
  *
- * Rendering: ONE 2D-canvas pass over the visible buckets, on the shared text
- * layer (the same canvas the price line uses — real canvas AA at 1 px). Buckets
+ * Rendering: ONE 2D-canvas pass over the visible buckets, on a dedicated
+ * opaque strip below the price canvas (real canvas AA at 1 px). Buckets
  * are aligned to absolute columns, with a fixed width chosen from the zoom.
- * A zoomed-out view draws at most canvas width + two edge buckets. Scratch
+ * A zoomed-out view merges intervals into groups at least 3 CSS px wide. Scratch
  * arrays are instance-owned and reused, so a dirty frame allocates nothing.
  */
 
@@ -53,17 +53,23 @@ export const VOLBAR_MIN_PX = 1;
 /** Maximum bar width (CSS px) when zoomed in far (bars thin down as buckets
  *  outnumber pixels; they never fatten into blocks). */
 export const VOLBAR_MAX_BAR_PX = 14;
-/** Bar opacity over the heatmap (Bookmap's bars read solid but not paper). */
+/** Keep dense time views readable: aggregate before intervals become hairlines. */
+export const VOLBAR_MIN_BUCKET_PX = 3;
+/** Bar opacity over the strip's opaque background. */
 export const VOLBAR_ALPHA = 0.92;
 
 export function volumeStripHeight(cssH: number): number {
   return Math.max(VOLBAR_MIN_STRIP_PX, Math.min(VOLBAR_MAX_STRIP_PX, cssH * VOLBAR_HEIGHT_FRAC));
 }
-/** Initial contrast percentile over the visible nonzero buckets. A
- *  single whale on a linear-vs-max scale crushes every other bar to a whisker
- *  (measured live BTC: p50 = 17% of p90). Anything at/above this percentile
- *  clamps to full height (the upper-cutoff behaviour Bookmap documents). */
+/** Robust reference over completed buckets; values above it stay distinct. */
 export const VOLBAR_CAP_PERCENTILE = 0.9;
+
+/** Smooth, bounded height with no hard upper cutoff. The reference maps to
+ *  71% of the strip, leaving room to distinguish larger traded volumes. */
+export function volumeHeight(volume: number, reference: number, stripH: number): number {
+  if (!(volume > 0) || !(reference > 0)) return 0;
+  return Math.max(VOLBAR_MIN_PX, Math.sqrt(volume / (volume + reference)) * stripH);
+}
 
 /**
  * The themed color for a bucket with `buy`/`sell` volume totals: the dominant
@@ -139,6 +145,10 @@ export class VolBars {
   private totalScratch = new Float64Array(0);
   private cap = 0;
   private bucketWidth = 0;
+  private calibratedBucket = -1;
+  private historicalRange: { lo: number; hi: number } | null = null;
+
+  constructor(private readonly options: { inferSpans?: boolean } = {}) {}
 
   /**
    * Record a column's traded volume. A column without a taker split
@@ -159,12 +169,15 @@ export class VolBars {
     // Immediate chronological neighbours define a candle span even when a
     // history page arrives behind the live edge or replays an existing bar.
     const previous = this.points.get(this.eventCols[index - 1]);
-    if (previous !== undefined) previous.span = col - previous.col;
+    if (previous !== undefined && this.options.inferSpans !== false) previous.span = col - previous.col;
     const next = this.eventCols[index + 1];
-    const span = next === undefined ? 1 : next - col;
+    const span = this.options.inferSpans === false || next === undefined ? 1 : next - col;
     const buy = Number.isFinite(bar.vol_buy) ? Math.max(0, bar.vol_buy) : 0;
     const sell = Number.isFinite(bar.vol_sell) ? Math.max(0, bar.vol_sell) : 0;
-    if (buy + sell <= 0) return;
+    if (buy + sell <= 0) {
+      this.points.delete(col);
+      return;
+    }
     let point = this.points.get(col);
     if (point === undefined) {
       point = { col, buy, sell, span };
@@ -218,6 +231,8 @@ export class VolBars {
     this.eventCols.length = 0;
     this.cap = 0;
     this.bucketWidth = 0;
+    this.calibratedBucket = -1;
+    this.historicalRange = null;
   }
 
   /** Volume at a column (for tests / readouts), or null when absent. */
@@ -227,10 +242,9 @@ export class VolBars {
 
   /**
    * Draw the strip: bottom-anchored bars, one per visible time bucket, heights
-   * normalized to a fixed p90 calibration with a sqrt lift and upper cutoff
-   * (see VOLBAR_CAP_PERCENTILE). Nothing is drawn for empty
-   * buckets or when no visible column carries a split — the heatmap shows
-   * through unchanged.
+   * average volume per source interval with a soft percentile reference.
+   * Nothing is drawn for empty
+   * buckets or when no visible column carries a split; the strip stays empty.
    */
   draw(frame: OverlayFrame, stripH = volumeStripHeight(frame.gm.dims.cssH)): void {
     const { gm, text } = frame;
@@ -240,13 +254,12 @@ export class VolBars {
     const span = range.hi - range.lo + 1;
     if (!(span > 0)) return;
 
-    // One bucket per column when zoomed in; zoomed-out views aggregate at
-    // approximately pixel granularity (O(canvas width)), zoomed-in views
-    // keep per-column bars (Bookmap's histogram granularity).
+    // One source interval when readable; aggregate dense views into a small
+    // number of wider bars instead of drawing a red/green barcode.
     const cssW = Math.max(1, Math.floor(gm.dims.cssW));
     // Anchor buckets to absolute time columns, never to the moving viewport.
     // A power-of-two width keeps the grouping fixed throughout a time glide.
-    const bucketWidth = 2 ** Math.max(0, Math.ceil(Math.log2(gm.view.colScale / cssW)));
+    const bucketWidth = 2 ** Math.max(0, Math.ceil(Math.log2(gm.view.colScale * VOLBAR_MIN_BUCKET_PX / cssW)));
     const lo = Math.floor(range.lo / bucketWidth) * bucketWidth;
     const hi = (Math.floor(range.hi / bucketWidth) + 1) * bucketWidth - 1;
     const buckets = (hi - lo + 1) / bucketWidth;
@@ -263,27 +276,53 @@ export class VolBars {
       buckets, frame.resident?.oldest, frame.resident?.newest);
     if (max <= 0) return;
 
-    // Calibration reference: the p90 of the visible nonzero bucket totals
-    // (linear-vs-max crushed live
-    // BTC's median bar to ~0.2% of the strip). Computed on the reused scratch —
-    // zeros sort to the front, the nonzero tail carries the percentile.
-    if (this.cap <= 0 || this.bucketWidth !== bucketWidth) {
+    // Group height represents average volume, including empty intervals.
+    // Color still compares each side's contribution to the same time group.
+    for (let b = 0; b < buckets; b++) {
+      buy[b] /= bucketWidth;
+      sell[b] /= bucketWidth;
+    }
+
+    // Revisit the reference only when a time group completes (or zoom changes
+    // grouping), never on camera glide or every forming-volume update. A tiny
+    // first print must not freeze the entire session at the same ceiling.
+    const newestEvent = this.eventCols.at(-1)!;
+    const completedBucket = Math.floor(newestEvent / bucketWidth);
+    const regrouped = this.bucketWidth !== bucketWidth;
+    const historical = hi < newestEvent;
+    const previousRange = this.historicalRange;
+    // Preserve the scale while the inspected windows overlap. A continuous
+    // pan must never resize settled bars. Recalibrate when a different region
+    // replaces the calibrated window, or when returning to the live edge.
+    const historyChanged = historical
+      ? previousRange === null || lo > previousRange.hi || hi < previousRange.lo
+      : previousRange !== null;
+    if (this.cap <= 0 || regrouped || historyChanged || (!historical && completedBucket !== this.calibratedBucket)) {
       let totals = this.totalScratch;
       if (totals.length < buckets) this.totalScratch = totals = new Float64Array(buckets);
       let nonzero = 0;
       for (let b = 0; b < buckets; b++) {
         const t = buy[b] + sell[b];
-        totals[b] = t;
-        if (t > 0) nonzero++;
+        if (t > 0 && lo + (b + 1) * bucketWidth <= newestEvent) totals[nonzero++] = t;
       }
-      totals.subarray(0, buckets).sort();
+      // Startup before any group has closed: use the available data once.
+      if (nonzero === 0) {
+        for (let b = 0; b < buckets; b++) {
+          const t = buy[b] + sell[b];
+          if (t > 0) totals[nonzero++] = t;
+        }
+      }
+      totals.subarray(0, nonzero).sort();
       const rank = Math.ceil(VOLBAR_CAP_PERCENTILE * nonzero) - 1;
-      const targetCap = totals[buckets - nonzero + rank];
+      const targetCap = totals[rank];
       if (!(targetCap > 0)) return;
-      this.cap = targetCap;
+      // Hysteresis keeps settled bars stable through ordinary new prints.
+      // Downward recalibration requires enough samples to avoid one quiet tick.
+      if (this.cap <= 0 || regrouped || historyChanged || targetCap > this.cap * 2 ||
+        (nonzero >= 16 && targetCap < this.cap / 4)) this.cap = targetCap;
+      this.calibratedBucket = completedBucket;
+      this.historicalRange = historical ? { lo, hi } : null;
     }
-    // Calibrate once per aggregation width. Camera scrolling and new forming
-    // volume never rescale already completed bars, even gradually.
     this.bucketWidth = bucketWidth;
     const cap = this.cap;
 
@@ -292,9 +331,7 @@ export class VolBars {
     const bw = (xHi - xLo) / buckets;
     if (!(bw > 0)) return;
 
-    // Hairline gaps only once bars are wide enough to need them; when a bucket
-    // is ~1 px the bars stay contiguous (barcode-free by construction — the
-    // strip is ink, not hairlines floating in a void).
+    // A small gap separates the readable aggregated groups.
     const gap = bw >= 3 ? Math.min(2, bw * 0.25) : 0;
     const barW = Math.max(1, Math.min(VOLBAR_MAX_BAR_PX, bw - gap));
     const yBase = gm.dims.cssH - 1;
@@ -304,10 +341,7 @@ export class VolBars {
       if (total <= 0) continue; // honest gap: no volume, no bar
       const color = barColor(buy[b], sell[b]);
       if (color === null) continue;
-      // sqrt lift: monotonic in volume, but the mids read as a histogram
-      // instead of a floor of 1-px whiskers; the p90 clamp keeps the top flat
-      // like Bookmap's upper cutoff (values above `cap` all reach full height).
-      const h = Math.max(VOLBAR_MIN_PX, Math.sqrt(Math.min(1, total / cap)) * stripH);
+      const h = volumeHeight(total, cap, stripH);
       // Use the same absolute-column transform as PriceLine's vertex, rather
       // than reconstructing a position from the visible range's two edges.
       const x = gm.cssX(lo + (b + 0.5) * bucketWidth);

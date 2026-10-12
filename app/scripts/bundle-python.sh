@@ -9,7 +9,7 @@
 # requested target triple (the `install_only` tarball — already relocatable)
 # into app/src-tauri/resources/pyruntime, then install the flowmap-server + its
 # deps INTO that runtime's own site-packages so the whole tree is
-# self-contained. Dependencies (incl. the git-pinned crocodile engine) come
+# self-contained. Dependencies (incl. the vendored crocodile engine wheel) come
 # from the server's uv.lock so the bundle matches the tested resolution exactly.
 #
 # Because native wheels (numpy/polars/msgspec/curl-cffi …) are platform-specific,
@@ -152,7 +152,7 @@ fi
 # --- 3. Install the server + its deps into the runtime ------------------------
 echo "==> Exporting locked requirements from server/uv.lock"
 REQS="$CACHE_DIR/flowmap-reqs.txt"
-( cd "$SERVER_DIR" && uv export --frozen --no-dev --no-emit-project --no-hashes -o "$(native_path "$REQS")" )
+( cd "$SERVER_DIR" && uv export --locked --no-dev --no-emit-project --no-hashes -o "$(native_path "$REQS")" )
 echo "    $(grep -cvE '^\s*(#|$)' "$REQS") requirement lines"
 
 # --- 3b. Per-target dependency exceptions -------------------------------------
@@ -191,7 +191,10 @@ echo "    $(grep -cvE '^\s*(#|$)' "$REQS") requirement lines"
 # Seeded with the flags every target uses, so the array is never empty — an
 # empty array expansion is an "unbound variable" under `set -u` on bash 3.2,
 # which is what /bin/bash still is on the macOS runners.
-PIP_INSTALL_ARGS=(--no-warn-script-location --disable-pip-version-check)
+# The export includes the entire dependency closure. Install those exact pins
+# without letting pip resolve the wheel's metadata against a newer index.
+# Run from SERVER_DIR below so the vendored wheel's relative path is portable.
+PIP_INSTALL_ARGS=(--no-warn-script-location --disable-pip-version-check --no-deps)
 if [[ "$TRIPLE" == "aarch64-pc-windows-msvc" ]]; then
   echo "==> Applying the win-arm64 dependency exceptions"
   "$PY" - "$(native_path "$REQS")" <<'PYEOF'
@@ -237,7 +240,6 @@ PYEOF
   # — and here it would actively undo the exceptions above (pip would re-pull
   # pyarrow and cryptography==49.0.0 to satisfy crocodile's and ccxt's metadata).
   # The import check in step 5 is what proves the resulting tree is sound.
-  PIP_INSTALL_ARGS+=(--no-deps)
   # Keep the import gate honest: it must stop asserting what this target
   # deliberately does not ship, and assert everything else exactly as before.
   export FLOWMAP_SKIP_IMPORTS="pyarrow"
@@ -250,7 +252,7 @@ fi
 # workflow installs Rust before this step for Tauri's sake, so the toolchain is
 # there; expect this leg to take a few minutes longer than the others.
 echo "==> Installing dependencies into the runtime (this fetches native wheels)"
-"$PY" -m pip install "${PIP_INSTALL_ARGS[@]}" -r "$(native_path "$REQS")"
+( cd "$SERVER_DIR" && "$PY" -m pip install "${PIP_INSTALL_ARGS[@]}" -r "$(native_path "$REQS")" )
 
 echo "==> Building + installing flowmap-server wheel"
 WHEEL_DIR="$CACHE_DIR/wheel"

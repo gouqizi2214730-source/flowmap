@@ -141,7 +141,7 @@ export interface FlowMapState {
     /** Optional P6 replay window; omitted/null = unbounded (today's behavior). */
     window?: SubscribeWindow,
   ) => void;
-  requestHistory: (before_t: bigint, n: number) => Promise<HistoryResponse>;
+  requestHistory: (before_t: bigint, n: number, overview?: import('../proto/types').HistoryOverviewRequest) => Promise<HistoryResponse>;
   /** Replay transport controls — send the matching control message + track UI state. */
   setSpeed: (x: number) => void;
   pause: () => void;
@@ -389,11 +389,11 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
     conn.subscribe(market, symbol, mode, band, window);
   },
 
-  requestHistory(before_t, n) {
+  requestHistory(before_t, n, overview) {
     if (conn === null) {
       return Promise.reject(new Error('flowmap: not connected'));
     }
-    return conn.requestHistory(before_t, n);
+    return conn.requestHistory(before_t, n, overview);
   },
 
   setSpeed(x) {

@@ -33,6 +33,7 @@ import { useCallback, useEffect, useRef, useState, type RefObject } from 'react'
 
 import type { PriceFollow } from '../gl/camera';
 import type { Renderer } from '../gl/renderer';
+import { observeCanvasBox } from '../gl/canvasBox';
 
 /** Poll interval (ms) for the chip's state. Short: the chip must not visibly lag
  *  the gesture that changed it (a wheel over the gutter changes it instantly). */
@@ -85,6 +86,7 @@ export function PriceAxis({ canvasRef, rendererRef, onSetPriceFollow }: PriceAxi
   const [mode, setMode] = useState<PriceFollow>('fit');
   const [edgeVisible, setEdgeVisible] = useState(true);
   const healedAtRef = useRef(0);
+  const boxRef = useRef<ReturnType<typeof observeCanvasBox> | null>(null);
 
   /**
    * QA9-1: keep the LIVE canvas bound to the renderer and its backing store
@@ -104,8 +106,9 @@ export function PriceAxis({ canvasRef, rendererRef, onSetPriceFollow }: PriceAxi
     const r = rendererRef.current as unknown as AxisHealView | null;
     const c = canvasRef.current;
     if (r === null || c === null || typeof r.attachOverlaySurfaces !== 'function') return;
-    const cw = c.clientWidth;
-    const ch = c.clientHeight;
+    const box = boxRef.current?.size();
+    const cw = box?.width ?? 0;
+    const ch = box?.height ?? 0;
     if (cw <= 0 || ch <= 0) return; // pre-layout / hidden: nothing to match yet
     const dpr = window.devicePixelRatio || 1;
     const wantW = Math.max(1, Math.round(cw * dpr));
@@ -129,6 +132,8 @@ export function PriceAxis({ canvasRef, rendererRef, onSetPriceFollow }: PriceAxi
   // the renderer already exists (the detached-node case).
   const bindCanvas = useCallback(
     (el: HTMLCanvasElement | null): void => {
+      boxRef.current?.dispose();
+      boxRef.current = el ? observeCanvasBox(el) : null;
       (canvasRef as { current: HTMLCanvasElement | null }).current = el;
       if (el !== null && rendererRef.current !== null) healAxis();
     },
@@ -136,6 +141,10 @@ export function PriceAxis({ canvasRef, rendererRef, onSetPriceFollow }: PriceAxi
   );
 
   useEffect(() => {
+    if (canvasRef.current) {
+      boxRef.current?.dispose();
+      boxRef.current = observeCanvasBox(canvasRef.current);
+    }
     const id = window.setInterval(() => {
       const r = rendererRef.current as RendererCp1 | null;
       if (!r) return;
@@ -144,8 +153,12 @@ export function PriceAxis({ canvasRef, rendererRef, onSetPriceFollow }: PriceAxi
       setEdgeVisible((e) => (e === edge ? e : edge));
       healAxis();
     }, POLL_MS);
-    return () => window.clearInterval(id);
-  }, [rendererRef, healAxis]);
+    return () => {
+      window.clearInterval(id);
+      boxRef.current?.dispose();
+      boxRef.current = null;
+    };
+  }, [canvasRef, rendererRef, healAxis]);
 
   const onToggle = (): void => {
     const r = rendererRef.current;

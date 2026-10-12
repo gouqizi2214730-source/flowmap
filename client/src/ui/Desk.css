@@ -1,0 +1,58 @@
+.app .macro-ticker[data-available='false'] { display: none; }
+@media (max-width: 1550px) { .app .macro-ticker { display: none; } }
+.desk-toolbar { flex: 0 0 auto; display: flex; align-items: center; gap: 14px; min-height: 35px; padding: 3px 12px; border-bottom: 1px solid var(--line); background: var(--bg-2); overflow-x: auto; scrollbar-width: thin; }
+.desk-toolbar__group { display: flex; align-items: center; gap: 3px; flex: 0 0 auto; }
+.desk-toolbar button, .desk-window button { border: 1px solid transparent; background: transparent; color: var(--text-2); border-radius: var(--r-1); padding: 5px 7px; font: 11px/16px var(--font-ui); white-space: nowrap; cursor: pointer; }
+.desk-toolbar button:hover, .desk-window button:hover { background: var(--bg-3); color: var(--text); }
+.desk-toolbar button[aria-pressed='true'] { color: var(--text); background: var(--bg-3); border-color: var(--line-2); }
+.desk-toolbar__layout button[aria-pressed='true'] { border-bottom-color: var(--accent); }
+.desk-toolbar button:focus-visible, .desk-window button:focus-visible, .desk-channel select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.desk-channel { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-2); white-space: nowrap; }
+.desk-channel select { color: var(--text); background: var(--bg-1); border: 1px solid var(--line-2); border-radius: var(--r-1); padding: 4px; font: 11px var(--font-mono); }
+.desk-toolbar__navigation { margin-left: auto; }
+.desk-toolbar__performance { color: var(--text-2); white-space: nowrap; font: 10px var(--font-mono); min-width: 42px; text-align: right; }
+.desk-toolbar__history { color: var(--accent); white-space: nowrap; font: 10px var(--font-mono); }
+.desk-book-panels { flex: 1 1 auto; min-height: 0; display: grid; grid-template-rows: minmax(0, calc(var(--desk-dom-ratio) * 100%)) 5px minmax(0, 1fr); overflow: hidden; }
+.desk-book-panels > .dom-ladder, .desk-book-panels > .tape { min-height: 0; overflow: hidden; }
+.desk-book-panels:has(> .dom-ladder.is-collapsed) { grid-template-rows: 26px 5px minmax(0, 1fr); }
+.desk-book-panels:has(> .tape.is-collapsed) { grid-template-rows: minmax(0, 1fr) 5px 26px; }
+.desk-book-panels:has(> .dom-ladder.is-collapsed):has(> .tape.is-collapsed) { grid-template-rows: 26px 5px 26px; }
+.pane-resizer { flex: 0 0 auto; background: var(--bg-1); position: relative; touch-action: none; z-index: 8; }
+.pane-resizer::after { content: ''; position: absolute; background: var(--line-2); }
+.pane-resizer:hover::after, .pane-resizer:focus-visible::after { background: var(--accent); }
+.pane-resizer:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.pane-resizer--x { width: 5px; cursor: col-resize; }
+.pane-resizer--x::after { top: 0; bottom: 0; left: 2px; width: 1px; }
+.pane-resizer--y { height: 5px; cursor: row-resize; }
+.pane-resizer--y::after { left: 0; right: 0; top: 2px; height: 1px; }
+.stage > .pane-resizer { position: absolute; left: 0; right: var(--price-axis-w); bottom: calc(var(--time-axis-h) + var(--cvd-h) - 2px); }
+.app[data-desk-root] .stage { --cvd-h: var(--desk-cvd-height, 104px); grid-template-rows: minmax(0, 1fr) var(--time-axis-h); }
+.app[data-desk-root] .stage--cvd { grid-template-rows: minmax(0, 1fr) var(--cvd-h) var(--time-axis-h); }
+.app[data-desk-root] .right-rail { flex-basis: var(--desk-rail-width, 340px); border-left: none; }
+.right-rail > .watchlist { flex: 0 0 auto; max-height: 155px; }
+.flow-panel { flex: 0 0 auto; }
+.flow-panel .panel__header { height: 29px; }
+.desk-window { display: flex; margin-left: auto; }
+.desk-window button { padding: 2px 6px; font-family: var(--font-mono); font-size: 10px; }
+.desk-window button[aria-pressed='true'] { color: var(--text); background: var(--bg-3); }
+.flow-panel__body { padding: 9px 12px 10px; }
+.flow-panel__context { display: flex; justify-content: space-between; gap: 6px; font-size: 9px; color: var(--text-2); }
+.flow-panel__delta { display: flex; align-items: baseline; gap: 10px; margin: 8px 0; font-size: 10px; color: var(--text-2); }
+.flow-panel__delta strong { font: 600 20px/24px var(--font-mono); letter-spacing: -.5px; font-variant-numeric: tabular-nums; }
+.flow-panel__delta > :last-child { margin-left: auto; font-variant-numeric: tabular-nums; font-size: 9px; }
+.flow-panel [data-side='buy'], .flow-panel .is-buy { color: var(--accent-bright); }
+.flow-panel [data-side='sell'], .flow-panel .is-sell { color: var(--sell-bright, var(--sell)); }
+.flow-panel__balance { height: 3px; background: var(--sell); overflow: hidden; }
+.flow-panel__balance > span { display: block; height: 100%; background: var(--accent); }
+.flow-panel__facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 10px 0 0; }
+.flow-panel__facts dt { font-size: 9px; color: var(--text-2); white-space: nowrap; }
+.flow-panel__facts dd { font: 11px/18px var(--font-mono); margin: 0; font-variant-numeric: tabular-nums; }
+.flow-panel__unknown { grid-column: span 2; }
+.flow-panel__depth { display: flex; justify-content: space-between; gap: 5px; margin: 10px 0 5px; font-size: 9px; color: var(--text-2); }
+.flow-panel__depth > :last-child { font-family: var(--font-mono); }
+.flow-panel__balance--depth { height: 2px; opacity: .75; }
+.flow-panel__depth-values { display: flex; justify-content: space-between; margin-top: 4px; font: 10px/15px var(--font-mono); color: var(--text-2); }
+.flow-panel__note { font-size: 9px; color: var(--warn); margin-top: 7px; }
+@media (max-width: 950px) { .desk-toolbar { gap: 8px; padding-inline: 7px; } .desk-toolbar__performance { display: none; } .desk-channel > span { display: none; } }
+@media (max-width: 850px) { .workspace > .pane-resizer { display: none; } .app[data-desk-root] .right-rail { flex-basis: 220px; } .flow-panel__body { padding: 7px; } .flow-panel__facts { grid-template-columns: repeat(2, minmax(0, 1fr)); } .flow-panel__depth { flex-wrap: wrap; } }
+@media (max-height: 700px) { .flow-panel__depth, .flow-panel__balance--depth, .flow-panel__depth-values { display: none; } .right-rail > .watchlist { max-height: 95px; } .flow-panel__body { padding-block: 6px; } .flow-panel__delta { margin-block: 4px; } }

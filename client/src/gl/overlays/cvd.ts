@@ -29,14 +29,23 @@ export interface CvdPoint {
 export class Cvd {
   /** Absolute col_seq → session-cumulative CVD. */
   private readonly values = new Map<number, number>();
+  private revision = 0;
+  private cached: { revision: number; lo: number; hi: number; points: CvdPoint[] } | null = null;
 
   /** Record / refresh a column's cumulative CVD at its absolute col_seq. */
   add(bar: BarColumn): void {
-    if (Number.isFinite(bar.cvd_cum)) this.values.set(bar.col_seq, bar.cvd_cum);
+    if (Number.isFinite(bar.cvd_cum) && this.values.get(bar.col_seq) !== bar.cvd_cum) {
+      this.values.set(bar.col_seq, bar.cvd_cum);
+      this.revision++;
+    }
   }
 
   get size(): number {
     return this.values.size;
+  }
+
+  get dataRevision(): number {
+    return this.revision;
   }
 
   /** Drop columns outside `[oldest-pad, newest+pad]` (bounds memory to the window). */
@@ -44,12 +53,14 @@ export class Cvd {
     const lo = oldest - pad;
     const hi = newest + pad;
     for (const seq of this.values.keys()) {
-      if (seq < lo || seq > hi) this.values.delete(seq);
+      if (seq < lo || seq > hi) { this.values.delete(seq); this.revision++; }
     }
   }
 
   reset(): void {
     this.values.clear();
+    this.revision++;
+    this.cached = null;
   }
 
   /** CVD value at a column (for tests / readouts), or NaN. */
@@ -69,6 +80,7 @@ export class Cvd {
   series(loCol: number, hiCol: number): CvdPoint[] {
     const lo = Math.ceil(loCol);
     const hi = Math.floor(hiCol);
+    if (this.cached?.revision === this.revision && this.cached.lo === lo && this.cached.hi === hi) return this.cached.points;
     const out: CvdPoint[] = [];
     for (const [c, v] of this.values) {
       if (c < lo || c > hi) continue;
@@ -76,6 +88,7 @@ export class Cvd {
       out.push({ col: c, cvd: v });
     }
     out.sort((a, b) => a.col - b.col);
+    this.cached = { revision: this.revision, lo, hi, points: out };
     return out;
   }
 }

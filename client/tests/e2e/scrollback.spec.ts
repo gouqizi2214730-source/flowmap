@@ -19,9 +19,9 @@ import { expect, test } from '@playwright/test';
  *       the resident window stays within budget, and OLDER DATA RENDERS
  *       (thermal pixels appear in a viewport that is entirely below the old
  *       resident window);
- *   (B) zooms time out to the whole ring and asserts NO further backfill fires
- *       (deep zoom-out shows the whole extent — it must not re-populate it
- *       full-res);
+ *   (B) zooms time out to the full budget, pans farther back and verifies the
+ *       entire older viewport loads without evicting its visible right edge;
+ *   (C) pans forward again and reloads the evicted recent history;
  *   (C) forces a WebGL context loss (WEBGL_lose_context) and asserts the
  *       renderer recreates its GL objects and renders again, with no permanent
  *       GL error.
@@ -175,30 +175,50 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
   const shot = await page.locator('canvas#gl').screenshot();
   writeFileSync(join(ARTIFACT_DIR, 'scrollback.png'), shot);
 
-  // --- (B) Deep zoom-out (whole ring on screen) must NOT backfill. ------------
+  // --- (B) A full-budget older viewport must still reload its depth. ---------
   const reqBeforeZoom = afterBackfill.history.requestCount;
   const zoomState = await page.evaluate(() => {
     const r = (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer;
-    // Zoom time out to the whole ring, then pan hard left.
-    let guard = 0;
-    while (r.viewSnapshot.colScale < r.residentBudgetCols && guard++ < 40) r.zoomTimeForTest(1.6);
-    r.panColumnsForTest(-r.residentBudgetCols);
-    return { span: r.viewSnapshot.colScale, budget: r.residentBudgetCols };
+    const start = 64;
+    const budget = r.residentBudgetCols;
+    const v = r.viewSnapshot;
+    r.setViewForTest(start, budget, v.rowOffset, v.rowScale);
+    return { start, end: start + budget - 1, span: r.viewSnapshot.colScale, budget };
   });
   expect(zoomState.span, 'time-zoomed out to the whole ring').toBeGreaterThanOrEqual(
     zoomState.budget,
   );
-  // Give a few frames for any (suppressed) backfill to (not) fire.
-  await page.waitForTimeout(1000);
+  await page.waitForFunction(({start, end}) => {
+    const r = window.__flowmapLive!.renderer;
+    const range = r.residentRange();
+    return range && range.oldest <= start && range.newest >= end && r.validFromSeq <= start && !r.historyStats()?.inFlight;
+  }, zoomState, { timeout: 30_000 });
   const reqAfterZoom = await page.evaluate(
     () => (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer.historyStats().requestCount,
   );
   expect(
     reqAfterZoom,
-    'deep zoom-out must not trigger full-res backfill of the whole extent',
-  ).toBe(reqBeforeZoom);
+    'the full-budget older viewport loads real depth',
+  ).toBeGreaterThan(reqBeforeZoom);
+  expect((await readStats()).thermal).toBeGreaterThan(MIN_THERMAL_PIXELS);
 
-  // --- (C) WebGL context loss → recover and render again. ---------------------
+  // --- (C) Manual forward pan reloads the recent region evicted by (B). -----
+  const forward = await page.evaluate(budget => {
+    const r = window.__flowmapLive!.renderer;
+    const end = r.newestColSeq - 64;
+    const start = end - budget + 1;
+    const v = r.viewSnapshot;
+    r.setViewForTest(start, budget, v.rowOffset, v.rowScale);
+    return { start, end };
+  }, BUDGET);
+  await page.waitForFunction(({start, end}) => {
+    const r = window.__flowmapLive!.renderer;
+    const range = r.residentRange();
+    return range && range.oldest <= start && range.newest >= end && r.validFromSeq <= start && !r.historyStats()?.inFlight;
+  }, forward, { timeout: 30_000 });
+  expect((await readStats()).thermal).toBeGreaterThan(MIN_THERMAL_PIXELS);
+
+  // --- (D) WebGL context loss → recover and render again. ---------------------
   const restoredBefore = await page.evaluate(
     () => (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer.contextRestoredCount,
   );

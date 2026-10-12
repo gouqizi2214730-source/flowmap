@@ -51,7 +51,7 @@ export class GexOverlay {
       label: string,
     ): void => {
       if (!Number.isFinite(price) || price <= 0) return;
-      const rowf = gm.priceToRow(price) + 0.5;
+      const rowf = gm.priceEventToRow(price);
       const y = gm.clipY(rowf);
       if (y < -1.02 || y > 1.02) return;
 

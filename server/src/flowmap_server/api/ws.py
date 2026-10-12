@@ -137,6 +137,11 @@ class _Connection:
         # Positive = client clock ahead. 0.0 until a Subscribe carries one.
         self.clock_skew_ms = 0.0
         self._last_recv_ns = time.monotonic_ns()
+        self._history_generation = 0
+        self._history_work: asyncio.Task[bytes] | None = None
+        self._history_response: asyncio.Task[None] | None = None
+        self._history_pending: tuple[Session, int, events.HistoryRequest] | None = None
+        self._closed = False
 
     def _conn_stats(self) -> dict[str, float]:
         """Per-connection latency/skew for the Status-broadcast seam.
@@ -236,6 +241,8 @@ class _Connection:
         except WebSocketDisconnect:
             pass
         finally:
+            self._closed = True
+            self._invalidate_history()
             for t in tasks:
                 t.cancel()
             # Retrieve cancellations AND any send-vs-close race the loops
@@ -263,9 +270,80 @@ class _Connection:
                 return
 
     async def _drop_session(self) -> None:
+        self._invalidate_history()
         if self._session is not None:
             await self._manager.unsubscribe(self._session, self._client)
             self._session = None
+
+    def _invalidate_history(self) -> None:
+        """Cancel delivery immediately, let an already-running disk worker drain.
+
+        Cancelling to_thread does not stop its thread. Shield the core operation
+        so its overview lock remains held until aggregation really finishes;
+        another zoom must not launch concurrent workers against that cache.
+        """
+        self._history_generation += 1
+        self._history_pending = None
+        response, self._history_response = self._history_response, None
+        if response is not None:
+            response.cancel()
+        if self._history_work is not None:
+            self._drain_history(self._history_work)
+
+    def _queue_history(self, req: events.HistoryRequest) -> None:
+        session = self._session
+        if session is None or self._closed:
+            return
+        pending = session, self._history_generation, req
+        if self._history_work is not None:
+            # One active worker and one coalesced pending request per socket.
+            # Native and overview loaders may overlap; hostile request bursts
+            # cannot create an unbounded queue of multi-MiB disk operations.
+            self._history_pending = pending
+            return
+        self._start_history(*pending)
+
+    def _start_history(self, session: Session, generation: int, req: events.HistoryRequest) -> None:
+        if self._closed or session is not self._session or generation != self._history_generation:
+            return
+        work = asyncio.create_task(session.handle_history_async(req), name="ws-history-work")
+        self._history_work = work
+        self._history_response = asyncio.create_task(
+            self._deliver_history(work, session, generation), name="ws-history-response",
+        )
+        work.add_done_callback(self._history_done)
+
+    def _history_done(self, work: asyncio.Task[bytes]) -> None:
+        # Retrieve failures even if subscription replacement cancelled delivery.
+        if not work.cancelled():
+            work.exception()
+        self._drain_history(work)
+
+    def _drain_history(self, work: asyncio.Task[bytes]) -> None:
+        if work is not self._history_work or not work.done() or self._history_response is not None:
+            return
+        self._history_work = None
+        pending, self._history_pending = self._history_pending, None
+        if pending is not None:
+            self._start_history(*pending)
+
+    async def _deliver_history(self, work: asyncio.Task[bytes], session: Session, generation: int) -> None:
+        try:
+            frame = await asyncio.shield(work)
+            async with self._send_lock:
+                # Check AFTER acquiring the send lock: a new Hello can have
+                # replaced the subscription while this response waited to send.
+                if self._closed or session is not self._session or generation != self._history_generation:
+                    return
+                await asyncio.wait_for(self._ws.send_bytes(frame), SEND_TIMEOUT_S)
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.warning("history response failed; connection kept", exc_info=True)
+        finally:
+            if self._history_response is asyncio.current_task():
+                self._history_response = None
+            self._drain_history(work)
 
     # -- dispatch --------------------------------------------------------------
 
@@ -311,10 +389,9 @@ class _Connection:
             if self._session is None:
                 logger.debug("HistoryRequest before Subscribe: ignored")
             else:
-                # One pre-encoded frame ((EpochStarts +) HistoryResponse),
-                # sent directly — history must not contend with the live
-                # queue's lag-drop accounting.
-                await self._send(self._session.handle_history(ev))
+                # Keep receiving Pong/Subscribe while the disk worker runs.
+                # Its pre-encoded response bypasses live lag-drop accounting.
+                self._queue_history(ev)
         elif isinstance(ev, events.Pong):
             rtt_ns = time.monotonic_ns() - ev.echo_ns
             self.latency_ms = rtt_ns / 2 / 1e6

@@ -10,7 +10,9 @@ function makeFrame() {
     price: { p0: 100, step: 0.5 },
     dims: { cssW: 1000, cssH: 800 },
     priceToRow: (p: number) => (p - 100) / 0.5,
-    clipY: (_row: number) => 0.2,
+    // A nonlinear event projection distinct from affine priceToRow.
+    priceEventToRow: (p: number) => Math.log2(p / 100) * 100,
+    clipY: (row: number) => row / 800,
     cssY: (row: number) => 800 - row,
   };
   const frame = {
@@ -67,6 +69,10 @@ describe('GexOverlay (FLOW <GO>)', () => {
     expect(textCalls.some((t) => t.text.includes('CALL WALL'))).toBe(true);
     expect(textCalls.some((t) => t.text.includes('PUT WALL'))).toBe(true);
     expect(textCalls.some((t) => t.text.includes('GAMMA FLIP'))).toBe(true);
+    // Badge and GL line must use the same projected row, not the affine row.
+    const callRow = Math.log2(sample.call_wall / 100) * 100;
+    expect(lineCalls[0].y).toBeCloseTo(callRow / 800);
+    expect(textCalls[0].y).toBeCloseTo(800 - callRow);
   });
 
   it('honors setEnabled(false)', () => {

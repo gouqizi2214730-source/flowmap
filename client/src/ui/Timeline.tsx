@@ -155,7 +155,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
     if (tl.timeBase) {
       const { anchorSeq, anchorT0Ns, dtNs } = tl.timeBase;
       toNs = (col: number): bigint =>
-        anchorT0Ns + BigInt(Math.round((col - anchorSeq) * dtNs));
+        r?.timestampAtColumn?.(col) ?? anchorT0Ns + BigInt(Math.round((col - anchorSeq) * dtNs));
       extent = { startNs: toNs(tl.oldestSeq), endNs: toNs(tl.newestSeq) };
     }
     // How far the right edge trails the newest column, as HH:MM:SS. "Behind"

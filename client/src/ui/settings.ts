@@ -27,7 +27,7 @@
 
 import { DEFAULT_CONTRAST, DEFAULT_TOLERANCE } from '../gl/heatmap';
 import { DEFAULT_COLORMAP, type Colormap } from '../gl/lut';
-import { DEFAULT_PERCENTILE } from '../gl/normalize';
+import { DEFAULT_WHITE_PERCENTILE } from '../gl/normalize';
 import {
   DEFAULT_OVERLAY_VISIBILITY,
   type OverlayVisibility,
@@ -167,11 +167,8 @@ export const DEFAULT_SETTINGS: FlowMapSettings = {
   contrast: DEFAULT_CONTRAST,
   tolerance: DEFAULT_TOLERANCE,
   colormap: DEFAULT_COLORMAP,
-  // p97, not p99: on the heavy-tailed density the p99 white point leaves the
-  // median cell at ~2% of norm — below the default black point — so the ladder
-  // vanishes on first launch. p97 halves the white point and the field shows.
-  // Pinned to normalize.ts DEFAULT_PERCENTILE so the two can never drift.
-  normPercentile: DEFAULT_PERCENTILE,
+  // The slider owns the WHITE endpoint; the renderer coordinates the p97 knee.
+  normPercentile: DEFAULT_WHITE_PERCENTILE,
   tickGrouping: 1,
   bubbleMinSize: 0,
   // Off by default: the tape's rolling p90 emphasis already marks relative
@@ -201,6 +198,7 @@ export interface StorageLike {
 }
 
 function clampNumber(v: unknown, lo: number, hi: number, fallback: number): number {
+  if (typeof v !== 'number' && (typeof v !== 'string' || v.trim() === '')) return fallback;
   const n = typeof v === 'number' ? v : Number(v);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(hi, Math.max(lo, n));
@@ -233,7 +231,7 @@ export function normalizeSettings(raw: unknown): FlowMapSettings {
           ? (o.colormap as Colormap)
           : DEFAULT_COLORMAP
         : 'theme',
-    normPercentile: clampNumber(o.normPercentile, 50, 100, DEFAULT_SETTINGS.normPercentile),
+    normPercentile: Math.round(clampNumber(o.normPercentile, 80, 100, DEFAULT_SETTINGS.normPercentile) * 10) / 10,
     tickGrouping: Math.round(clampNumber(o.tickGrouping, 1, 16, DEFAULT_SETTINGS.tickGrouping)),
     bubbleMinSize: clampNumber(o.bubbleMinSize, 0, 1e9, DEFAULT_SETTINGS.bubbleMinSize),
     bigTradeUsd: clampNumber(o.bigTradeUsd, 0, 1e9, DEFAULT_SETTINGS.bigTradeUsd),

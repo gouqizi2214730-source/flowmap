@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import tempfile
+from unittest.mock import AsyncMock
 import pytest
 
 from flowmap_server.core.gex import OptionContract, calculate_gex, bs_gamma
 from flowmap_server.data.warehouse import DuckWarehouse
-from flowmap_server.feeds.darkpool import DarkPoolCollector
 from flowmap_server.feeds.contracts import DefenseContractsListener
 from flowmap_server.feeds.capitol import CapitolTradesWatcher
 from flowmap_server.feeds.aviation import CorporateJetTracker
@@ -69,16 +69,20 @@ def test_edgar_risk_diff() -> None:
     delta = compute_risk_delta(prev_text, curr_text)
     assert delta["added_count"] == 1
     assert len(delta["critical_flags"]) > 0
-    assert delta["is_material_change"] is True
+    assert delta["has_keyword_matches"] is True
+    assert delta["materiality_assessed"] is False
+    assert delta["is_material_change"] is False
 
 
 def test_vocal_stress_scorer() -> None:
     calm = compute_vocal_stress_score(f0_mean=130.0, f0_std=18.0, jitter_pct=0.8, shimmer_pct=2.1, pause_ratio=0.10)
-    assert calm["classification"] == "CALM_CONFIDENT"
+    assert calm["classification"] == "HEURISTIC_LOW"
+    assert calm["validated"] is False
     assert calm["stress_score"] < 0.40
 
     stressed = compute_vocal_stress_score(f0_mean=155.0, f0_std=60.0, jitter_pct=2.8, shimmer_pct=6.5, pause_ratio=0.45)
-    assert stressed["classification"] == "SEVERE_EVASION_WARNING"
+    assert stressed["classification"] == "HEURISTIC_HIGH"
+    assert stressed["validated"] is False
     assert stressed["stress_score"] >= 0.70
 
     qa = analyze_transcript_qa_segment(
@@ -86,41 +90,72 @@ def test_vocal_stress_scorer() -> None:
         question="Can you explain the sudden decline in gross margins?",
         answer="Well, we hope and believe that at this time potentially as far as I know the situation is temporary.",
     )
-    assert qa["stress_score"] > 0.40
+    assert qa["stress_score"] is None
+    assert qa["metrics"] is None
+    assert qa["hedge_phrase_count"] == 5
 
 
 @pytest.mark.asyncio
-async def test_feeds_offline_fallbacks() -> None:
-    # Contracts
+@pytest.mark.parametrize("source_response", ["empty", "error"])
+async def test_unavailable_feeds_never_persist_fabricated_data(monkeypatch, source_response) -> None:
+    class Response:
+        status = 200
+        async def __aenter__(self):
+            if source_response == "error":
+                raise OSError("offline")
+            return self
+        async def __aexit__(self, *_):
+            return False
+        async def json(self, **_):
+            return []
+
+    class Session:
+        def get(self, *_, **__):
+            return Response()
+        def post(self, *_, **__):
+            return Response()
+
+    # Real warehouse makes accidental inserts observable; no test performs HTTP.
     with tempfile.TemporaryDirectory() as tmpdir:
         wh = DuckWarehouse(f"{tmpdir}/wh.duckdb")
         listener = DefenseContractsListener(wh)
+        monkeypatch.setattr(listener, "_get_session", AsyncMock(return_value=Session()))
         awards = await listener.fetch_recent_contracts()
-        assert len(awards) > 0
+        assert awards == []
         await listener.close()
 
         # Capitol
         capitol = CapitolTradesWatcher(wh)
+        monkeypatch.setattr(capitol, "_get_session", AsyncMock(return_value=Session()))
         trades = await capitol.fetch_recent_trades()
-        assert len(trades) > 0
+        assert trades == []
         await capitol.close()
 
         # Aviation
-        aero = CorporateJetTracker()
+        aero = CorporateJetTracker(verified_registry={
+            "abcdef": {"symbol": "TEST", "company": "Test fixture", "tail": "TEST-1"},
+        })
+        monkeypatch.setattr(aero, "_get_session", AsyncMock(return_value=Session()))
         flights = await aero.check_aircraft_states()
-        assert len(flights) > 0
+        assert flights == []
         await aero.close()
 
         # Headcount
         hc = HeadcountVelocityTracker()
+        monkeypatch.setattr(hc, "_get_session", AsyncMock(return_value=Session()))
         talent = await hc.fetch_company_headcount("PLTR")
-        assert talent["total_openings"] > 0
+        assert talent["total_openings"] is None
+        assert talent["talent_index_delta_pct"] is None
         await hc.close()
 
         # Macro
-        macro = MacroStressPoller(warehouse=wh)
+        macro = MacroStressPoller(api_key="test-key", warehouse=wh)
+        monkeypatch.setattr(macro, "_get_session", AsyncMock(return_value=Session()))
         stress = await macro.compute_current_stress()
-        assert stress["stress_score"] >= 0.0
+        assert stress["stress_score"] is None
+        assert stress["status"] == "UNAVAILABLE"
         await macro.close()
 
+        assert wh.get_intelligence() == []
+        assert wh._con.execute("SELECT count(*) FROM macro_stress").fetchone()[0] == 0
         wh.close()

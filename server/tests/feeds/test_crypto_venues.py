@@ -67,7 +67,7 @@ ENGINE_NATIVE = {
     "okx",
     "superchain",
 }
-EXPECTED_NATIVE = {"binance", "bybit", "coinbase", "deribit", "okx"}
+EXPECTED_NATIVE = {"binance", "bybit", "coinbase", "deribit", "okx", "bitfinex", "kraken", "dydx"}
 
 
 def _feed(market: str) -> CryptoFeed:
@@ -84,7 +84,7 @@ def _feed(market: str) -> CryptoFeed:
         ("binance-usdm", ("binance", "usdm")),
         ("bybit-linear", ("bybit", "linear")),
         ("okx", ("okx", "")),
-        ("kraken", ("kraken", "")),
+        ("kucoin", ("kucoin", "")),
         # Venue ids use "_" precisely so the "-" partition stays unambiguous.
         ("base_onchain", ("base_onchain", "")),
         ("gmx_synthetix", ("gmx_synthetix", "")),
@@ -113,7 +113,7 @@ def test_venue_sets_are_the_engines_not_a_shortlist() -> None:
         ("binance", True),
         ("binance-usdm", True),
         ("okx", True),
-        ("kraken", True),  # ccxt-only
+        ("kucoin", True),  # ccxt-only
         # Reachable by the engine, but not an order-flow view — excluded from
         # the venue set so the router cannot build a feed that claims L2.
         ("base_onchain", False),
@@ -138,7 +138,7 @@ def test_is_crypto_market(market: str, expected: bool) -> None:
         ("binance-spot", True, "L2"),
         ("okx", True, "L2"),
         ("deribit", True, "L2"),
-        ("kraken", False, "L2-snapshot"),
+        ("kucoin", False, "L2-snapshot"),
         ("kucoin", False, "L2-snapshot"),
     ],
 )
@@ -174,7 +174,7 @@ def test_depth_capability_tracks_native(market: str, native: bool, depth: str) -
         ("coinbase", ["gap"]),
         # A snapshot-driven venue has no sequence to lose and no liquidation
         # topic, so it claims neither marker.
-        ("kraken", []),
+        ("kucoin", []),
         ("kucoin", []),
     ],
 )
@@ -186,7 +186,7 @@ def test_marker_capability_is_per_venue_and_per_segment(
 
 def test_gap_marker_is_claimed_exactly_when_native() -> None:
     """The gap marker is a claim about sequence detection, not a decoration."""
-    for market in ("binance-usdm", "okx", "kraken", "kucoin", "gate"):
+    for market in ("binance-usdm", "okx", "kucoin", "kucoin", "gate"):
         feed = _feed(market)
         assert ("gap" in feed.capability["markers"]) is feed.native
 
@@ -195,7 +195,7 @@ def test_gap_marker_is_claimed_exactly_when_native() -> None:
 
 
 def test_ccxt_channels_do_not_double_spend_or_ask_for_a_dead_topic() -> None:
-    channels = _feed("kraken")._channels()
+    channels = _feed("kucoin")._channels()
     # book_delta and book_snapshot are answered from the SAME ccxt
     # fetch/watch_order_book call — asking for both doubles the rate-limit cost
     # for identical records.
@@ -234,7 +234,7 @@ def test_channels_and_capability_never_disagree_about_liquidation() -> None:
     channel names the venues reject, claim nothing.
     """
     for market in ("binance-usdm", "binance-spot", "bybit-linear", "bybit-option",
-                   "okx", "deribit", "coinbase", "kraken"):
+                   "okx", "deribit", "coinbase", "kucoin"):
         feed = _feed(market)
         claimed = "liquidation" in feed.capability["markers"]
         subscribed = "liquidation" in feed._channels()
@@ -267,7 +267,7 @@ def test_native_connector_kwargs(market: str, expected: dict[str, object]) -> No
     assert _feed(market)._connector_kwargs() == expected
 
 
-@pytest.mark.parametrize("market", ["kraken", "kucoin", "gate"])
+@pytest.mark.parametrize("market", ["kucoin", "kucoin", "gate"])
 def test_ccxt_connector_kwargs_ask_for_websockets(market: str) -> None:
     kwargs = _feed(market)._connector_kwargs()
     # Stream where the venue supports it; ccxt.pro degrades to REST polling on
@@ -279,9 +279,9 @@ def test_ccxt_connector_kwargs_ask_for_websockets(market: str) -> None:
 
 
 def test_a_ccxt_venue_with_a_segment_still_gets_no_segment_kwarg() -> None:
-    """A user can type ``kraken-spot``; the segment is display-only there."""
-    feed = _feed("kraken-spot")
-    assert feed.market == "kraken-spot"
+    """A user can type ``kucoin-spot``; the segment is display-only there."""
+    feed = _feed("kucoin-spot")
+    assert feed.market == "kucoin-spot"
     assert feed._connector_kwargs() == {"use_ws": True, "book_depth": 100}
 
 
@@ -402,7 +402,7 @@ async def _collect(feed: CryptoFeed) -> list[FeedEvent]:
 
 @pytest.mark.parametrize(
     ("market", "expect_gaps"),
-    [("binance-usdm", 2), ("kraken", 0)],
+    [("binance-usdm", 2), ("kucoin", 0)],
 )
 async def test_feed_wires_snapshot_driven_from_native(
     market: str, expect_gaps: int

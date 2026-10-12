@@ -5,6 +5,7 @@ import {
   isUsableHybrid,
   makeHybrid,
   priceToRow,
+  priceToPlotRow,
   rowToPrice,
   stepAtRow,
   scaleFromEpoch,
@@ -52,6 +53,14 @@ function btc(): HybridScale {
 }
 
 describe('linear scale — must stay bit-identical to the old inlined affine', () => {
+  it('keeps uniform cell centres but plots hybrid prices without a false price shift', () => {
+    expect(priceToPlotRow(LINEAR, 120)).toBe(40.5);
+    const scale = btc();
+    for (const price of [500, 50000, 60000, 75000, 100000, 650000]) {
+      expect(rowToPrice(scale, priceToPlotRow(scale, price))).toBeCloseTo(price, 6);
+    }
+  });
+
   it('maps rows to prices exactly as `p0 + row * step`', () => {
     expect(rowToPrice(LINEAR, 0)).toBe(100);
     expect(rowToPrice(LINEAR, 40)).toBe(120);

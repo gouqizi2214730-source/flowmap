@@ -353,3 +353,110 @@ describe('TimeMap.slots — piecewise ts⇄col (CP2, survey S2 D1)', () => {
     expect(slotTsToCol(slots, 1_000n)).toBe(100);
   });
 });
+
+describe('sparse overview timestamp knots', () => {
+  const base = 1_780_000_000_000_000_000n;
+  const slots: TimeSlots = {
+    startSeq: 8192,
+    stride: 256,
+    t0: Float64Array.from([
+      Number(base),
+      Number(base + 120_000_000_000n),
+      Number(base + 126_400_000_000n),
+      Number(base + 132_800_000_000n),
+    ]),
+  };
+
+  it('places each timestamp knot at its original global column', () => {
+    for (let i = 0; i < slots.t0.length; i++) {
+      const col = slots.startSeq + i * slots.stride!;
+      const timestamp = BigInt(Math.round(slots.t0[i]));
+      expect(slotColToTsNs(slots, col)).toBe(timestamp);
+      expect(slotTsToCol(slots, timestamp)).toBe(col);
+    }
+  });
+
+  it('interpolates original columns across the reconstructed/live cadence seam', () => {
+    expect(slotColToTsNs(slots, 8192 + 128)).toBe(base + 60_000_000_000n);
+    expect(slotTsToCol(slots, base + 60_000_000_000n)).toBe(8192 + 128);
+    expect(slotColToTsNs(slots, 8448 + 128)).toBe(base + 123_200_000_000n);
+    expect(slotTsToCol(slots, base + 123_200_000_000n)).toBe(8448 + 128);
+    for (const col of [8192, 8300.5, 8447.5, 8448, 8448.5, 8500, 8704, 8960]) {
+      const ts = slotColToTsNs(slots, col)!;
+      expect(slotTsToCol(slots, ts)).toBeCloseTo(col, 4);
+    }
+  });
+
+  it('has the same out-of-range contract as dense timestamp knots', () => {
+    expect(slotColToTsNs(slots, 8191)).toBeNull();
+    expect(slotColToTsNs(slots, 8961)).toBeNull();
+    expect(slotTsToCol(slots, base - 1_000_000n)).toBeNull();
+    expect(slotTsToCol(slots, base + 133_000_000_000n)).toBeNull();
+  });
+
+  it('can be normalized to local group coordinates without changing time labels', () => {
+    const local: TimeSlots = { startSeq: slots.startSeq / 256, stride: 1, t0: slots.t0 };
+    for (const col of [8192, 8300.5, 8448, 8500, 8960]) {
+      expect(slotColToTsNs(local, col / 256)).toBe(slotColToTsNs(slots, col));
+      const ts = slotColToTsNs(slots, col)!;
+      expect(slotTsToCol(local, ts)! * 256).toBeCloseTo(slotTsToCol(slots, ts)!, 6);
+    }
+  });
+
+  it('ignores invalid strides so GridMap falls back to its epoch affine', () => {
+    for (const stride of [0, -1, NaN, Infinity]) {
+      const bad = { ...slots, stride };
+      expect(slotColToTsNs(bad, 8448)).toBeNull();
+      expect(slotTsToCol(bad, base)).toBeNull();
+    }
+  });
+});
+
+describe('explicit timestamp columns preserve every real run across gaps', () => {
+  const base = 1_780_000_000_000_000_000n;
+  const slots: TimeSlots = {
+    startSeq: 0,
+    cols: Float64Array.from([0, 1, 3, 4]),
+    t0: Float64Array.from([Number(base), Number(base + 1_000_000_000n), Number(base + 19_000_000_000n), Number(base + 19_250_000_000n)]),
+  };
+
+  it('maps all real knots including the run after a missing density bucket', () => {
+    for (let i = 0; i < slots.t0.length; i++) {
+      const col = slots.cols![i];
+      const ts = BigInt(Math.round(slots.t0[i]));
+      expect(slotColToTsNs(slots, col)).toBe(ts);
+      expect(slotTsToCol(slots, ts)).toBe(col);
+    }
+  });
+
+  it('interpolates the clock across gaps without falling back to the current live cadence', () => {
+    expect(slotColToTsNs(slots, 2)).toBe(base + 10_000_000_000n);
+    expect(slotTsToCol(slots, base + 10_000_000_000n)).toBe(2);
+    const time: TimeMap = { anchorSeq: 4, anchorT0Ns: base + 19_250_000_000n, dtNs: 250_000_000, slots };
+    const map = new GridMap(view, dims, time, price);
+    expect(map.colToTsNs(3)).toBe(base + 19_000_000_000n);
+    expect(map.tsToCol(base + 1_000_000_000n)).toBe(1);
+    for (const col of [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4]) {
+      expect(map.tsToCol(map.colToTsNs(col)!)).toBeCloseTo(col, 4);
+    }
+  });
+
+  it('normalizes explicit global columns to overview groups while retaining timestamps', () => {
+    const original: TimeSlots = { ...slots, stride: 256, cols: Float64Array.from(slots.cols!, col => col * 256) };
+    for (const col of [0, 0.5, 1, 2, 3, 3.5, 4]) {
+      expect(slotColToTsNs(original, col * 256)).toBe(slotColToTsNs(slots, col));
+      const ts = slotColToTsNs(slots, col)!;
+      expect(slotTsToCol(original, ts)! / 256).toBeCloseTo(slotTsToCol(slots, ts)!, 6);
+    }
+  });
+
+  it('uses the affine outside explicit knots and rejects malformed coordinate tables', () => {
+    expect(slotColToTsNs(slots, -1)).toBeNull();
+    expect(slotColToTsNs(slots, 5)).toBeNull();
+    expect(slotTsToCol(slots, base - 1_000_000n)).toBeNull();
+    for (const cols of [Float64Array.from([0, 1]), Float64Array.from([4, 3, 1, 0])]) {
+      expect(slotColToTsNs({ ...slots, cols }, 1)).toBeNull();
+      expect(slotTsToCol({ ...slots, cols }, base)).toBeNull();
+    }
+  });
+});

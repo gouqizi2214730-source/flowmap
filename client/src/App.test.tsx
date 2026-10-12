@@ -108,6 +108,15 @@ afterEach(() => {
 });
 
 describe('App integration smoke', () => {
+  it('applies a price-band change to the active subscription without a GL renderer', () => {
+    const { container } = mountApp();
+    expect(container.querySelector('[data-testid="gl-fallback"]')).not.toBeNull();
+    const before = useFlowMapStore.getState().subscription!;
+    click(container.querySelector('[data-testid="settings-open"]')!);
+    click(container.querySelector('[data-testid="priceBand-wide"]')!);
+    expect(useFlowMapStore.getState().subscription).toEqual({ ...before, band: 'wide' });
+  });
+
   it('mounts the full chart overlay stack (GL → indicators → drawings → alerts) with no throw', () => {
     const { container } = mountApp();
     // Shell chrome

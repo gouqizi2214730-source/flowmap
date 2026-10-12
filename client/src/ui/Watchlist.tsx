@@ -21,6 +21,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { subscribeQuotes } from '../state/quoteFeed';
+import { bookSessionKey, getSnapshot, subscribe, type BookSnapshot } from '../state/bookStore';
+import { useFlowMapStore } from '../state/store';
 import {
   WATCHLIST_CAP,
   addToWatchlist,
@@ -34,6 +36,7 @@ import { loadRecents } from './recents';
 import { fmtPct, fmtPrice, sparkDirection, sparkPath } from './spark';
 import { useIntelligenceStore } from '../state/intelligenceStore';
 import '../watchlist/watchlist.css';
+import './TradingPanels.css';
 
 /**
  * Structural view of the frozen P2 quote payload (C1's `Quote`). Kept locally
@@ -58,6 +61,31 @@ export interface WatchlistProps {
 
 const SPARK_W = 64;
 const SPARK_H = 16;
+const LIVE_QUOTE_INTERVAL_MS = 100;
+export const LIVE_QUOTE_STALE_MS = 5_000;
+
+interface ActiveWatchQuote {
+  sessionKey: string;
+  price: number;
+  source: 'live-mid' | 'live-last';
+  receivedAtMs: number;
+  stale: boolean;
+}
+
+/** Raw BBO midpoint; grouped book rungs are deliberately never a quote source. */
+export function activeWatchQuote(snap: BookSnapshot, sessionKey: string): ActiveWatchQuote | null {
+  if (snap.sessionKey !== sessionKey) return null;
+  const bbo = snap.bbo;
+  if (bbo && bbo.bidPx > 0 && bbo.askPx >= bbo.bidPx
+    && Number.isFinite(bbo.askPx) && typeof bbo.receivedAtMs === 'number') {
+    return { sessionKey, price: bbo.bidPx + (bbo.askPx - bbo.bidPx) / 2,
+      source: 'live-mid', receivedAtMs: bbo.receivedAtMs, stale: false };
+  }
+  const last = snap.trades[0];
+  if (!last || last.venue === 'sim' || !(last.price > 0) || !Number.isFinite(last.price)
+    || typeof last.receivedAtMs !== 'number') return null;
+  return { sessionKey, price: last.price, source: 'live-last', receivedAtMs: last.receivedAtMs, stale: false };
+}
 
 /** `crypto:BTCUSDT` → `BTCUSDT` (labels are the symbol half). */
 export function symbolOf(key: string): string {
@@ -84,13 +112,14 @@ export function quoteDirection(q: WatchQuote | undefined): 'up' | 'down' | 'flat
 
 /** Price text: em-dash when absent OR unreachable — never a fabricated number. */
 export function quotePriceText(q: WatchQuote | undefined): string {
-  if (!q || q.reachable === false) return '—';
+  if (!q || q.reachable === false || typeof q.price !== 'number' || !Number.isFinite(q.price) || q.price <= 0) return '—';
   return fmtPrice(q.price);
 }
 
 /** Change text, same honesty rule as {@link quotePriceText}. */
 export function quoteChangeText(q: WatchQuote | undefined): string {
-  if (!q || q.reachable === false) return '—';
+  if (quotePriceText(q) === '—') return '—';
+  if (!q) return '—';
   return fmtPct(q.changePct);
 }
 
@@ -105,6 +134,59 @@ function browserStorage(): Storage | null {
 export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element {
   const watchKeys = useWatchlist();
   const [quotes, setQuotes] = useState<Record<string, WatchQuote>>({});
+  const [activeQuote, setActiveQuote] = useState<ActiveWatchQuote | null>(null);
+  const subscription = useFlowMapStore((s) => s.subscription);
+  const sessionKey = useFlowMapStore(bookSessionKey);
+  const status = useFlowMapStore((s) => s.status);
+  const feedState = useFlowMapStore((s) => s.feedState);
+  const liveEligible = activeKey === `${subscription?.market}:${subscription?.symbol}`
+    && subscription?.market !== 'sim' && subscription?.mode === 'live'
+    && status === 'live' && feedState !== 'closed' && watchKeys.includes(activeKey);
+
+  // Local display bridge only. The shared HTTP cache/alert monitor never sees it.
+  // Coalesce the <=60Hz book notifications into at most ten price updates/sec.
+  useEffect(() => {
+    setActiveQuote(null);
+    if (!liveEligible) return undefined;
+    let updateTimer: ReturnType<typeof setTimeout> | null = null;
+    let staleTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastPublished = -Infinity;
+    let sessionVersion = getSnapshot().sessionVersion;
+    const publish = (): void => {
+      updateTimer = null;
+      lastPublished = performance.now();
+      const quote = activeWatchQuote(getSnapshot(), sessionKey);
+      if (staleTimer !== null) clearTimeout(staleTimer);
+      staleTimer = null;
+      if (quote) {
+        quote.stale = performance.now() - quote.receivedAtMs >= LIVE_QUOTE_STALE_MS;
+        if (!quote.stale) {
+          staleTimer = setTimeout(() => {
+            setActiveQuote((prev) => prev ? { ...prev, stale: true } : null);
+          }, Math.max(0, LIVE_QUOTE_STALE_MS - (performance.now() - quote.receivedAtMs)));
+        }
+      }
+      setActiveQuote((prev) => prev?.price === quote?.price && prev?.source === quote?.source
+        && prev?.receivedAtMs === quote?.receivedAtMs && prev?.stale === quote?.stale ? prev : quote);
+    };
+    const off = subscribe((snap) => {
+      if (snap.sessionVersion !== sessionVersion) {
+        sessionVersion = snap.sessionVersion;
+        // A reset is safety metadata, not a price update; clear immediately.
+        setActiveQuote(null);
+      }
+      if (updateTimer !== null) return;
+      const wait = LIVE_QUOTE_INTERVAL_MS - (performance.now() - lastPublished);
+      if (wait <= 0) publish();
+      else updateTimer = setTimeout(publish, wait);
+    });
+    publish();
+    return () => {
+      off();
+      if (updateTimer !== null) clearTimeout(updateTimer);
+      if (staleTimer !== null) clearTimeout(staleTimer);
+    };
+  }, [liveEligible, sessionKey]);
 
   const empty = watchKeys.length === 0;
   const full = watchKeys.length >= WATCHLIST_CAP;
@@ -197,12 +279,17 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
       ) : (
         <ul className="watchlist__body">
           {watchKeys.map((key) => {
-            const q = quotes[key];
+            const live = key === activeKey && liveEligible && activeQuote?.sessionKey === sessionKey ? activeQuote : null;
+            const network = quotes[key];
+            const q = live ? { ...network, price: live.price, stale: live.stale, reachable: true,
+              changePct: network?.reachable === false ? null : network?.changePct } : network;
+            const source = live?.source ?? (q ? 'snapshot' : 'none');
             const dir = quoteDirection(q);
             const stale = q?.stale === true;
             const unreachable = q?.reachable === false;
+            const available = quotePriceText(q) !== '—';
             const d =
-              q && !unreachable && q.spark && q.spark.length > 1
+              q && available && q.spark && q.spark.length > 1
                 ? sparkPath(q.spark, SPARK_W, SPARK_H)
                 : '';
             return (
@@ -227,6 +314,7 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
                 title={key}
                 data-testid={`watchlist-row-${key}`}
                 data-key={key}
+                data-source={source}
               >
                 <button
                   type="button"
@@ -241,7 +329,14 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
                 >
                   ★
                 </button>
-                <span className="watchlist__sym">{symbolOf(key)}</span>
+                <span className="watchlist__identity">
+                  <span className="watchlist__sym">{symbolOf(key)}</span>
+                  <span className="watchlist__source" data-testid={`watchlist-source-${key}`}
+                    title={live ? 'Active stream quote; daily change and sparkline remain HTTP snapshots'
+                      : 'Shared HTTP quote snapshot, refreshed every 10 seconds'}>
+                    {source === 'live-mid' ? 'LIVE MID' : source === 'live-last' ? 'LIVE LAST' : 'SNAPSHOT'}
+                  </span>
+                </span>
                 <svg
                   className="watchlist__spark"
                   width={SPARK_W}
@@ -254,12 +349,14 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
                 <span
                   className={`watchlist__px${unreachable ? ' is-empty' : ''}`}
                   data-testid={`watchlist-price-${key}`}
+                  data-raw-price={quotePriceText(q) === '—' ? undefined : q?.price ?? undefined}
                 >
                   {quotePriceText(q)}
                 </span>
                 <span
                   className={`watchlist__chg is-${dir}`}
                   data-testid={`watchlist-change-${key}`}
+                  title="Daily change from the shared quote snapshot"
                 >
                   {quoteChangeText(q)}
                 </span>
@@ -269,7 +366,7 @@ export function Watchlist({ activeKey, onSelect }: WatchlistProps): JSX.Element 
                   const jet = corporateJets.some((j) => j.symbol === s && j.isMaHub);
                   return (
                     <>
-                      {t && (
+                      {t && Number.isFinite(t.talentDeltaPct) && Number.isFinite(t.rdOpenings) && (
                         <span
                           className={`watchlist__chip watchlist__talent is-${t.talentDeltaPct >= 0 ? 'pos' : 'neg'}`}
                           title={`Talent Velocity: ${t.talentDeltaPct >= 0 ? '+' : ''}${t.talentDeltaPct.toFixed(1)}% R&D Openings (${t.rdOpenings} listings)`}

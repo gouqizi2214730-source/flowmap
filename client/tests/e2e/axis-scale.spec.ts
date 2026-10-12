@@ -46,6 +46,7 @@ async function bootLive(page: Page): Promise<string[]> {
   });
   page.on('pageerror', (e) => consoleErrors.push(String(e)));
   await page.goto('/?spy=1');
+  await expect(page.getByTestId('chart-startup-gate')).toBeHidden({ timeout: 45_000 });
   await page.waitForFunction(
     () => {
       const live = (window as unknown as { __flowmapLive?: any }).__flowmapLive;
@@ -147,6 +148,9 @@ test('§9 price gutter scales price like TradingView, and never touches time', a
   expect((await follow(page)).priceFollow, 'a click never claims the axis').toBe('track');
 
   // --- (c) a vertical drag scales price, leaving time alone ------------------
+  // Freeze automatic time fitting so newly arriving live columns cannot widen
+  // the time viewport independently during the measured price gesture.
+  await page.evaluate(() => window.__flowmapLive!.renderer.setFollowTime(false));
   await settleTimeFrame(page);
   const preDrag = await view(page);
   await page.mouse.move(cx, cy - 60);
@@ -157,6 +161,7 @@ test('§9 price gutter scales price like TradingView, and never touches time', a
   expect(postDrag.rowScale, 'dragging DOWN compresses the price axis')
     .toBeGreaterThan(preDrag.rowScale * 1.05);
   expect(postDrag.colScale, 'a gutter drag never pans/zooms time').toBe(preDrag.colScale);
+  await page.evaluate(() => window.__flowmapLive!.renderer.setFollowTime(true));
 
   // --- (e) double-click restores auto-fit ------------------------------------
   await page.locator(GUTTER).dblclick({ position: { x: box!.width / 2, y: box!.height / 2 } });

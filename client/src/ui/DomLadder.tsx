@@ -30,7 +30,7 @@
  * fights the GL loop. Epoch geometry + capability are low-frequency store state.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import {
   MODE_L1_BAND,
@@ -39,8 +39,9 @@ import {
   type EpochParams,
 } from '../proto/types';
 import { priceToRow, rowToPrice, scaleFromEpoch, stepAtRow } from '../gl/priceScale';
-import { subscribe, getSnapshot, type BookSnapshot } from '../state/bookStore';
+import { subscribe, getSnapshot, bookSessionKey, type BookSnapshot } from '../state/bookStore';
 import { useFlowMapStore } from '../state/store';
+import './TradingPanels.css';
 
 /** Row height in CSS px — must match `.ladder__row` height in App.css. */
 const ROW_H = 17;
@@ -119,8 +120,12 @@ export function ladderShape(tier: DepthTier | null, bookMode: number | null): La
  * so a pathological step cannot print an absurd fixed-point string.
  */
 export function priceDecimals(step: number): number {
-  if (!(step > 0)) return 2;
-  return Math.min(12, Math.max(0, Math.ceil(-Math.log10(step))));
+  if (!(step > 0) || !Number.isFinite(step)) return 2;
+  for (let decimals = 0; decimals < 12; decimals++) {
+    const scaled = step * 10 ** decimals;
+    if (scaled >= 1 && Math.abs(scaled - Math.round(scaled)) < 1e-8) return decimals;
+  }
+  return 12;
 }
 
 function clampRow(r: number, rows: number): number {
@@ -132,6 +137,13 @@ function clampRow(r: number, rows: number): number {
   if (r < 0) return 0;
   if (r > rows - 1) return rows - 1;
   return r;
+}
+
+/** Match NumPy rint in the server's depth binning, including half-to-even. */
+export function depthBucket(row: number): number {
+  const lo = Math.floor(row), fraction = row - lo;
+  if (Math.abs(fraction - 0.5) <= 1e-7) return lo % 2 === 0 ? lo : lo + 1;
+  return Math.round(row);
 }
 
 /**
@@ -149,8 +161,8 @@ function deriveQuotes(
   const rows = params.rows;
   const bbo = snap.bbo;
   if (bbo && shape !== 'profile') {
-    const bestBidRow = clampRow(Math.round(priceToRow(scale, bbo.bidPx)), rows);
-    const bestAskRow = clampRow(Math.round(priceToRow(scale, bbo.askPx)), rows);
+    const bestBidRow = clampRow(depthBucket(priceToRow(scale, bbo.bidPx)), rows);
+    const bestAskRow = clampRow(depthBucket(priceToRow(scale, bbo.askPx)), rows);
     const midRow = priceToRow(scale, (bbo.bidPx + bbo.askPx) / 2);
     // Both sides of a BBO are real — honest spread from the quoted prices.
     return { bestBidRow, bestAskRow, midRow, spread: bbo.askPx - bbo.bidPx };
@@ -231,10 +243,8 @@ export function buildLadder(
 
   const center = centerOverride ?? midRow ?? (nrows - 1) / 2;
   const centerInt = Math.round(center);
-  // Decimals from the row height WHERE THE LADDER IS, not a global step: on a
-  // non-uniform grid a wing row is worth hundreds of ticks and printing 8
-  // decimals there is noise, while the core still gets full precision.
-  const decimals = priceDecimals(stepAtRow(scale, centerInt));
+  // Quote/tape precision remains the venue precision, even in grouped depth.
+  const decimals = priceDecimals(params.tick);
   const half = Math.floor(Math.max(1, visRows) / 2);
 
   const out: LadderRowVM[] = [];
@@ -305,7 +315,7 @@ export function DomLadder(): JSX.Element {
   const capability = useFlowMapStore((s) => s.capability);
   const epochs = useFlowMapStore((s) => s.epochs);
   const gridEpoch = useFlowMapStore((s) => s.gridEpoch);
-  const symbol = useFlowMapStore((s) => s.subscription?.symbol ?? null);
+  const sessionKey = useFlowMapStore(bookSessionKey);
   const status = useFlowMapStore((s) => s.status);
   const feedState = useFlowMapStore((s) => s.feedState);
   const [snap, setSnap] = useState<BookSnapshot>(() => getSnapshot());
@@ -313,7 +323,8 @@ export function DomLadder(): JSX.Element {
   const [locked, setLocked] = useState(false);
   const [visRows, setVisRows] = useState(DEFAULT_LADDER_ROWS);
   const bodyRef = useRef<HTMLDivElement>(null);
-  const frozenCenterRef = useRef<number | null>(null);
+  const [centerPrice, setCenterPrice] = useState<number | null>(null);
+  const wheelHandlerRef = useRef<(e: WheelEvent) => void>(() => {});
 
   useEffect(() => subscribe(setSnap), []);
 
@@ -327,21 +338,22 @@ export function DomLadder(): JSX.Element {
     });
     ro.observe(el);
     return () => ro.disconnect();
-  }, []);
+  }, [collapsed]);
 
-  const params = snap.book ? epochs.get(snap.book.epoch) : undefined;
+  const params = epochs.get(snap.book?.epoch ?? gridEpoch ?? -1);
   const bookMode = snap.book ? snap.book.mode : null;
   const tier = depthTier(capability, bookMode);
   const shape = ladderShape(tier, bookMode);
-  const scale = params ? scaleFromEpoch(params) : null;
+  const scale = useMemo(() => params ? scaleFromEpoch(params) : null, [params]);
   // The lock pins a PRICE, not a row: re-anchor to a row against the CURRENT
   // epoch each render, so a mid-stream p0/step change keeps the same price
   // centered instead of drifting to a stale row index.
   const centerOverride =
-    locked && frozenCenterRef.current !== null && scale !== null
-      ? priceToRow(scale, frozenCenterRef.current)
+    locked && centerPrice !== null && scale !== null
+      ? priceToRow(scale, centerPrice)
       : null;
-  const model = buildLadder(snap, params, shape, visRows, centerOverride);
+  const model = useMemo(() => buildLadder(snap, params, shape, visRows, centerOverride),
+    [snap, params, shape, visRows, centerOverride]);
 
   // The rendered window's center row is the middle of the returned rungs (the
   // window is always odd-length, centered on the mid or the locked row). The
@@ -352,19 +364,35 @@ export function DomLadder(): JSX.Element {
   const midOffsetPx =
     model.midRow !== null && centerRow !== null ? -(model.midRow - centerRow) * ROW_H : null;
 
-  // Track the live mid AS A PRICE so locking freezes at the current center.
-  useEffect(() => {
-    if (!locked && model.midRow !== null && params) {
-      frozenCenterRef.current = rowToPrice(scale!, model.midRow);
-    }
-  });
-
-  // A grid re-anchor (new epoch geometry) or a symbol switch invalidates any
-  // pinned price — drop the lock and return to follow-mid.
+  // A session switch drops the pin; a grid re-anchor keeps its actual price.
   useEffect(() => {
     setLocked(false);
-    frozenCenterRef.current = null;
-  }, [gridEpoch, symbol]);
+    setCenterPrice(null);
+  }, [sessionKey]);
+
+  useLayoutEffect(() => {
+    wheelHandlerRef.current = (e: WheelEvent): void => {
+      if (!locked || !scale || !params || centerPrice === null || e.deltaY === 0) return;
+      e.preventDefault();
+      const amount = e.deltaMode === 1 ? Math.abs(e.deltaY) : Math.abs(e.deltaY) / ROW_H;
+      const rungs = Math.max(1, Math.min(12, Math.round(amount)));
+      const row = clampRow(priceToRow(scale, centerPrice) - Math.sign(e.deltaY) * rungs, params.rows);
+      if (row >= 0) setCenterPrice(rowToPrice(scale, row));
+    };
+  }, [locked, scale, params, centerPrice]);
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const onWheel = (event: WheelEvent): void => wheelHandlerRef.current(event);
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [collapsed]);
+
+  const totals = useMemo(() => model.rows.reduce((sum, row) => ({
+    bid: sum.bid + (Number.isFinite(row.bidSz) && row.bidSz > 0 ? row.bidSz : 0),
+    ask: sum.ask + (Number.isFinite(row.askSz) && row.askSz > 0 ? row.askSz : 0),
+  }), { bid: 0, ask: 0 }), [model.rows]);
 
   const badge = tier ?? 'N/A';
   // Class-safe token: `tier.toLowerCase()` yields 'l2'/'l1'/'synth' (and 'na'
@@ -415,22 +443,45 @@ export function DomLadder(): JSX.Element {
         </span>
         {spreadTicks !== null && (
           <span className="panel__spread" data-testid="ladder-spread">
-            spr {model.spread!.toFixed(model.priceDecimals)}
+            spr {snap.bbo ? '' : '≈'}{model.spread!.toFixed(model.priceDecimals)}
             {spreadTicks > 0 ? ` (${spreadTicks}t)` : ''}
+          </span>
+        )}
+        {params && scale && model.midRow !== null && (
+          <span className="panel__resolution" data-testid="ladder-resolution"
+            title="Depth quantities are grouped over this price interval. Inside quotes and tape retain the exchange tick.">
+            Δ {stepAtRow(scale, Math.floor(model.midRow)).toFixed(priceDecimals(params.tick))}
           </span>
         )}
         <button
           type="button"
           className={`panel__lock${locked ? ' is-on' : ''}`}
+          disabled={model.midRow === null}
           aria-pressed={locked}
           title={locked ? 'center locked — click to follow mid' : 'following mid — click to lock'}
-          onClick={() => setLocked((v) => !v)}
+          onClick={() => {
+            if (!locked && model.midRow !== null && scale) setCenterPrice(rowToPrice(scale, model.midRow));
+            setLocked((v) => !v);
+          }}
           data-testid="ladder-lock"
         >
           {locked ? 'LOCKED' : 'FOLLOW'}
         </button>
+        <button type="button" className="panel__lock ladder__center" data-testid="ladder-center"
+          disabled={model.midRow === null}
+          title="Center on the current midpoint and follow the market"
+          onClick={() => { setLocked(false); setCenterPrice(null); }}>CENTER</button>
       </header>
       {!collapsed && (
+        <>
+        {model.rows.length > 0 && tier !== 'SYNTH' && shape !== 'profile' && (
+          <div className="ladder__summary" data-testid="ladder-totals"
+            title="Sum of sizes on the displayed grouped rungs only; not the full book">
+            <span>Visible Σ</span><span className="ladder__total-bid">B {fmtSz(totals.bid) || '0'}</span>
+            <span className="ladder__total-ask">A {fmtSz(totals.ask) || '0'}</span>
+            <span className="ladder__browse">{locked ? 'wheel to browse' : 'following mid'}</span>
+          </div>
+        )}
         <div className="ladder__body" ref={bodyRef} data-testid="ladder-body">
           {model.rows.length === 0 ? (
             <div className="panel__empty">{emptyMsg}</div>
@@ -453,6 +504,7 @@ export function DomLadder(): JSX.Element {
                   data-testid="ladder-row"
                   data-row={r.row}
                   data-price={r.price.toFixed(model.priceDecimals)}
+                  title={scale ? `${rowToPrice(scale, r.row - 0.5).toFixed(model.priceDecimals)} – ${rowToPrice(scale, r.row + 0.5).toFixed(model.priceDecimals)}: grouped resting size` : undefined}
                   data-bid={r.bidSz.toFixed(4)}
                   data-ask={r.askSz.toFixed(4)}
                 >
@@ -462,11 +514,7 @@ export function DomLadder(): JSX.Element {
                         className={`ladder__bar ladder__bar--profile${r.profilePct > 0 ? '' : ' is-empty'}`}
                         style={{ width: `${r.profilePct}%` }}
                       />
-                      {/* Keyed by the size VALUE: a quantity change remounts the span,
-                          which replays the CSS `ladder-flash` animation — a change
-                          indicator that costs no rAF/timer and stays silent while a
-                          level is unchanged (reduced-motion turns it off in CSS). */}
-                      <span key={r.profileSz} className="ladder__sz">
+                      <span className="ladder__sz">
                         {fmtSz(r.profileSz)}
                       </span>
                     </div>
@@ -477,7 +525,7 @@ export function DomLadder(): JSX.Element {
                           className={`ladder__bar ladder__bar--bid${r.bidPct > 0 ? '' : ' is-empty'}`}
                           style={{ width: `${r.bidPct}%` }}
                         />
-                        <span key={r.bidSz} className="ladder__sz">
+                        <span className="ladder__sz">
                           {fmtSz(r.bidSz)}
                         </span>
                       </div>
@@ -487,7 +535,7 @@ export function DomLadder(): JSX.Element {
                           className={`ladder__bar ladder__bar--ask${r.askPct > 0 ? '' : ' is-empty'}`}
                           style={{ width: `${r.askPct}%` }}
                         />
-                        <span key={r.askSz} className="ladder__sz">
+                        <span className="ladder__sz">
                           {fmtSz(r.askSz)}
                         </span>
                       </div>
@@ -499,6 +547,7 @@ export function DomLadder(): JSX.Element {
             </>
           )}
         </div>
+        </>
       )}
     </section>
   );

@@ -35,8 +35,8 @@ export interface DarkPoolData {
 export interface SecDiffData {
   id: string;
   symbol: string;
-  filingType: string;
-  filedDate: string;
+  filingType?: string;
+  filedDate?: string;
   title: string;
   addedLines: string[];
   removedLines: string[];
@@ -58,35 +58,35 @@ export interface VocalStressData {
 export interface ContractData {
   id: string;
   symbol: string;
-  awardId: string;
-  recipient: string;
-  agency: string;
-  amount: number;
-  date: string;
+  awardId?: string;
+  recipient?: string;
+  agency?: string;
+  amount?: number;
+  date?: string;
   description: string;
 }
 
 export interface CapitolTradeData {
   id: string;
   symbol: string;
-  politician: string;
-  chamber: 'Senate' | 'House';
-  transactionType: 'Purchase' | 'Sale';
-  amountRange: string;
-  committee: string;
-  date: string;
+  politician?: string;
+  chamber?: 'Senate' | 'House';
+  transactionType?: 'Purchase' | 'Sale';
+  amountRange?: string;
+  committee?: string;
+  date?: string;
 }
 
 export interface CorporateJetData {
   id: string;
   symbol: string;
-  tailNumber: string;
-  icao24: string;
-  origin: string;
-  destination: string;
-  hubName: string;
-  isMaHub: boolean;
-  date: string;
+  tailNumber?: string;
+  icao24?: string;
+  origin?: string;
+  destination?: string;
+  hubName?: string;
+  isMaHub?: boolean;
+  date?: string;
 }
 
 export interface TalentData {
@@ -101,11 +101,26 @@ export interface MacroStressData {
   sofrRate: number;
   hySpreadBps: number;
   yieldCurve10Y2Y: number;
-  stressRegime: 'NORMAL' | 'ELEVATED' | 'SEVERE';
+  stressRegime: 'NORMAL' | 'ELEVATED' | 'SEVERE' | 'UNKNOWN';
+  /** Preserve the received status instead of inferring a normal regime. */
+  status?: string;
+  stressScore?: number;
   updatedAt: number;
 }
 
 export type IntelTab = 'DOCS' | 'GOV' | 'FLOW' | 'GEO';
+
+/** The wire record is retained even when no supported structured detail exists. */
+export interface IntelligenceEvent {
+  id: string;
+  symbol: string;
+  kind: string;
+  headline: string;
+  detail: string;
+  source: string;
+  tsNs: bigint;
+  amountUsd?: number;
+}
 
 export interface IntelligenceState {
   drawerOpen: boolean;
@@ -118,7 +133,8 @@ export interface IntelligenceState {
   capitolTrades: CapitolTradeData[];
   corporateJets: CorporateJetData[];
   talent: Record<string, TalentData>;
-  macro: MacroStressData;
+  macro: MacroStressData | null;
+  events: IntelligenceEvent[];
 
   // Actions
   setDrawerOpen: (open: boolean, tab?: IntelTab) => void;
@@ -415,9 +431,8 @@ const SEED_MACRO: MacroStressData = {
   updatedAt: Date.now(),
 };
 
-export const useIntelligenceStore = create<IntelligenceState>((set, get) => ({
-  drawerOpen: false,
-  activeTab: 'DOCS',
+/** Synthetic fixtures only. Never insert these into live state or chart overlays. */
+export const DEMO_INTELLIGENCE = {
   gex: SEED_GEX,
   darkPool: SEED_DARK_POOL,
   secDiffs: SEED_SEC_DIFFS,
@@ -427,6 +442,47 @@ export const useIntelligenceStore = create<IntelligenceState>((set, get) => ({
   corporateJets: SEED_JETS,
   talent: SEED_TALENT,
   macro: SEED_MACRO,
+};
+
+function finite(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function text(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value : undefined;
+}
+
+function strings(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+function detailObject(detail: string): Record<string, unknown> {
+  try {
+    const value: unknown = JSON.parse(detail);
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? value as Record<string, unknown>
+      : {};
+  } catch {
+    // Plain text is part of the wire contract, not an ingestion error.
+    return {};
+  }
+}
+
+let nextEventId = 0;
+
+export const useIntelligenceStore = create<IntelligenceState>((set, get) => ({
+  drawerOpen: false,
+  activeTab: 'DOCS',
+  gex: {},
+  darkPool: {},
+  secDiffs: [],
+  vocalStress: [],
+  contracts: [],
+  capitolTrades: [],
+  corporateJets: [],
+  talent: {},
+  macro: null,
+  events: [],
 
   setDrawerOpen: (open, tab) =>
     set({ drawerOpen: open, ...(tab ? { activeTab: tab } : {}) }),
@@ -440,9 +496,13 @@ export const useIntelligenceStore = create<IntelligenceState>((set, get) => ({
   setActiveTab: (tab) => set({ activeTab: tab }),
 
   ingestGex: (update) => {
+    if (!update || !text(update.symbol) ||
+      ![update.spot_price, update.net_gex, update.call_wall, update.put_wall, update.gamma_flip].every(finite) ||
+      update.spot_price <= 0 || update.call_wall < 0 || update.put_wall < 0 || update.gamma_flip < 0) return;
+    const symbol = update.symbol.trim().toUpperCase();
     set((state) => {
       const g = {
-        symbol: update.symbol,
+        symbol,
         spotPrice: update.spot_price,
         netGex: update.net_gex,
         callWall: update.call_wall,
@@ -451,103 +511,116 @@ export const useIntelligenceStore = create<IntelligenceState>((set, get) => ({
         updatedAt: Date.now(),
       };
       return {
-        gex: { ...state.gex, [update.symbol]: g },
+        gex: { ...state.gex, [symbol]: g },
       };
     });
   },
 
   ingestMacro: (update) => {
+    if (!update || typeof update.ts_ns !== 'bigint' || update.ts_ns < 0n ||
+      ![update.sofr, update.hy_spread, update.yield_10y2y, update.stress_score].every(finite) ||
+      update.hy_spread < 0 || !finite(update.hy_spread * 100) ||
+      update.stress_score < 0 || update.stress_score > 1 || !text(update.status)) return;
+    const status = update.status.trim().toUpperCase();
     set({
       macro: {
-        sofrRate: update.sofr_rate,
-        hySpreadBps: update.hy_spread_bps,
-        yieldCurve10Y2Y: update.yield_curve_10y2y,
+        sofrRate: update.sofr,
+        // The wire carries a percentage spread; the UI shows basis points.
+        hySpreadBps: update.hy_spread * 100,
+        yieldCurve10Y2Y: update.yield_10y2y,
         stressRegime:
-          update.stress_regime === 'severe'
+          status === 'SEVERE' || status === 'SEVERE_STRESS'
             ? 'SEVERE'
-            : update.stress_regime === 'elevated'
+            : status === 'ELEVATED'
               ? 'ELEVATED'
-              : 'NORMAL',
+              : status === 'NORMAL' || status === 'NORMAL_LIQUIDITY' ? 'NORMAL' : 'UNKNOWN',
+        status: update.status,
+        stressScore: update.stress_score,
         updatedAt: Date.now(),
       },
     });
   },
 
   ingestIntel: (intel) => {
-    try {
-      const payload = typeof intel.payload === 'string' ? JSON.parse(intel.payload) : intel.payload;
-      if (intel.category === 'sec_diff' && payload) {
-        set((s) => ({
-          secDiffs: [
-            {
-              id: `live-${Date.now()}`,
-              symbol: intel.symbol,
-              filingType: payload.filing_type ?? '10-Q Item 1A',
-              filedDate: 'Just now',
-              title: payload.title ?? 'Updated Risk Disclosures',
-              addedLines: payload.added_lines ?? [],
-              removedLines: payload.removed_lines ?? [],
-              criticalTriggers: payload.critical_triggers ?? [],
-            },
-            ...s.secDiffs,
-          ].slice(0, 30),
-        }));
-      } else if (intel.category === 'defense_contract' && payload) {
-        set((s) => ({
-          contracts: [
-            {
-              id: `live-${Date.now()}`,
-              symbol: intel.symbol,
-              awardId: payload.award_id ?? 'USA-AWARD',
-              recipient: payload.recipient ?? intel.symbol,
-              agency: payload.agency ?? 'US Department of Defense',
-              amount: payload.amount ?? 0,
-              date: new Date().toISOString().slice(0, 10),
-              description: payload.description ?? intel.headline,
-            },
-            ...s.contracts,
-          ].slice(0, 30),
-        }));
-      } else if (intel.category === 'capitol_trade' && payload) {
-        set((s) => ({
-          capitolTrades: [
-            {
-              id: `live-${Date.now()}`,
-              symbol: intel.symbol,
-              politician: payload.politician ?? 'Congress Member',
-              chamber: payload.chamber === 'Senate' ? 'Senate' : 'House',
-              transactionType: payload.type === 'Sale' ? 'Sale' : 'Purchase',
-              amountRange: payload.amount_range ?? '$50,000 - $100,000',
-              committee: payload.committee ?? 'Standing Committee',
-              date: new Date().toISOString().slice(0, 10),
-            },
-            ...s.capitolTrades,
-          ].slice(0, 30),
-        }));
-      } else if (intel.category === 'jet_flight' && payload) {
-        set((s) => ({
-          corporateJets: [
-            {
-              id: `live-${Date.now()}`,
-              symbol: intel.symbol,
-              tailNumber: payload.tail_number ?? 'N-CORP',
-              icao24: payload.icao24 ?? 'ICAO',
-              origin: payload.origin ?? 'Origin',
-              destination: payload.destination ?? 'Dest',
-              hubName: payload.hub_name ?? 'Financial Hub',
-              isMaHub: payload.is_ma_hub ?? true,
-              date: new Date().toISOString().slice(0, 10),
-            },
-            ...s.corporateJets,
-          ].slice(0, 30),
-        }));
-      }
-    } catch (e) {
-      console.warn('[flowmap] intel ingest parse error', e);
+    if (!intel || !text(intel.symbol) || !text(intel.kind) || typeof intel.headline !== 'string' ||
+      typeof intel.detail !== 'string' || typeof intel.source !== 'string' ||
+      typeof intel.ts_ns !== 'bigint' || intel.ts_ns < 0n ||
+      (intel.amount_usd != null && (!finite(intel.amount_usd) || intel.amount_usd < 0))) return;
+    const symbol = intel.symbol.trim().toUpperCase();
+    const id = `received-${intel.ts_ns}-${++nextEventId}`;
+    const payload = detailObject(intel.detail);
+    const event: IntelligenceEvent = {
+      id, symbol, kind: intel.kind, headline: intel.headline, detail: intel.detail,
+      source: intel.source, tsNs: intel.ts_ns,
+      ...(finite(intel.amount_usd) ? { amountUsd: intel.amount_usd } : {}),
+    };
+    set((s) => ({ events: [event, ...s.events].slice(0, 100) }));
+    if (intel.kind === 'sec_diff') {
+      set((s) => ({
+        secDiffs: [
+          {
+            id, symbol,
+            filingType: text(payload.filing_type),
+            filedDate: text(payload.filed_date),
+            title: text(payload.title) ?? intel.headline,
+            addedLines: strings(payload.added_lines),
+            removedLines: strings(payload.removed_lines),
+            criticalTriggers: strings(payload.critical_triggers),
+          },
+          ...s.secDiffs,
+        ].slice(0, 30),
+      }));
+    } else if (intel.kind === 'defense_contract') {
+      set((s) => ({
+        contracts: [
+          {
+            id, symbol,
+            awardId: text(payload.award_id),
+            recipient: text(payload.recipient),
+            agency: text(payload.agency),
+            amount: event.amountUsd,
+            date: text(payload.date),
+            description: text(payload.description) ?? intel.headline,
+          },
+          ...s.contracts,
+        ].slice(0, 30),
+      }));
+    } else if (intel.kind === 'capitol') {
+      set((s) => ({
+        capitolTrades: [
+          {
+            id, symbol,
+            politician: text(payload.politician),
+            chamber: payload.chamber === 'Senate' ? 'Senate' as const : payload.chamber === 'House' ? 'House' as const : undefined,
+            transactionType: payload.type === 'Sale' ? 'Sale' as const : payload.type === 'Purchase' ? 'Purchase' as const : undefined,
+            amountRange: text(payload.amount_range),
+            committee: text(payload.committee),
+            date: text(payload.date),
+          },
+          ...s.capitolTrades,
+        ].slice(0, 30),
+      }));
+    } else if (intel.kind === 'jet_flight') {
+      set((s) => ({
+        corporateJets: [
+          {
+            id, symbol,
+            tailNumber: text(payload.tail_number),
+            icao24: text(payload.icao24),
+            origin: text(payload.origin),
+            destination: text(payload.destination),
+            hubName: text(payload.hub_name),
+            isMaHub: typeof payload.is_ma_hub === 'boolean' ? payload.is_ma_hub : undefined,
+            date: text(payload.date),
+          },
+          ...s.corporateJets,
+        ].slice(0, 30),
+      }));
     }
   },
 
   handleStreamMsg: (msg: StreamMsg) => {
+    if (!msg || typeof msg !== 'object') return;
     if (msg.type === MsgType.GEX_UPDATE) {
       get().ingestGex(msg as GexLevelUpdate);
     } else if (msg.type === MsgType.MACRO_STRESS) {

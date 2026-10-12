@@ -69,6 +69,17 @@ export function priceDecimals(step: number): number {
   return Math.min(8, Math.max(0, Math.ceil(-Math.log10(step))));
 }
 
+/** Exact quote precision comes from the venue tick, including ticks such as
+ *  0.25 and sub-nanounit coins. Storage bucket width is never quote precision. */
+export function quoteDecimals(tick: number): number {
+  if (!(tick > 0) || !Number.isFinite(tick)) return 2;
+  for (let decimals = 0; decimals < 12; decimals++) {
+    const scaled = tick * 10 ** decimals;
+    if (scaled >= 1 && Math.abs(scaled - Math.round(scaled)) < 1e-8) return decimals;
+  }
+  return 12;
+}
+
 /** Human time intervals (ns) the time axis snaps to, ascending. */
 const TIME_STEPS_NS: number[] = [
   1e6, // 1 ms
@@ -91,6 +102,11 @@ const TIME_STEPS_NS: number[] = [
   6e11, // 10 min
   1.8e12, // 30 min
   3.6e12, // 1 h
+  7.2e12, // 2 h
+  1.08e13, // 3 h
+  2.16e13, // 6 h
+  4.32e13, // 12 h
+  8.64e13, // 1 day
 ];
 
 /** The smallest human interval whose span gives ≤`targetCount` ticks. */
@@ -99,7 +115,10 @@ export function niceTimeStepNs(spanNs: number, targetCount: number): number {
   for (const s of TIME_STEPS_NS) {
     if (s >= want) return s;
   }
-  return TIME_STEPS_NS[TIME_STEPS_NS.length - 1];
+  // Whole-history windows can span days: a fixed final 1-hour interval
+  // generated dozens of labels regardless of the requested tick count.
+  const dayNs = 8.64e13;
+  return niceStep(want / dayNs) * dayNs;
 }
 
 /** Time ticks (ns) plus the human interval chosen for them (empty ⇒ step 0). */

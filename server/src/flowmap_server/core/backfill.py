@@ -243,7 +243,7 @@ def columns_from_candles(
     # Frame centered on the last close, snapped onto the step grid, so live data
     # continues in this epoch without an immediate re-anchor.
     span = rows * step
-    p0 = round((ref - span / 2.0) / step) * step
+    p0 = max(0.0, round((ref - span / 2.0) / step) * step)
 
     def row_of(px: float) -> int:
         return int(round((px - p0) / step))

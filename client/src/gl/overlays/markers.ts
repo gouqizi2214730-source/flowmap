@@ -57,6 +57,7 @@ const KIND_CODE: Record<MarkerKind, number> = {
   capitol: 8,
   defense_contract: 9,
   clinical: 10,
+  history_metadata_page: 7,
 };
 const CODE_LABEL = ['LIQ', 'HALT', 'LULD', 'GAP', 'BRK', 'LOT', 'ICE', 'INFO', '🏛️ CAPITOL', '🛡️ DOD', '🧪 FDA'];
 /** Kinds rendered as a full-height vertical line rather than a price glyph. */
@@ -209,7 +210,7 @@ export class Markers {
 
       const p = this.price[idx];
       const hasPrice = Number.isFinite(p);
-      const cy = hasPrice ? gm.clipY(gm.priceToRow(p) + 0.5) : 0.94; // near top when no price
+      const cy = hasPrice ? gm.clipY(gm.priceEventToRow(p)) : 0.94; // near top when no price
       if (cy < -1.04 || cy > 1.04) continue;
 
       if (code === KIND_CODE.liquidation) {
@@ -230,7 +231,7 @@ export class Markers {
         // Match the glyph's near-top position when there is no price (glyph
         // draws at clip y 0.94); otherwise cssY(0) maps to grid row 0 (bottom)
         // and the label lands off-canvas.
-        hasPrice ? gm.cssY(gm.priceToRow(p) + 0.5) + 3 : 12,
+        hasPrice ? gm.cssY(gm.priceEventToRow(p)) + 3 : 12,
         code,
         seam,
       );

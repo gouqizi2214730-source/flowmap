@@ -87,11 +87,16 @@ vi.mock('./gl/renderer', () => {
     timeline(): null {
       return null;
     }
+    stats(): { fps: number } { return { fps: 60 }; }
+    overlayPointCss(): null { return null; }
     /** chartMap (MeasureTool/DrawingLayer) reads these every rAF tick. */
     probeAt(): { colSeq: number; row: number } | null {
       return null;
     }
     cellToCanvasCss(col: number, row: number): { x: number; y: number } {
+      return { x: col, y: row };
+    }
+    gridToCanvasCss(col: number, row: number): { x: number; y: number } {
       return { x: col, y: row };
     }
     overlayRowCss(row: number): number {
@@ -204,7 +209,50 @@ afterEach(() => {
   resetIndicatorStoreForTest();
   resetToasts();
   window.localStorage.removeItem(ONBOARDING_KEY);
+  window.history.replaceState(null, '', '/');
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+describe('App startup gate with offline DEV harnesses', () => {
+  const offlineQueries = ['?panels=1', '?perf=1', '?normalize=1', '?overlays=1', '?test=heatmap'];
+
+  it.each(offlineQueries)('keeps injected data reachable in DEV %s', (query) => {
+    vi.stubEnv('DEV', true);
+    window.history.replaceState(null, '', `/${query}`);
+    const container = mountApp();
+    expect(container.querySelector('[data-testid="gl-fallback"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chart-startup-gate"]')).toBeNull();
+  });
+
+  it.each(offlineQueries)('retains the real presentation gate in production %s', (query) => {
+    vi.stubEnv('DEV', false);
+    window.history.replaceState(null, '', `/${query}`);
+    const container = mountApp();
+    expect(container.querySelector('[data-testid="gl-fallback"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chart-startup-gate"]')).not.toBeNull();
+  });
+
+  it.each(['', '?spy=1', '?scrollback=1', '?panels=0', '?perf=true', '?test=other'])(
+    'retains the real presentation gate for a normal/live DEV URL %s', (query) => {
+      vi.stubEnv('DEV', true);
+      // The live spy path wraps the socket; keep this integration test offline.
+      vi.stubGlobal('WebSocket', FakeWebSocket);
+      window.history.replaceState(null, '', `/${query}`);
+      const container = mountApp();
+      expect(container.querySelector('[data-testid="gl-fallback"]')).toBeNull();
+      expect(container.querySelector('[data-testid="chart-startup-gate"]')).not.toBeNull();
+    },
+  );
+
+  it('retains the presentation gate on a normal production launch', () => {
+    vi.stubEnv('DEV', false);
+    window.history.replaceState(null, '', '/');
+    const container = mountApp();
+    expect(container.querySelector('[data-testid="gl-fallback"]')).toBeNull();
+    expect(container.querySelector('[data-testid="chart-startup-gate"]')).not.toBeNull();
+  });
 });
 
 describe('App follow wiring (D1/D4/CP1)', () => {

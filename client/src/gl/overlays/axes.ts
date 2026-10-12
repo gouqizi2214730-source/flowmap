@@ -14,8 +14,8 @@
  */
 
 import {
-  logPriceTickModel,
   priceDecimals,
+  quoteDecimals,
   priceTickModel,
   timeLabelFormatter,
   timeTickModel,
@@ -45,11 +45,49 @@ export const AXIS_TICK_ALPHA = 0.55;
 export const AXIS_TIME_LABEL_SIZE = 10;
 /** Approximate advance width of the mono axis font (JetBrains Mono ≈ 0.6 em). */
 const MONO_ADVANCE_EM = 0.6;
+const TIME_LABEL_GAP_PX = 8;
 
 export interface AxisLabel {
   /** CSS-px position along the gutter (y for price, x for time). */
   pos: number;
   label: string;
+}
+
+/** Shared label boxes match the actual drawing alignment, including edge
+ * labels whose text is clamped inward while their tick stays at its true x. */
+function timeLabelPlacement(label: AxisLabel, index: number, count: number, cssW: number): {
+  x: number; align: CanvasTextAlign; left: number; right: number;
+} {
+  const width = label.label.length * AXIS_TIME_LABEL_SIZE * MONO_ADVANCE_EM;
+  if (index === 0) {
+    const x = Math.max(2, Math.min(label.pos, cssW - 2 - width));
+    return { x, align: 'left', left: x, right: x + width };
+  }
+  if (index === count - 1) {
+    const x = Math.max(2 + width, Math.min(label.pos, cssW - 2));
+    return { x, align: 'right', left: x - width, right: x };
+  }
+  return { x: label.pos, align: 'center', left: label.pos - width / 2, right: label.pos + width / 2 };
+}
+
+function spacedTimeLabels(labels: AxisLabel[], cssW: number): AxisLabel[] {
+  const candidates = labels.filter(label => Number.isFinite(label.pos)
+    && label.label.length * AXIS_TIME_LABEL_SIZE * MONO_ADVANCE_EM <= cssW - 4)
+    .sort((a, b) => a.pos - b.pos);
+  if (candidates.length < 2) return candidates;
+  const first = candidates[0], last = candidates[candidates.length - 1];
+  let edge = timeLabelPlacement(first, 0, candidates.length, cssW).right;
+  const lastLeft = timeLabelPlacement(last, candidates.length - 1, candidates.length, cssW).left;
+  if (edge + TIME_LABEL_GAP_PX > lastLeft) return [first];
+  const out = [first];
+  for (let i = 1; i < candidates.length - 1; i++) {
+    const box = timeLabelPlacement(candidates[i], i, candidates.length, cssW);
+    if (box.left < edge + TIME_LABEL_GAP_PX || box.right + TIME_LABEL_GAP_PX > lastLeft) continue;
+    out.push(candidates[i]);
+    edge = box.right;
+  }
+  out.push(last);
+  return out;
 }
 
 /**
@@ -112,9 +150,10 @@ function localStep(gm: GridMap): number {
  * and the only tick at the top.
  */
 function axisTicks(gm: GridMap, pLo: number, pHi: number): { step: number; ticks: number[] } {
-  const nonUniform = gm.price?.scale !== undefined && gm.price.scale.kind !== 'linear';
-  if (nonUniform && pLo > 0 && pHi / pLo > 1.5) {
-    return { step: 0, ticks: logPriceTickModel(pLo, pHi, PRICE_TARGET).ticks };
+  const scale = gm.price?.scale;
+  if (scale?.kind === 'hybrid') {
+    // Storage-segment boundaries have no bearing on a price-uniform screen.
+    return priceTickModel(pLo, pHi, PRICE_TARGET, scale.coreStep);
   }
   return priceTickModel(pLo, pHi, PRICE_TARGET, localStep(gm) || gm.price!.step);
 }
@@ -136,7 +175,9 @@ export function timeAxisModel(gm: GridMap, cssW: number): AxisLabel[] {
     if (x < -1 || x > cssW + 1) continue;
     out.push({ pos: x, label: fmt(t) });
   }
-  return out;
+  // Irregular recorded cadence and restart gaps can squeeze distant clock
+  // ticks into a few pixels. Filter their projected boxes, never their times.
+  return spacedTimeLabels(out, cssW);
 }
 
 /**
@@ -161,23 +202,11 @@ export function priceTickPositions(gm: GridMap, cssH: number): number[] {
 }
 
 /**
- * Time tick gutter-x positions only (no label strings) — the string-free twin of
- * {@link timeAxisModel}: EXACTLY the labeled time ticks. For
- * {@link drawGridlines}; avoids building/discarding fmtClock strings every
- * dirty frame.
+ * Time tick gutter-x positions only: EXACTLY the collision-filtered labels.
+ * Sharing the layout keeps gridlines and visible labels on the same ticks.
  */
 export function timeTickPositions(gm: GridMap, cssW: number): number[] {
-  if (!gm.hasEvents) return [];
-  const tLo = gm.colToTsNs(gm.view.colOffset);
-  const tHi = gm.colToTsNs(gm.view.colOffset + gm.view.colScale);
-  if (tLo === null || tHi === null) return [];
-  const out: number[] = [];
-  for (const t of timeTickModel(tLo, tHi, TIME_TARGET).ticks) {
-    const x = gm.cssX(gm.tsToCol(t));
-    if (x < -1 || x > cssW + 1) continue;
-    out.push(x);
-  }
-  return out;
+  return timeAxisModel(gm, cssW).map(label => label.pos);
 }
 
 /**
@@ -204,11 +233,10 @@ export function drawPriceAxis(layer: TextLayer, gm: GridMap, last: LastClose | n
     });
   }
   if (last === null || gm.price === null) return;
-  const step = localStep(gm) || gm.price.step;
-  const dec = priceDecimals(step > 0 ? step : gm.price.step);
+  const dec = quoteDecimals(gm.price.tick ?? gm.price.step);
   // Row-cell centre (`+0.5`), matching the price line and its dashed level —
   // the pill must sit on the cell the heatmap paints (survey S2 D3).
-  const y = gm.cssY(gm.priceToRow(last.price) + 0.5);
+  const y = gm.cssY(gm.priceEventToRow(last.price));
   if (y < -8 || y > layer.height + 8) return;
   layer.badge(cssW - 3, Math.min(Math.max(y, 9), layer.height - 9), last.price.toFixed(dec), {
     align: 'right',
@@ -225,21 +253,12 @@ export function drawTimeAxis(layer: TextLayer, gm: GridMap): void {
   layer.clear();
   const cssW = layer.width;
   const model = timeAxisModel(gm, cssW);
-  const last = model.length - 1;
   for (let i = 0; i < model.length; i++) {
     const t = model[i];
     layer.line(t.pos, 0, t.pos, AXIS_TICK_LEN, OVERLAY.axis.css, 1, AXIS_TICK_ALPHA);
     // Clamp the edge labels inward so the first/last time isn't half-clipped by
     // the gutters (the tick mark itself stays at t.pos).
-    let x = t.pos;
-    let align: CanvasTextAlign = 'center';
-    if (i === 0) {
-      align = 'left';
-      x = Math.max(t.pos, 2);
-    } else if (i === last) {
-      align = 'right';
-      x = Math.min(t.pos, cssW - 2);
-    }
+    const { x, align } = timeLabelPlacement(t, i, model.length, cssW);
     layer.text(x, 15, t.label, {
       align,
       baseline: 'alphabetic',

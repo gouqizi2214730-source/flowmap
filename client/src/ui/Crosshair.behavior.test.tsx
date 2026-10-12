@@ -1,0 +1,35 @@
+import { act, createRef } from 'react';
+import { createRoot } from 'react-dom/client';
+import { afterEach, expect, it, vi } from 'vitest';
+import { Crosshair } from './Crosshair';
+import type { CrosshairReadout, Renderer } from '../gl/renderer';
+
+afterEach(() => vi.restoreAllMocks());
+it('uses the latest pointer and refreshes a stationary probe, then stops outside and on teardown', () => {
+  const callbacks = new Map<number, FrameRequestCallback>(); let seq = 0;
+  vi.spyOn(window, 'requestAnimationFrame').mockImplementation(cb => { callbacks.set(++seq, cb); return seq; });
+  vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(id => { callbacks.delete(id); });
+  const canvas = document.createElement('canvas');
+  const canvasRef = createRef<HTMLCanvasElement>(); Object.assign(canvasRef, { current: canvas });
+  const container = document.createElement('div'); const root = createRoot(container);
+  let price = 100, priceDecimals = 2;
+  const probeAt = vi.fn((x: number) => ({ colSeq: x, row: 1, group: 1, price, priceLo: price, priceHi: price, priceDecimals, bid: 1, ask: 2, timeNs: 0n, inRange: true } satisfies CrosshairReadout));
+  const rendererRef = { current: { probeAt } as unknown as Renderer };
+  const pump = (): void => { const pending = [...callbacks.values()]; callbacks.clear(); act(() => pending.forEach(cb => cb(0))); };
+  const move = (x: number): void => { const event = new Event('pointermove'); Object.assign(event, { clientX: x, clientY: 20 }); canvas.dispatchEvent(event); };
+  act(() => root.render(<Crosshair canvasRef={canvasRef} rendererRef={rendererRef} />));
+  move(10); move(30); expect(callbacks.size).toBe(1); pump();
+  expect(probeAt).toHaveBeenLastCalledWith(30, 20);
+  expect(container.querySelector('[data-testid="crosshair-price"]')?.textContent).toBe('100.00');
+  price = 101; pump();
+  expect(container.querySelector('[data-testid="crosshair-price"]')?.textContent).toBe('101.00');
+  price = 103.25; pump();
+  expect(container.querySelector('[data-testid="crosshair-price"]')?.textContent).toBe('103.25');
+  price = .000000112; priceDecimals = 9; pump();
+  expect(container.querySelector('[data-testid="crosshair-price"]')?.textContent).toBe('0.000000112');
+  act(() => canvas.dispatchEvent(new Event('pointerleave')));
+  expect(callbacks.size).toBe(0); expect(container.textContent).toBe('');
+  move(40); expect(callbacks.size).toBe(1);
+  act(() => root.unmount()); expect(callbacks.size).toBe(0);
+  move(50); expect(callbacks.size).toBe(0);
+});

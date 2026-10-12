@@ -74,8 +74,10 @@ async def test_venues_route_carries_the_whole_engine_venue_set() -> None:
     # Native connector vs ccxt-served: the badge the client renders.
     assert by_id["binance"]["native"] is True
     assert by_id["binance"]["depth"] == "L2"
-    assert by_id["kraken"]["native"] is False
-    assert by_id["kraken"]["depth"] == "L2-snapshot"
+    assert by_id["kraken"]["native"] is True
+    assert by_id["kraken"]["depth"] == "L2"
+    assert by_id["kucoin"]["native"] is False
+    assert by_id["kucoin"]["depth"] == "L2-snapshot"
     # Segments only where the connector takes one.
     assert by_id["binance"]["segments"] == ["spot", "usdm", "coinm"]
     assert by_id["bybit"]["segments"] == ["spot", "linear", "inverse", "option"]
@@ -150,11 +152,11 @@ async def test_named_venue_enumerates_live(monkeypatch) -> None:
 
     _patch_symbols(monkeypatch, fake)
     async with _make_client() as c:
-        rows = (await c.get("/api/universe", params={"market": "kraken"})).json()["symbols"]
+        rows = (await c.get("/api/universe", params={"market": "kucoin"})).json()["symbols"]
 
-    assert seen == ["kraken"]
+    assert seen == ["kucoin"]
     assert [s["symbol"] for s in rows] == ["AAAUSD", "BBBUSD", "CCCUSD"]
-    assert all(s["market"] == "kraken" for s in rows)
+    assert all(s["market"] == "kucoin" for s in rows)
     # A ccxt-served venue is badged honestly: whole-book re-read, no gap marker.
     cap = rows[0]["capability"]
     assert cap["depth"] == "L2-snapshot"

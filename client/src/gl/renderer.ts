@@ -35,14 +35,15 @@
  * `webglcontextlost` recreates every GL object and re-fetches the visible range.
  */
 
-import { COLS_PER_TILE, TileRing } from './tileRing';
+import { COLS_PER_TILE, TileRing, type ResidentRange } from './tileRing';
+import { densityForScale } from './columnGeometry';
+import { renderProgramsReady, releaseHeatmapProgram } from './heatmapProgram';
 import {
   DEFAULT_DEPTH_CHANNEL,
   DEFAULT_DISPLAY_GAMMA,
   DEPTH_CHANNEL_CODE,
   Heatmap,
   selectLevel,
-  TOLERANCE_MAX_FLOOR,
   depthChannelOf,
   type DepthChannel,
   type HeatmapView,
@@ -67,6 +68,7 @@ import {
   KILL_TIME,
   KILL_PRICE,
   limitsFor,
+  maxColSpanFor,
   priceFrame,
   screenToGrid,
   type PriceFollow,
@@ -86,6 +88,10 @@ import {
 } from './follow';
 import { ViewportNormalizer } from './normalize';
 import { ColumnCache } from './columnCache';
+import { OverviewSurface } from './overviewSurface';
+import { displayHistoryGap } from './historyGap';
+import { OverviewHistory } from '../net/overviewHistory';
+import { priceOverviewBounds } from './priceOverview';
 import { planDepthColumn, sessionGateOpen } from './sessionGate';
 import {
   attachAxisGestures,
@@ -110,6 +116,7 @@ import {
   type GexLevelUpdate,
 } from '../proto/types';
 import { OverlayManager, type OverlayDrawContext } from './overlays/manager';
+import { quoteDecimals } from './overlays/axisTicks';
 import type { OverlayVisibility } from './overlays/frame';
 import {
   mapScale,
@@ -122,11 +129,18 @@ import {
   type TimeSlots,
 } from './overlays/coords';
 import {
+  priceToPlotRow,
   priceToRow as scalePriceToRow,
   rowToPrice as scaleRowToPrice,
   scaleFromEpoch,
   stepAtRow as scaleStepAtRow,
 } from './priceScale';
+import { fractionRow, rowFraction, projectedRowsPerPixel } from './priceProjection';
+
+function sameNativePrice(a: PriceMap, b: PriceMap): boolean {
+  return a === b || (a.p0 === b.p0 && a.step === b.step && a.tick === b.tick
+    && JSON.stringify(a.scale) === JSON.stringify(b.scale));
+}
 
 /** The renderer only needs the store's imperative surface, not the React hook. */
 interface RendererStore {
@@ -206,19 +220,22 @@ export interface CrosshairReadout {
   ask: number | null;
   /** Column start time (ns) from the cache, or null when not cached. */
   timeNs: bigint | null;
+  /** Time span of an averaged history bucket; absent on full-resolution data. */
+  averageMs?: number;
   /** Whether the cursor is over a resident column and an on-grid row. */
   inRange: boolean;
 }
 
 /**
- * Full-res residency budget (§8.3): 16 384 recent columns = 64 tile layers ×
- * 256 cols. At RG16F (4 B/texel) one column is rows·4 B, so the ring is
- * 16384·rows·4 B — 134 MiB at the sim's 2048 rows, 268 MiB at the production
+ * Full-res residency budget: 6144 recent columns = 24 tile layers ×
+ * 256 cols. At RG32F (8 B/texel) one column is rows·8 B, so the ring is
+ * 6144·rows·8 B — 96 MiB at 2048 rows, 192 MiB at the production
  * 4096-row grid, both ≤ the §10 300 MB GPU-memory gate. Older ranges are not
  * held full-res; scroll-back re-fetches them (net/history) and deep zoom-out
  * renders from the SUM-mips.
  */
-const DEFAULT_CAPACITY_COLS = 16_384;
+// Include the row-only and SUM mips: ~253 MiB total at 4096 rows.
+const DEFAULT_CAPACITY_COLS = 6_144;
 const DEFAULT_COLUMN_PX = 3;
 const DEFAULT_MAX_VISIBLE = 512;
 const MIN_VISIBLE_COLS = 32;
@@ -296,6 +313,10 @@ export class Renderer {
 
   // Created lazily on the first column, once the row count is known.
   private ring: TileRing | null = null;
+  private densityBid = new Float32Array(0);
+  private densityAsk = new Float32Array(0);
+  private pendingDepth: DepthColumn[] = [];
+  private drainingDepth = false;
   private heatmap: Heatmap | null = null;
   /** Display gamma (Contrast setting) — kept here so it survives heatmap
    *  re-creation on session reset and is re-applied to each new Heatmap. */
@@ -320,11 +341,23 @@ export class Renderer {
 
   /** Deep scroll-back backfill (T8). Created with the ring. */
   private history: HistoryLoader | null = null;
+  private overviewHistory: OverviewHistory | null = null;
+  private overviewSurface: OverviewSurface | null = null;
+  private overviewEpoch: number | null = null;
 
   /** Viewport-percentile normalization (T9): per-tile histograms → u_norm. */
   private readonly normalizer: ViewportNormalizer;
   /** Exact CPU column cache (T9): the crosshair readout + instant-recovery data. */
   private readonly columnCache: ColumnCache;
+  private readonly epochPriceMaps = new WeakMap<EpochParams, PriceMap>();
+  private readonly rawColumnArrays = (col: number) => this.columnCache.arrays(col);
+  private readonly rawColumnScale = (col: number) => {
+    const native = this.columnCache.priceAt(col);
+    if (native) return mapScale(native);
+    const epoch = this.columnCache.epochAt(col);
+    const params = epoch === null ? undefined : this.store.getState().epochs.get(epoch);
+    return params ? scaleFromEpoch(params) : null;
+  };
   /** Overlays (T10): trades/BBO/VWAP/profile/markers + axes + text layer. */
   private overlays: OverlayManager;
   /**
@@ -339,7 +372,8 @@ export class Renderer {
     capability: null,
     time: null,
     price: null,
-    columnArrays: (col) => this.columnCache.arrays(col),
+    columnArrays: this.rawColumnArrays,
+    changed: () => { this.dirty = true; },
     newestArrays: null,
     mipLevel: 0,
   };
@@ -392,6 +426,7 @@ export class Renderer {
   private viewChangedWarned = false;
 
   private newestSeq = -1;
+  private newestT0Ns = 0n;
   private view: HeatmapView;
 
   // --- price auto-follow (gl/follow.ts) ---------------------------------------
@@ -414,6 +449,9 @@ export class Renderer {
    * first column.
    */
   private lastSessionId: string | null = null;
+  /** Prior timeline survives the cursor reset until the new run identifies
+   * whether its first column continues history or reuses an incompatible id. */
+  private pendingSessionTimeline: { newestSeq: number; newestT0Ns: bigint } | null = null;
   /**
    * CP2: per-resident-ring-slot column start time (float64 ns), written with
    * the extent arrays and cleared with them on ring rebuild/reset. NaN = the
@@ -430,10 +468,13 @@ export class Renderer {
    * splice landing exactly one below the start extends it downward; older
    * non-contiguous pages leave the run alone (they cannot affect anchor
    * coverage). Every knot handed to coords.ts's helpers is finite; the slot
-   * subarray is only served when the run covers the anchor and does not wrap.
+   * table is only served when the run covers the anchor; wrapped runs use a
+   * memoized dense table, refreshed once after column changes.
    */
   private slotT0RunStart = -1;
   private slotT0RunEnd = -2;
+  private slotT0Revision = 0;
+  private slotT0Memo: { source: Float64Array; from: number; to: number; revision: number; slots: TimeSlots } | null = null;
   /** R1-M2: last PriceMap the camera was interpreted through (see overlayPriceMap). */
   private lastPriceMapCache: PriceMap | null = null;
   /** R1-M2: armed by resetOverlaysForNewSession; consumed by the next remap. */
@@ -446,6 +487,8 @@ export class Renderer {
    *  visible window or the live edge actually moves. */
   private priceFitMemo: { lo: number; hi: number; newest: number; rowBottom: number; rowSpan: number } | null =
     null;
+  private initialPriceFramed = false;
+  private pendingOverviewFit = false;
   /**
    * The follow policy the USER/settings asked for, re-asserted after every
    * `camera.reset()`. Without it the first depth column's `createRing()` reset
@@ -465,6 +508,18 @@ export class Renderer {
    * the default window is the correct initial frame.
    */
   private userTimeZoomed = false;
+  private requestedTimeWindow: number | null | undefined = undefined;
+
+  /** undefined = manual zoom, null = all resident history, number = duration. */
+  get timeWindowMs(): number | null | undefined { return this.requestedTimeWindow; }
+
+  /** A real frame of this session has reached the canvas. No startup placeholder. */
+  get marketFrameReady(): boolean {
+    const sessionId = this.store.getState().sessionId;
+    return sessionId !== null && !this.contextLost && !this.awaitingSession
+      && this.presentedSessionId === sessionId && this.lastSessionId === sessionId
+      && (this.ring?.residentRange()?.count ?? 0) > 0;
+  }
 
   private dirty = false;
   /** The view moved this frame → ask the HistoryLoader to ensure visible range. */
@@ -504,6 +559,7 @@ export class Renderer {
 
   // Perf instrumentation (test hooks): draw bookkeeping + a scripted run.
   private drawCountN = 0;
+  private presentedSessionId: string | null = null;
   private lastDrawEndTsN = 0;
   private perf: PerfRun | null = null;
   /** A frame threw and the failure is already surfaced (report-once guard). */
@@ -559,7 +615,12 @@ export class Renderer {
     // is sized to cover the WHOLE ring: a 2048-column cache under a 16 384-column
     // ring made the volume profile silently drop resident columns it could not
     // read (bars under-reported for any window wider than the cache).
-    this.normalizer = new ViewportNormalizer({ colsPerTile: COLS_PER_TILE });
+    this.normalizer = new ViewportNormalizer({ colsPerTile: COLS_PER_TILE, floor: 1e-8,
+      useWorker: true, onAsyncReady: () => { this.dirty = true; },
+      maxTiles: this.ringLayersFor(this.opts.capacityColsTarget) + 1, sourceColumn: col => {
+        const arrays = this.columnCache.arrays(col);
+        return arrays ? { ...arrays, scale: this.rawColumnScale(col) } : null;
+      } });
     this.columnCache = new ColumnCache({
       capacity: this.ringLayersFor(this.opts.capacityColsTarget) * COLS_PER_TILE,
     });
@@ -585,6 +646,9 @@ export class Renderer {
 
     this.unsubscribeStream = store.getState().onStream(this.onMessage);
 
+    // Start compilation after initialization's GL queries. Poll it on rAF so
+    // cold driver compilation cannot freeze the UI or the incoming stream.
+    renderProgramsReady(this.ctx.gl, this.ctx.caps.colorBufferFloat);
     this.rafId = requestAnimationFrame(this.frame);
   }
 
@@ -707,6 +771,8 @@ export class Renderer {
   }
 
   dispose(): void {
+    this.normalizer.dispose();
+    this.resetOverview();
     this.running = false;
     cancelAnimationFrame(this.rafId);
     this.resizeObserver.disconnect();
@@ -723,6 +789,8 @@ export class Renderer {
     this.heatmap?.dispose();
     this.ring?.dispose();
     this.ctx.gl.deleteTexture(this.lut);
+    releaseHeatmapProgram(this.ctx.gl);
+    this.pendingDepth.length = 0;
   }
 
   // --- overlays (T10) -----------------------------------------------------------
@@ -855,8 +923,8 @@ export class Renderer {
    */
   setTolerance(floor: number): void {
     const f = Number.isFinite(floor) ? floor : 0;
-    this.toleranceFloor = Math.min(TOLERANCE_MAX_FLOOR, Math.max(0, f));
-    if (this.heatmap) this.heatmap.floor = this.toleranceFloor;
+    this.toleranceFloor = Math.min(100, Math.max(0, f));
+    if (this.heatmap) this.heatmap.toleranceValue = this.toleranceFloor;
     this.dirty = true;
   }
 
@@ -887,7 +955,8 @@ export class Renderer {
   /** Push the effective channel code into the heatmap (see setDepthChannel). */
   private applyChannel(): void {
     if (this.heatmap === null) return;
-    const effective = this.ramp === RAMP_SYNTH ? DEFAULT_DEPTH_CHANNEL : this.depthChannel;
+    const synthetic = this.ramp === RAMP_SYNTH || this.ramp === RAMP_THEME_SYNTH;
+    const effective = synthetic ? DEFAULT_DEPTH_CHANNEL : this.depthChannel;
     const code = DEPTH_CHANNEL_CODE[effective];
     if (this.heatmap.channel !== code) this.heatmap.channel = code;
   }
@@ -973,14 +1042,21 @@ export class Renderer {
       frameMs: this.statsFrameMsEma,
       uploads: this.statsUploadsN,
       draws: this.drawCountN,
-      cacheBytes: this.columnCache.byteLength,
+      cacheBytes: this.columnCache.byteLength + (this.overviewSurface?.cache.byteLength ?? 0),
     };
   }
 
   /** Viewport-normalization percentile (§8.3 white-point / Saturation setting).
    *  The normalizer reads it fresh each frame, so this takes effect next draw. */
   setNormPercentile(percentile: number): void {
-    this.normalizer.percentile = Math.min(100, Math.max(50, percentile));
+    const white = Math.min(100, Math.max(80, Number.isFinite(percentile) ? percentile : 99.7));
+    this.normalizer.whitePercentile = white;
+    // Preserve the default p97/p99.7 shoulder while moving the white endpoint.
+    this.normalizer.percentile = Math.max(50, white - 2.7);
+    if (this.overviewSurface) {
+      this.overviewSurface.normalizer.percentile = this.normalizer.percentile;
+      this.overviewSurface.normalizer.whitePercentile = white;
+    }
     this.dirty = true;
   }
 
@@ -1000,12 +1076,42 @@ export class Renderer {
     const range = this.residentRange();
     if (range === null) return null;
     return {
-      oldestSeq: range.oldest,
-      newestSeq: range.newest,
+      oldestSeq: 0,
+      newestSeq: Math.max(range.newest, this.newestSeq),
       viewStartCol: this.view.colOffset,
       viewEndCol: this.view.colOffset + this.view.colScale,
-      timeBase: this.overlayTimeMap(),
+      timeBase: this.activeTimeMap(),
     };
+  }
+
+  /** Choose a real time duration without changing the user's follow policy. */
+  setTimeWindowMs(durationMs: number | null): boolean {
+    const range = this.residentRange();
+    if (!range || (durationMs !== null && (!Number.isFinite(durationMs) || durationMs <= 0))) return false;
+    if (durationMs === null) {
+      this.requestedTimeWindow = null;
+      this.userTimeZoomed = true;
+      this.camera.state = { ...this.camera.state, colCenter: (this.newestSeq + 1) / 2, colSpan: this.newestSeq + 1 };
+      this.onCameraChanged();
+      this.fitPriceOverview();
+      return true;
+    }
+    const end = Math.min(this.newestSeq + 1, this.view.colOffset + this.view.colScale);
+    const endNs = this.timestampAtColumn(end);
+    const oldestNs = this.timestampAtColumn(0);
+    if (endNs === null || oldestNs === null) return false;
+    const wantedNs = endNs - BigInt(Math.round(durationMs * 1e6));
+    const start = wantedNs <= oldestNs ? 0 : this.columnAtTimestamp(wantedNs);
+    if (start === null) return false;
+    const wantedSpan = Math.max(1, Math.min(this.newestSeq + 1, end - start));
+    this.requestedTimeWindow = durationMs;
+    this.userTimeZoomed = true;
+    const following = this.camera.followTime;
+    this.camera.zoomTime(wantedSpan / this.camera.state.colSpan, end);
+    this.camera.setTimeFrame(end - this.camera.state.colSpan, this.camera.state.colSpan);
+    this.camera.state = { ...this.camera.state, followTime: following };
+    this.onCameraChanged();
+    return true;
   }
 
   /**
@@ -1015,13 +1121,22 @@ export class Renderer {
    * horizontally under pan/zoom/scroll-back. Empty before any bar arrives.
    */
   cvdSeries(loCol: number, hiCol: number): Array<{ col: number; cvd: number }> {
+    const overview = this.activeOverview();
+    if (overview) return overview.bars.cvd.series(loCol / overview.stride, hiCol / overview.stride).map(p => ({ ...p, col: (p.col + 0.5) * overview.stride - 0.5 }));
     return this.overlays.cvdSeries(loCol, hiCol);
   }
 
   /** Cumulative CVD at one column (O(1)) — the CVD pane folds the newest column's
    *  value into its repaint signature so the live tip tracks a forming bar. */
   cvdValueAt(colSeq: number): number {
+    const overview = this.activeOverview();
+    if (overview) return overview.bars.cvd.valueAt(Math.floor(colSeq / overview.stride));
     return this.overlays.cvdValueAt(colSeq);
+  }
+
+  /** Includes historical corrections, which can leave the live tip unchanged. */
+  get cvdRevision(): number {
+    return this.activeOverview()?.bars.cvd.dataRevision ?? this.overlays.cvdRevision;
   }
 
   /**
@@ -1073,6 +1188,9 @@ export class Renderer {
    * sessionId. Safe to call before the first column too (a no-op teardown).
    */
   resetForSession(): void {
+    this.resetOverview();
+    this.presentedSessionId = null;
+    this.pendingDepth.length = 0;
     // Close the per-session column gate FIRST, ahead of the lost-context bail:
     // the old session's columns keep arriving whether or not the GL context is
     // healthy, and the restore path rebuilds at the remembered `ringRows`, which
@@ -1081,6 +1199,7 @@ export class Renderer {
     this.gateSessionId = this.store.getState().sessionId;
     this.gateWarned = false;
     this.lastSessionId = this.gateSessionId;
+    this.pendingSessionTimeline = null;
 
     // CP3 + H-1: the 2D ink (text layer + both gutters) is NOT GL — clear it
     // and run the whole CPU-side teardown BEFORE the lost-context bail. The old
@@ -1103,11 +1222,15 @@ export class Renderer {
     // Rewind the per-session cursors used for auto-follow + overlay anchoring so
     // the new session's first (typically lower) col_seq becomes the newest again.
     this.newestSeq = -1;
+    this.newestT0Ns = 0n;
     this.trackedRowN = null;
     this.trackedEpoch = null;
     this.priceEpoch = null;
     this.priceTarget = null;
     this.priceFitMemo = null;
+    this.initialPriceFramed = false;
+    this.camera.priceZoomBounds = null;
+    this.camera.priceScale = null;
     // The eased live-edge scroll restarts clean: a new session's first follow
     // frame is the default window, and a stale lag from the old session's
     // arrival cadence would just slide the fresh view for no reason.
@@ -1125,6 +1248,7 @@ export class Renderer {
     this.camera.setLimits(limitsFor(1, this.opts.capacityColsTarget));
     this.camera.reset(null);
     this.userTimeZoomed = false; // new session: the default window is the frame
+    this.requestedTimeWindow = undefined;
     this.applyWantedFollow();
     this.view = this.camera.toView();
 
@@ -1170,7 +1294,12 @@ export class Renderer {
     // App effect calls this with the SAME id that detection already handled,
     // skip so the new session's first trades are not wiped twice.
     if (sessionId !== undefined && sessionId === this.lastSessionId) return;
+    if (this.pendingSessionTimeline === null && this.newestSeq >= 0) {
+      this.pendingSessionTimeline = { newestSeq: this.newestSeq, newestT0Ns: this.newestT0Ns };
+    }
+    this.presentedSessionId = null;
     this.newestSeq = -1;
+    this.newestT0Ns = 0n;
     this.trackedRowN = null;
     this.trackedEpoch = null;
     // Same rationale as resetForSession: the eased live-edge scroll restarts
@@ -1224,26 +1353,33 @@ export class Renderer {
         // (colCenter decreases); down → higher rows (rowCenter increases).
         const dCols = -(dx / cssW()) * this.view.colScale;
         const dRows = (dy / cssH()) * this.view.rowScale;
+        if (panFollowKill(drag.peakDx, drag.peakDy).killPrice) this.pendingOverviewFit = false;
         // Per-axis release from PEAK displacement, so a deliberately horizontal
         // drag keeps price tracking (gl/follow.ts panFollowKill).
         this.camera.pan(dCols, dRows, panFollowKill(drag.peakDx, drag.peakDy));
         this.onCameraChanged();
       },
       zoomTimeAtFraction: (factor, fracX) => {
+        this.requestedTimeWindow = undefined;
         const anchorCol = this.view.colOffset + this.view.colScale * fracX;
         this.camera.zoomTime(factor, anchorCol);
         this.userTimeZoomed = true; // user-owned span: follow must preserve it
         this.onCameraChanged();
+        if (factor > 1 && this.camera.state.colSpan >= maxColSpanFor(this.camera.limits) * 0.999) this.fitPriceOverview(true);
       },
       zoomPriceAtFraction: (factor, fracFromTop) => {
+        this.pendingOverviewFit = false;
         // uv.y = 0 at the bottom of the grid; the cursor's y grows downward.
         const uvY = 1 - fracFromTop;
-        const anchorRow = this.view.rowOffset + this.view.rowScale * uvY;
+        this.preparePriceOverview();
+        const anchorRow = fractionRow(this.view, this.camera.priceScale, uvY);
         this.camera.zoomPrice(factor, anchorRow);
         this.onCameraChanged();
       },
       scalePriceCentered: (factor) => {
-        this.camera.zoomPrice(factor, this.camera.state.rowCenter);
+        this.pendingOverviewFit = false;
+        this.preparePriceOverview();
+        this.camera.zoomPrice(factor, fractionRow(this.view, this.camera.priceScale, 0.5));
         this.onCameraChanged();
       },
       panTimeSteps: (dir) => {
@@ -1251,13 +1387,16 @@ export class Renderer {
         this.onCameraChanged();
       },
       panPriceSteps: (dir) => {
+        this.pendingOverviewFit = false;
         this.camera.pan(0, dir * this.view.rowScale * KEY_PAN_FRAC, KILL_PRICE);
         this.onCameraChanged();
       },
       zoomTimeCentered: (factor) => {
+        this.requestedTimeWindow = undefined;
         this.camera.zoomTime(factor, this.camera.state.colCenter);
         this.userTimeZoomed = true; // user-owned span: follow must preserve it
         this.onCameraChanged();
+        if (factor > 1 && this.camera.state.colSpan >= maxColSpanFor(this.camera.limits) * 0.999) this.fitPriceOverview(true);
       },
       toggleFollow: () => {
         this.setFollowTime(!this.camera.followTime);
@@ -1310,6 +1449,7 @@ export class Renderer {
 
   /** Set the PRICE follow mode (`P`, the axis chip, a gutter double-click). */
   setPriceFollow(mode: PriceFollow): void {
+    this.pendingOverviewFit = mode === 'fit' && this.ring !== null && this.view.colScale > this.ring.capacityCols;
     this.wantPriceFollow = mode;
     this.camera.setPriceFollow(mode);
     this.priceTarget = null;
@@ -1383,6 +1523,7 @@ export class Renderer {
     // A lost context has no valid textures; drop until restore re-fetches.
     if (this.glLost()) return;
 
+
     const state = this.store.getState();
     const epochRows = state.epochs.get(col.epoch)?.rows;
 
@@ -1415,6 +1556,18 @@ export class Renderer {
       }
       return;
     }
+    if (!this.drainingDepth && (!renderProgramsReady(this.ctx.gl, this.ctx.caps.colorBufferFloat) || this.pendingDepth.length > 0)) {
+      const last = this.pendingDepth.at(-1);
+      if (last && !last.final && last.epoch === col.epoch && last.col_seq === col.col_seq) {
+        this.pendingDepth[this.pendingDepth.length - 1] = col;
+      } else {
+        this.pendingDepth.push(col);
+        // Bound cold-start staging to the same resident history budget.
+        if (this.pendingDepth.length > this.opts.capacityColsTarget) this.pendingDepth.shift();
+      }
+      return;
+    }
+
     if (plan.action === 'create') this.createRing(plan.rows);
     // A genuine grid-geometry change (crypto 2048 → equity 4096, or the `deep`
     // band's 4096). REBUILD rather than skip: the old code warned and returned,
@@ -1422,7 +1575,6 @@ export class Renderer {
     else if (plan.action === 'rebuild') this.recreateRingForRows(plan.rows);
 
     const rows = plan.rows;
-    const ring = this.ring!;
 
     // D5(a): the store's session identity changed under this subscription — a
     // server-side session replacement (parked-session grace expiry / restart).
@@ -1434,12 +1586,40 @@ export class Renderer {
     }
     this.lastSessionId = state.sessionId;
 
+    const previousTimeline = this.pendingSessionTimeline;
+    if (previousTimeline !== null) {
+      this.pendingSessionTimeline = null;
+      const cachedTime = this.columnCache.timeAt(col.col_seq);
+      const cachedPrice = this.columnCache.priceAt(col.col_seq);
+      const params = state.epochs.get(col.epoch);
+      const incomingPrice = params ? this.priceMapFor(params) : null;
+      const range = this.ring!.residentRange();
+      const reusedSequence = col.col_seq <= previousTimeline.newestSeq;
+      const changedIdentity = cachedTime !== null
+        ? cachedTime !== col.t0_ns || (cachedPrice !== null && incomingPrice !== null
+          && !sameNativePrice(cachedPrice, incomingPrice))
+        : range !== null && col.col_seq < range.oldest;
+      if (reusedSequence && changedIdentity) {
+        // A fresh run owns these sequence ids. Keep disk recordings intact,
+        // but clear active membership before its first finalized column folds.
+        this.recreateRingForRows(rows);
+        this.normSeeded = false;
+        this.initialPriceFramed = false;
+      }
+    }
+    let ring = this.ring!;
+
     // D5(b): col_seq regression — a column more than a whole ring behind the
     // high-water mark cannot be a re-send or a history splice (neither comes
     // through this path); it is a restarted sequence. `newestSeq` is max-only,
     // so without this the live edge stays un-visible forever and TRACK is dead.
     if (this.newestSeq >= 0 && col.col_seq + ring.capacityCols < this.newestSeq) {
       this.resetOverlaysForNewSession();
+      this.pendingSessionTimeline = null;
+      this.recreateRingForRows(rows);
+      this.normSeeded = false;
+      this.initialPriceFramed = false;
+      ring = this.ring!;
     }
 
     // Epoch change: the server moved p0, so a USER-OWNED price window (track /
@@ -1452,7 +1632,10 @@ export class Renderer {
       this.remapPriceEpoch(col.epoch);
     }
 
-    if (col.col_seq > this.newestSeq) this.newestSeq = col.col_seq;
+    if (col.col_seq >= this.newestSeq) {
+      this.newestSeq = col.col_seq;
+      this.newestT0Ns = col.t0_ns;
+    }
 
     // Deep scroll-back gate (T8): when the user has panned back into history
     // (follow off) and this live column sits past the resident window's right
@@ -1555,6 +1738,12 @@ export class Renderer {
   private writeColumn(col: DepthColumn, rows: number, deferMips = false, gapZeroed = false): void {
     const ring = this.ring!;
     ring.append(col.col_seq, col.epoch, col.bid, col.ask, rows, gapZeroed);
+    const nativeEpoch = this.store.getState().epochs.get(col.epoch);
+    const cachedPrice = this.columnCache.timeAt(col.col_seq) === col.t0_ns
+      && this.columnCache.epochAt(col.col_seq) === col.epoch ? this.columnCache.priceAt(col.col_seq) : null;
+    const nativePrice = cachedPrice ?? (nativeEpoch ? this.priceMapFor(nativeEpoch) : null);
+    const nativeScale = nativePrice?.scale ?? null;
+    if (nativeScale) ring.geometry.set(col.col_seq, nativeScale, col.epoch);
     this.statsUploadsN++;
     if (deferMips) this.deferMipRange(col.col_seq);
     else this.mips?.updateFrom(ring, col.col_seq);
@@ -1569,6 +1758,7 @@ export class Renderer {
     // map (reconstructed history columns are 60 s apart despite a 250 ms epoch).
     if (this.slotT0 !== null) {
       this.slotT0[slot] = Number(col.t0_ns);
+      this.slotT0Revision++;
       // R1-M1: track the contiguous run from its FIRST WRITTEN column, not a
       // slot-0 prefix — a warm attach starts mid-sequence and the table must
       // still serve the reconstructed tail. Forward gaps restart the run at the
@@ -1609,13 +1799,19 @@ export class Renderer {
     // T9: feed the exact CPU cache (crosshair readout) and the per-tile
     // histogram (viewport normalization). The DepthColumn arrays are fresh,
     // immutable copies (decode.ts), so the cache holds references directly.
-    this.columnCache.put(col.col_seq, col.bid, col.ask, col.t0_ns, col.epoch);
+    this.columnCache.put(col.col_seq, col.bid, col.ask, col.t0_ns, col.epoch, nativePrice);
     // Only FINAL columns fold into the histogram: a forming edge column is
     // re-sent every flush and history pages overlap, so folding every write
     // inflated the histogram ~2×+ and biased the white point. foldColumnFinal
     // additionally dedupes by column id so an overlapping history re-splice
     // folds exactly once.
-    if (col.final) this.normalizer.foldColumnFinal(col.col_seq, col.bid, col.ask);
+    if (col.final) {
+      if (nativeScale?.kind === 'hybrid') {
+        if (this.densityBid.length !== rows) { this.densityBid = new Float32Array(rows); this.densityAsk = new Float32Array(rows); }
+        this.normalizer.foldColumnFinal(col.col_seq, densityForScale(nativeScale, col.bid, this.densityBid),
+          col.ask ? densityForScale(nativeScale, col.ask, this.densityAsk) : null, nativeScale);
+      } else this.normalizer.foldColumnFinal(col.col_seq, col.bid, col.ask, nativeScale);
+    }
 
     this.history?.noteColumn(col.col_seq, col.t0_ns);
 
@@ -1723,7 +1919,7 @@ export class Renderer {
     this.heatmap = new Heatmap(this.ctx, this.ring, this.lut);
     this.heatmap.normalizer = this.normalizer;
     this.heatmap.gamma = this.contrastGamma;
-    this.heatmap.floor = this.toleranceFloor;
+    this.heatmap.toleranceValue = this.toleranceFloor;
     this.heatmap.levelFloor = this.tickGroupingLevel();
     this.applyRamp();
     this.mips?.dispose();
@@ -1761,6 +1957,7 @@ export class Renderer {
    * epoch change rather than a new instrument.
    */
   private recreateRingForRows(rows: number): void {
+    this.resetOverview();
     this.cancelPendingMips();
     this.mips?.dispose();
     this.heatmap?.dispose();
@@ -1805,10 +2002,18 @@ export class Renderer {
 
   /** Wire a {@link HistoryLoader} to the store transport + this ring/mips. */
   private createHistoryLoader(): HistoryLoader {
+    const ring = this.ring;
     return new HistoryLoader({
+      isActive: () => this.ring === ring && !this.contextLost && !this.awaitingSession,
+      yieldToFrame: () => new Promise<void>((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+      }),
       requestHistory: (before_t, n) => this.store.getState().requestHistory(before_t, n),
+      requestSequence: (start, end, n) => this.store.getState().requestHistory(0x7fff_ffff_ffff_ffffn, n, { start_col: start, end_col: end, stride: 1 }),
       spliceColumn: this.spliceColumn,
       residentRange: () => this.ring?.residentRange() ?? null,
+      validFromSeq: () => this.ring?.validFromSeq() ?? -1,
+      latestColumn: () => this.newestSeq < 0 ? null : { colSeq: this.newestSeq, t0Ns: this.newestT0Ns },
       budgetCols: () => this.ring?.budgetCols ?? 0,
       dtNs: () => this.currentDtNs(),
       // Page size rides the grid height AND the transport: one HistoryResponse
@@ -1835,7 +2040,7 @@ export class Renderer {
         // to [oldest, newest] has happened); these bars fall inside that window and
         // survive. Markers likewise, for parity with the live stream.
         for (const bar of resp.bar_cols) this.overlays.onBar(bar);
-        for (const marker of resp.markers) this.overlays.onMarker(marker);
+        for (const marker of resp.markers) this.overlays.onMarker(displayHistoryGap(marker));
         // Page end: regenerate the deferred SUM-mip range in batched passes.
         this.flushPendingMips();
         this.dirty = true;
@@ -1845,6 +2050,82 @@ export class Renderer {
         this.viewMoved = true;
       },
     });
+  }
+
+  private activeOverview(): OverviewSurface | null {
+    return this.ring !== null && this.view.colScale > this.ring.capacityCols ? this.overviewSurface : null;
+  }
+
+  private activeTimeMap(): TimeMap | null {
+    return this.activeOverview()?.originalTimeMap(this.currentDtNs()) ?? this.overlayTimeMap();
+  }
+
+  private resetOverview(): void {
+    this.pendingOverviewFit = false;
+    this.overviewHistory?.dispose();
+    this.overviewSurface?.dispose();
+    this.overviewHistory = null;
+    this.overviewSurface = null;
+    this.overviewEpoch = null;
+  }
+
+  /** Coarse history is independent of close-up GPU storage and reloads by pixel detail. */
+  private ensureOverview(ts: number): void {
+    const ring = this.ring;
+    const epoch = this.store.getState().gridEpoch;
+    if (!ring || epoch === null || this.perf !== null || this.view.colScale <= ring.capacityCols) return;
+    if (this.overviewEpoch !== epoch) {
+      const pending = this.overviewEpoch === null && this.pendingOverviewFit;
+      this.resetOverview();
+      this.pendingOverviewFit = pending;
+    }
+    if (this.overviewHistory === null) {
+      this.overviewEpoch = epoch;
+      this.overviewHistory = new OverviewHistory({
+        active: () => this.ring === ring && this.overviewEpoch === epoch && !this.glLost() && !this.awaitingSession && this.view.colScale > ring.capacityCols,
+        resident: () => this.overviewSurface?.ring.residentRange() ?? null,
+        request: (before, n, overview) => this.store.getState().requestHistory(before, n, overview),
+        before: () => this.newestT0Ns + BigInt(this.currentDtNs()),
+        pageCols: () => pageColsForRows(ring.rows, serverOrigin() === null ? HISTORY_DEV_FRAME_BUDGET_BYTES : HISTORY_FRAME_BUDGET_BYTES),
+        reset: (stride) => {
+          this.overviewSurface?.dispose();
+          this.overviewSurface = new OverviewSurface(this.ctx, ring.rows, this.lut, stride, this.overlayPriceMap()?.scale ?? null, epoch,
+            sourceEpoch => { const params = this.store.getState().epochs.get(sourceEpoch); return params ? this.priceMapFor(params).scale ?? null : null; },
+            () => { this.dirty = true; });
+          this.dirty = true;
+        },
+        column: (column, stride) => {
+          if (this.overviewSurface?.stride !== stride) return;
+          this.overviewSurface.column(column);
+          this.statsUploadsN++;
+          this.dirty = true;
+        },
+        page: (response, stride) => {
+          if (this.overviewSurface?.stride !== stride) return;
+          this.overviewSurface.page(response);
+          for (const marker of response.markers) this.overlays.onMarker(displayHistoryGap(marker));
+          this.priceFitMemo = null;
+          if (this.camera.followPrice === 'fit') this.fitPriceOverview();
+        },
+        changed: () => {
+          if (this.pendingOverviewFit && this.overviewHistory?.complete) {
+            this.pendingOverviewFit = false;
+            this.fitPriceOverview();
+          }
+          this.dirty = true; this.notifyViewChanged();
+        },
+        yieldToFrame: () => new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0))),
+      });
+    }
+    this.overviewHistory.ensure(this.view, this.newestSeq, ts);
+  }
+
+  overviewStats(): { stride: number; capacity: number; buckets: number; inFlight: boolean; requests: number; error: string | null; revision: number; progress: { loaded: number; total: number }; resident: ResidentRange | null } | null {
+    const history = this.overviewHistory;
+    if (!history || !this.activeOverview()) return null;
+    return { stride: history.stride, capacity: this.overviewSurface?.ring.capacityCols ?? 0, buckets: history.cachedBuckets,
+      inFlight: history.inFlight, requests: history.requests, error: history.error, revision: this.overviewSurface?.revision ?? 0,
+      progress: history.progress, resident: this.overviewSurface?.ring.residentRange() ?? null };
   }
 
   /** Current epoch's column interval (ns) for the loader's before_t fallback. */
@@ -1899,6 +2180,7 @@ export class Renderer {
    */
   private updateView(): void {
     const before = this.view;
+    this.camera.priceScale = this.overlayPriceMap()?.scale ?? null;
     // F3 (swarm wave 2): refresh the known TIME data window so user pan/zoom
     // ops clamp to it (bounded overscroll past the history ends; zoom-out floor
     // = resident coverage). See gl/camera.ts TimeWindow. No re-clamp here.
@@ -1907,12 +2189,16 @@ export class Renderer {
     // the pan stops ON data instead of a region the server can never supply.
     const range = this.ring?.residentRange() ?? null;
     this.camera.setTimeWindow({
-      floor: this.history?.startOfHistory ? (range?.oldest ?? 0) : 0,
+      floor: 0,
       newest: this.newestSeq,
       resident: range,
     });
     if (this.camera.followTime) this.applyTimeFollowFrame();
-    if (this.camera.followPrice === 'fit') this.applyPriceFitFrame();
+    if (this.camera.followPrice === 'fit' || !this.initialPriceFramed) {
+      // A saved lock has no meaningful frame for a new instrument. Fit its
+      // first nonempty book once, then respect the user's existing follow mode.
+      if (this.applyPriceFitFrame()) this.initialPriceFramed = true;
+    }
     this.view = this.camera.toView();
     // Re-apply the CURRENT eased lag (without stepping the dynamics — frame()
     // owns the step) so the change-notify never carries the un-eased logical
@@ -1955,8 +2241,21 @@ export class Renderer {
     if (range === null) return;
 
     const cap = ring.capacityCols;
-    const cssW = Math.max(1, this.canvas.clientWidth);
+    const cssW = Math.max(1, this.lastResizeCssW);
     let visible: number;
+    if (this.requestedTimeWindow !== undefined) {
+      let start = 0;
+      if (this.requestedTimeWindow !== null) {
+        const endNs = this.timestampAtColumn(this.newestSeq + 1);
+        if (endNs !== null) {
+          const mapped = this.columnAtTimestamp(endNs - BigInt(Math.round(this.requestedTimeWindow * 1e6)));
+          if (mapped !== null) start = Math.max(0, mapped);
+        }
+      }
+      visible = Math.max(1, this.newestSeq + 1 - start);
+      this.camera.state = { ...this.camera.state, colCenter: this.newestSeq + 1 - visible / 2, colSpan: visible };
+      return;
+    }
     if (this.userTimeZoomed) {
       // Owner contract (2026-09-14): the user's time zoom is sacred — GO LIVE /
       // any follow re-arm keeps EXACTLY their span (float, un-rounded) and only
@@ -1968,7 +2267,7 @@ export class Renderer {
       // zoom to ring capacity snapped 17136 → 8634 in live verification.)
       visible = this.camera.state.colSpan;
       if (!Number.isFinite(visible) || visible < 1) visible = MIN_VISIBLE_COLS;
-      this.camera.setTimeFrame(range.newest - visible + 1, visible);
+      this.camera.setTimeFrame(this.newestSeq - visible + 1, visible);
       return;
     } else {
       visible = Math.round(cssW / this.opts.columnPx);
@@ -1997,53 +2296,119 @@ export class Renderer {
    *    window while columns stream in) costs one comparison per column, not a
    *    rescan. `writeColumn` invalidates the memo.
    */
-  private applyPriceFitFrame(): void {
+  private applyPriceFitFrame(): boolean {
     const ring = this.ring;
-    if (ring === null) return;
+    if (ring === null) return false;
+    if (this.view.colScale > ring.capacityCols) {
+      this.preparePriceOverview();
+      const bounds = this.camera.priceZoomBounds;
+      const scale = this.camera.priceScale;
+      if (!bounds || !scale) return false;
+      const low = scalePriceToRow(scale, bounds.low), high = scalePriceToRow(scale, bounds.high);
+      this.camera.setPriceFrame(low, high - low);
+      return true;
+    }
     const range = ring.residentRange();
-    if (range === null) return;
+    if (range === null) return false;
 
     const cap = ring.capacityCols;
     const st = this.camera.state;
     const lo = Math.max(range.oldest, Math.floor(st.colCenter - st.colSpan / 2));
     const hi = Math.min(range.newest, Math.ceil(st.colCenter + st.colSpan / 2));
-    if (hi < lo) return;
+    if (hi < lo) return false;
 
     const memo = this.priceFitMemo;
     if (memo !== null && memo.lo === lo && memo.hi === hi && memo.newest === range.newest) {
       this.camera.setPriceFrame(memo.rowBottom, memo.rowSpan);
-      return;
+      return true;
     }
 
     let rowLo = Infinity;
     let rowHi = -Infinity;
+    const scale = this.overlayPriceMap()?.scale;
     for (let c = lo; c <= hi; c++) {
       const slot = ((c % cap) + cap) % cap;
       if (this.extentSeq![slot] !== c) continue; // stale slot (see extentSeq)
-      const elo = this.extentLo![slot];
+      let elo = this.extentLo![slot];
       if (elo < 0) continue;
-      const ehi = this.extentHi![slot];
+      let ehi = this.extentHi![slot];
+      // Resident history retains its native row IDs when the grid rolls.
+      // Union the physical intervals in the camera's current geometry.
+      if (scale && this.rawColumnScale(c) !== scale) {
+        const source = this.rawColumnScale(c);
+        if (!source) continue;
+        const shift = source.kind === 'hybrid' ? .5 : 0;
+        const low = scalePriceToRow(scale, scaleRowToPrice(source, elo - shift));
+        const end = scalePriceToRow(scale, scaleRowToPrice(source, ehi + 1 - shift));
+        if (!Number.isFinite(low) || !Number.isFinite(end)) continue;
+        elo = low;
+        ehi = Math.max(low, end - 1);
+      }
       if (elo < rowLo) rowLo = elo;
       if (ehi > rowHi) rowHi = ehi;
     }
-    if (rowHi < rowLo) return; // nothing to fit — keep the frame we have
+    if (rowHi < rowLo) return false; // wait for the first real book
 
-    // On a non-uniform grid, confine the auto-fit to the LINEAR CORE. The book
-    // legitimately has size out in the log wings, but fitting to it would zoom
-    // the view out to the whole -99%/+1000% band and bury the tradeable ladder
-    // in two rows — the exact failure the hybrid scale exists to avoid.
-    const scale = this.overlayPriceMap()?.scale;
+    // Deep storage coverage is not a useful trading viewport. Frame the
+    // visible price history and a readable number of depth levels around it.
     if (scale !== undefined && scale.kind === 'hybrid') {
-      const coreLo = scale.dnRows;
-      const coreHi = scale.dnRows + scale.coreRows - 1;
-      rowLo = Math.max(rowLo, coreLo);
-      rowHi = Math.min(rowHi, coreHi);
-      if (rowHi < rowLo) return;
+      const prices = this.overlays.priceRange(lo, hi);
+      const mid = this.trackedRowN !== null && isColVisible(this.camera.toView(), this.newestSeq)
+        ? scaleRowToPrice(scale, this.trackedRowN) : null;
+      const visible = prices ?? (mid === null ? null : { low: mid, high: mid });
+      if (visible === null) return false;
+      const bounds = priceOverviewBounds(scale, visible);
+      const low = scalePriceToRow(scale, bounds.low), high = scalePriceToRow(scale, bounds.high);
+      this.camera.setPriceFrame(low, high - low);
+      return true;
     }
 
-    const frame = priceFrame(rowLo, rowHi, ring.rows, ROW_PAD_FRACTION, MIN_ROW_PAD);
+    const frame = priceFrame(rowLo, rowHi, ring.rows, ROW_PAD_FRACTION, MIN_ROW_PAD, scale);
     this.priceFitMemo = { lo, hi, newest: range.newest, ...frame };
     this.camera.setPriceFrame(frame.rowBottom, frame.rowSpan);
+    return true;
+  }
+
+  /** Zoom-out reaches a useful overview of the visible market, while the
+   *  far depth remains accessible by panning. No price values are filtered. */
+  private preparePriceOverview(): void {
+    const scale = this.overlayPriceMap()?.scale;
+    this.camera.priceScale = scale ?? null;
+    this.camera.priceZoomBounds = null;
+    if (scale?.kind !== 'hybrid') return;
+    const view = this.camera.toView();
+    const overview = this.activeOverview();
+    const historyPrices = overview
+      ? overview.bars.price.priceRange(Math.floor(view.colOffset / overview.stride), Math.ceil((view.colOffset + view.colScale) / overview.stride))
+      : this.overlays.priceRange(Math.floor(view.colOffset), Math.ceil(view.colOffset + view.colScale));
+    // Only use the current inside market when the live edge is on screen.
+    // A historical empty window must not jump to today's price.
+    const mid = this.trackedRowN !== null && isColVisible(view, this.newestSeq)
+      ? scaleRowToPrice(scale, this.trackedRowN) : null;
+    const prices = historyPrices ?? (mid === null ? null : { low: mid, high: mid });
+    if (prices === null) return;
+    this.camera.priceZoomBounds = priceOverviewBounds(scale, prices);
+  }
+
+  private fitPriceOverview(includeTime = false): void {
+    if (includeTime && this.overlayPriceMap()?.scale?.kind === 'hybrid') {
+      const range = this.residentRange();
+      if (range !== null) {
+        // At the overview limit, show the entire loaded history without an
+        // empty future half or a cursor anchor that hides the older prices.
+        this.camera.state = { ...this.camera.state, colCenter: (this.newestSeq + 1) / 2, colSpan: this.newestSeq + 1 };
+        this.onCameraChanged();
+      }
+    }
+    if (this.ring !== null && this.view.colScale > this.ring.capacityCols && !this.overviewHistory?.complete) this.pendingOverviewFit = true;
+    this.preparePriceOverview();
+    const bounds = this.camera.priceZoomBounds;
+    const scale = this.camera.priceScale;
+    if (bounds === null || scale === null) return;
+    const low = scalePriceToRow(scale, bounds.low);
+    const high = scalePriceToRow(scale, bounds.high);
+    this.camera.setPriceFrame(low, high - low);
+    this.onCameraChanged();
   }
 
   /**
@@ -2077,8 +2442,27 @@ export class Renderer {
     const price = this.overlays.lastPrice();
     const map = price !== null ? this.overlayPriceMap() : null;
     const liveRow = map !== null && price !== null
-      ? scalePriceToRow(mapScale(map), price) + 0.5
+      ? priceToPlotRow(mapScale(map), price)
       : this.trackedRowN;
+    if (map?.scale?.kind === 'hybrid') {
+      const scale = map.scale;
+      const view = this.camera.toView();
+      const low = scaleRowToPrice(scale, view.rowOffset);
+      const high = scaleRowToPrice(scale, view.rowOffset + view.rowScale);
+      const span = high - low;
+      const current = (low + high) / 2;
+      const live = scaleRowToPrice(scale, liveRow);
+      this.priceTarget = priceFollowTarget(current, span, live, this.priceTarget !== null);
+      if (this.priceTarget === null) return;
+      const next = approach(current, this.priceTarget, prevTs > 0 ? ts - prevTs : PRICE_GLIDE_TAU_MS, PRICE_GLIDE_TAU_MS);
+      const center = Math.abs(this.priceTarget - current) < span / Math.max(1, this.lastResizeCssH) ? this.priceTarget : next;
+      const bottom = scalePriceToRow(scale, Math.max(2 ** -126, center - span / 2));
+      const top = scalePriceToRow(scale, center + span / 2);
+      this.camera.remapPrice((bottom + top) / 2, top - bottom);
+      if (center === this.priceTarget) this.priceTarget = null;
+      this.dirty = true;
+      return;
+    }
     this.priceTarget = priceFollowTarget(
       st.rowCenter, st.rowSpan, liveRow, this.priceTarget !== null,
     );
@@ -2087,7 +2471,7 @@ export class Renderer {
     const target = this.priceTarget;
     const dt = prevTs > 0 ? ts - prevTs : PRICE_GLIDE_TAU_MS;
     const next = approach(st.rowCenter, target, dt, PRICE_GLIDE_TAU_MS);
-    const subPixel = st.rowSpan / Math.max(1, this.canvas.clientHeight);
+    const subPixel = st.rowSpan / Math.max(1, this.lastResizeCssH);
 
     if (Math.abs(target - st.rowCenter) <= Math.min(PRICE_SNAP_ROWS, subPixel)) {
       // Settled: land exactly and disarm until price drifts out again.
@@ -2135,7 +2519,7 @@ export class Renderer {
   private liveGlideActive(): boolean {
     const range = this.ring?.residentRange() ?? null;
     if (range === null) return false;
-    return this.camera.state.colSpan < range.count - 0.05;
+    return this.camera.state.colSpan < this.newestSeq + 1 - 0.05;
   }
 
   private applyLiveEdgeGlide(ts: number): void {
@@ -2209,23 +2593,22 @@ export class Renderer {
     this.viewMoved = true;
   }
 
-  /** SUM-mip level the current view would sample (0/1/2) — drives backfill
-   *  suppression on deep zoom-out (§8.3: level-2 renders from mips). The TIME
-   *  axis counts too: a time-zoomed-out + price-zoomed-in view renders from the
-   *  mips exactly like a price zoom to the same block, so the no-backfill gate
-   *  stays consistent with what the heatmap actually samples.
+  /** SUM-mip level the current view would sample (0/1/2). The TIME axis counts
+   *  too: both axes determine the displayed density block. Mips share the
+   *  full-res residency window; selecting a mip never makes history available.
    *
    * `includeFloor = false` reports the NATURAL level (no tick-grouping floor):
-   * the backfill gate uses it, because a forced coarse DISPLAY must not stop the
-   * CPU cache/profile/history from filling in — those still need full-res
-   * columns (mips are generated from them). The crosshair and the viewport
+   * display diagnostics use it independently of the selected grouping. The
+   * crosshair and the viewport
    * normalizer use the floored level, exactly what is painted. */
   private currentLevel(includeFloor = true): number {
+    const overview = this.activeOverview();
+    if (overview) return overview.level(overview.view(this.view));
     const m = this.mips;
     const maxLevel = m !== null && m.usable ? m.maxLevel : 0;
     const gl = this.ctx.gl;
     return selectLevel(
-      this.view.rowScale / Math.max(1, gl.drawingBufferHeight),
+      projectedRowsPerPixel(this.view, this.overlayPriceMap()?.scale ?? null, gl.drawingBufferHeight),
       maxLevel,
       this.view.colScale / Math.max(1, gl.drawingBufferWidth),
       includeFloor ? this.tickGroupingLevel() : 0,
@@ -2252,17 +2635,21 @@ export class Renderer {
     // merge stays bounded even on a whole-ring zoom-out (≤ ring layers).
     const left = Math.floor(this.view.colOffset);
     const right = Math.floor(this.view.colOffset + this.view.colScale);
-    const oldest = Math.max(range.oldest, Math.min(left, right));
+    const oldest = Math.max(range.oldest, ring.validFromSeq(), Math.min(left, right));
     const newest = Math.min(range.newest, Math.max(left, right));
     if (newest < oldest) return;
 
     const rowLo = Math.max(0, Math.floor(this.view.rowOffset));
     const rowHi = Math.min(ring.rows - 1, Math.floor(this.view.rowOffset + this.view.rowScale));
     const level = this.currentLevel();
-
+    const scale = this.overlayPriceMap()?.scale;
+    const shift = scale?.kind === 'linear' ? .5 : 0;
+    this.normalizer.channel = heatmap.channel === 3 ? 0 : heatmap.channel;
     const norm = this.normalizer.updateNorm(
       { oldest, newest },
-      { lo: rowLo, hi: rowHi },
+      { lo: rowLo, hi: rowHi, priceLo: scale ? scaleRowToPrice(scale, this.view.rowOffset - shift) : undefined,
+        priceHi: scale ? scaleRowToPrice(scale, this.view.rowOffset + this.view.rowScale - shift) : undefined,
+        referenceStep: scale?.kind === 'hybrid' ? scale.coreStep : scale?.step },
       level,
     );
     // Mutate in place: this runs on EVERY dirty frame, and `encoding` has no
@@ -2277,6 +2664,8 @@ export class Renderer {
 
   /** Whether the viewport norm is still gliding toward its target (settle loop). */
   private normSettling(): boolean {
+    const overview = this.activeOverview();
+    if (overview) return overview.normalizer.hasData() && !overview.normalizer.settled;
     return this.heatmap !== null && this.normalizer.hasData() && !this.normalizer.settled;
   }
 
@@ -2288,55 +2677,80 @@ export class Renderer {
    * summed to match a tick-grouped / zoomed-out view (block = 4^level).
    */
   probeAt(cssX: number, cssY: number): CrosshairReadout | null {
-    const ring = this.ring;
+    const overview = this.activeOverview();
+    const ring = overview?.ring ?? this.ring;
     if (ring === null) return null;
 
     const cssW = Math.max(1, this.canvas.clientWidth);
     const cssH = Math.max(1, this.canvas.clientHeight);
-    const { colf, rowf } = screenToGrid(this.view, cssX, cssY, cssW, cssH);
+    const displayScale = this.overlayPriceMap()?.scale ?? null;
+    const { colf, rowf: displayRow } = screenToGrid(this.view, cssX, cssY, cssW, cssH, displayScale);
     const colSeq = Math.floor(colf);
-    const row = Math.floor(rowf);
+    const sampleCol = overview ? Math.floor(colf / overview.stride) : colSeq;
+    const cache = overview?.cache ?? this.columnCache;
     const rows = ring.rows;
-    const onGrid = row >= 0 && row < rows;
-
-    const range = ring.residentRange();
-    const inRange =
-      range !== null && colSeq >= range.oldest && colSeq <= range.newest && onGrid;
 
     // Epoch geometry for row→price (single-epoch sim; per-column epoch when known).
     const st = this.store.getState();
-    const epoch = this.columnCache.epochAt(colSeq) ?? st.gridEpoch ?? 0;
+    const epoch = cache.epochAt(sampleCol) ?? st.gridEpoch ?? 0;
     const params = st.epochs.get(epoch);
-    const pmap = params ? this.priceMapFor(params) : null;
+    const pmap = cache.priceAt(sampleCol) ?? (params ? this.priceMapFor(params) : null);
     const scale = pmap ? mapScale(pmap) : null;
-    const price = scale && onGrid ? scaleRowToPrice(scale, row) : null;
-    // Decimals from the LOCAL row height, not a global step: on a non-uniform
-    // grid a wing row is worth hundreds of ticks and 8 decimals there is noise.
-    const localStep = scale ? scaleStepAtRow(scale, row) : 0;
-    const priceDecimals =
-      localStep > 0 ? Math.min(8, Math.max(0, Math.ceil(-Math.log10(localStep)))) : 2;
+    // CPU columns retain their native epoch geometry. Interpret the cursor's
+    // physical price in that geometry rather than reusing today's row number.
+    // Linear cells/events retain their legacy half-row display convention.
+    // Physical GPU projection uses that same screen origin before selecting
+    // the nearest centered bin in each column's own geometry.
+    const cursorPrice = displayScale ? scaleRowToPrice(displayScale,
+      displayRow - (displayScale.kind === 'linear' ? .5 : 0)) : null;
+    const rowf = scale && cursorPrice !== null ? scalePriceToRow(scale, cursorPrice) : displayRow;
+    const centered = displayScale !== null && scale !== null;
+    const row = Math.floor(rowf + (centered ? 0.5 : 0));
+    const onGrid = Number.isFinite(row) && row >= 0 && row < rows;
+    const range = ring.residentRange();
+    const inRange = range !== null && sampleCol >= range.oldest && sampleCol <= range.newest && cache.arrays(sampleCol) !== null && onGrid;
+    const price = scale && onGrid ? scaleRowToPrice(scale,
+      displayScale?.kind === 'hybrid' || scale.kind === 'hybrid' ? rowf : row) : null;
+    // Native quote precision is independent of the storage bucket width.
+    // Quarter-unit ticks and sub-nanounit prices must remain distinguishable.
+    const priceDecimals = quoteDecimals(pmap?.tick ?? pmap?.step ?? Number.NaN);
 
-    // Exact grouped size (block = 4^level rows, aligned like the shader).
-    const blk = 4 ** this.currentLevel();
-    const rowStart = Math.floor(row / blk) * blk;
-    const size = onGrid ? this.columnCache.sizeAt(colSeq, rowStart, blk) : null;
+    // Hybrid pixels choose a LOCAL row footprint, independently of time LOD.
+    // Mirror projectedSample, including its neighboring row taps.
+    let blk = 4 ** this.currentLevel();
+    let taps = 1;
+    if (centered && scale && displayScale && cursorPrice !== null) {
+      const low = scaleRowToPrice(displayScale, this.view.rowOffset);
+      const high = scaleRowToPrice(displayScale, this.view.rowOffset + this.view.rowScale);
+      const width = scaleStepAtRow(scale, rowf);
+      const footprint = (high - low) / cssH / Math.max(width, 1e-30);
+      const maxLevel = this.mips?.usable ? this.mips.maxLevel : 0;
+      const level = Math.min(maxLevel, Math.max(this.tickGroupingLevel(), footprint >= 16 ? 2 : footprint >= 4 ? 1 : 0));
+      blk = 4 ** level;
+      taps = Math.max(1, Math.min(4, Math.ceil(footprint / blk)));
+    }
+    const group = taps * blk;
+    const rowStart = (Math.floor((rowf + (centered ? 0.5 : 0)) / blk) - Math.floor((taps - 1) / 2)) * blk;
+    const firstRow = Math.max(0, rowStart), lastRow = Math.min(rows, rowStart + group);
+    const size = onGrid ? cache.sizeAt(sampleCol, firstRow, lastRow - firstRow) : null;
     // The group's true price EXTENT. A grouped cell spans `blk` ROWS, and on a
     // non-uniform grid that is emphatically not `blk * step` of price — so the
     // readout reports the real [lo, hi) rather than implying a uniform width.
-    const priceLo = scale && onGrid ? scaleRowToPrice(scale, rowStart) : null;
-    const priceHi = scale && onGrid ? scaleRowToPrice(scale, rowStart + blk) : null;
+    const priceLo = scale && onGrid ? scaleRowToPrice(scale, rowStart - (centered ? 0.5 : 0)) : null;
+    const priceHi = scale && onGrid ? scaleRowToPrice(scale, rowStart + group - (centered ? 0.5 : 0)) : null;
 
     return {
       colSeq,
       row,
-      group: blk,
+      group,
       price,
       priceLo,
       priceHi,
       priceDecimals,
       bid: size ? size.bid : null,
       ask: size ? size.ask : null,
-      timeNs: this.columnCache.timeAt(colSeq),
+      timeNs: cache.timeAt(sampleCol),
+      averageMs: overview ? overview.stride * this.currentDtNs() / 1e6 : undefined,
       inRange,
     };
   }
@@ -2367,7 +2781,8 @@ export class Renderer {
       return;
     }
     const price = this.overlayPriceMap();
-    const time = this.overlayTimeMap();
+    const overview = this.activeOverview();
+    const time = overview ? overview.timeMap(this.currentDtNs()) : this.overlayTimeMap();
     // Need at least a price affine (axes/BBO/profile) or a time affine (events);
     // with neither there is nothing to map onto the camera.
     if (price === null && time === null) {
@@ -2376,13 +2791,17 @@ export class Renderer {
     }
 
     const gl = this.ctx.gl;
-    const range = this.ring?.residentRange() ?? null;
+    const range = overview?.ring.residentRange() ?? this.ring?.residentRange() ?? null;
     const ctx = this.overlayCtx;
-    ctx.view = this.view;
+    ctx.view = overview ? overview.view(this.view) : this.view;
+    ctx.overviewBars = overview?.bars ?? null;
+    ctx.columnArrays = overview?.columnArrays ?? this.rawColumnArrays;
+    ctx.columnScale = overview ? col => overview.priceScaleAt(col) : this.rawColumnScale;
+    ctx.dataVersion = (overview?.normalizer ?? this.normalizer).tilesVersion;
     ctx.dims.drawW = gl.drawingBufferWidth;
     ctx.dims.drawH = gl.drawingBufferHeight;
-    ctx.dims.cssW = Math.max(1, this.canvas.clientWidth);
-    ctx.dims.cssH = Math.max(1, this.canvas.clientHeight);
+    ctx.dims.cssW = Math.max(1, this.lastResizeCssW);
+    ctx.dims.cssH = Math.max(1, this.lastResizeCssH);
     ctx.dpr = window.devicePixelRatio || 1;
     if (range !== null) {
       this.overlayResident.oldest = range.oldest;
@@ -2395,10 +2814,11 @@ export class Renderer {
     ctx.time = time;
     ctx.price = price;
     ctx.newestArrays = this.newestSeq >= 0 ? this.columnCache.arrays(this.newestSeq) : null;
-    // The mip block the heatmap will paint this frame (tick-grouping floor
-    // included) — the profile samples rows at that block so its bars never
-    // claim finer price resolution than the cells behind them (survey #4).
-    ctx.mipLevel = this.currentLevel();
+    const newestEpoch = this.columnCache.epochAt(this.newestSeq);
+    const newestParams = newestEpoch === null ? undefined : this.store.getState().epochs.get(newestEpoch);
+    ctx.newestPrice = this.columnCache.priceAt(this.newestSeq) ?? (newestParams ? this.priceMapFor(newestParams) : null);
+    // Profile accumulation is independent of local heatmap sampling footprints.
+    ctx.mipLevel = 0; // The profile sums native price intervals, independently of heatmap LOD.
     overlays.draw(ctx);
   }
 
@@ -2420,7 +2840,7 @@ export class Renderer {
       const forced = this.forcedRemapFrom;
       if (forced !== null) {
         const st = this.camera.state;
-        const rowCenter = remapRow(st.rowCenter, forced, toMap);
+        const rowCenter = (remapRow(st.rowCenter - st.rowSpan / 2, forced, toMap) + remapRow(st.rowCenter + st.rowSpan / 2, forced, toMap)) / 2;
         const rowSpan = remapRowSpan(st.rowSpan, forced, toMap, st.rowCenter);
         if (Number.isFinite(rowCenter) && Number.isFinite(rowSpan) && rowSpan > 0) {
           this.camera.remapPrice(rowCenter, rowSpan);
@@ -2437,7 +2857,7 @@ export class Renderer {
     const fromMap = this.priceMapFor(from);
 
     const st = this.camera.state;
-    const rowCenter = remapRow(st.rowCenter, fromMap, toMap);
+    const rowCenter = (remapRow(st.rowCenter - st.rowSpan / 2, fromMap, toMap) + remapRow(st.rowCenter + st.rowSpan / 2, fromMap, toMap)) / 2;
     // The span is measured AROUND the current centre: on a non-uniform grid the
     // same row count spans a different price distance depending on where it
     // sits, so a position-blind ratio would silently resize the user's zoom.
@@ -2495,12 +2915,17 @@ export class Renderer {
    * mapping goes through it, which is what makes a non-uniform grid correct.
    */
   private priceMapFor(ep: EpochParams): PriceMap {
-    const scale = scaleFromEpoch(ep);
-    return {
+    const known = this.epochPriceMaps.get(ep);
+    if (known) return known;
+    const scale = Object.freeze(scaleFromEpoch(ep));
+    const price = Object.freeze({
       p0: scale.kind === 'hybrid' ? scale.coreP0 : scale.p0,
       step: scale.kind === 'hybrid' ? scale.coreStep : scale.step,
+      tick: ep.tick,
       scale,
-    };
+    });
+    this.epochPriceMaps.set(ep, price);
+    return price;
   }
 
   /**
@@ -2524,21 +2949,17 @@ export class Renderer {
   }
 
   /**
-   * CP2: expose the per-slot t0 table as a dense `{ t0, startSeq }` subarray
-   * (`t0[i]` = start time of column `startSeq + i`, coords.ts's TimeSlots) —
-   * but ONLY when it is a contiguous, fully-written, non-wrapping run that
-   * covers the anchor:
-   *  - a WRAP would need a per-frame copy to linearize, and it is only
-   *    reachable long after the reconstructed block scrolled out, where the
-   *    affine map is exact anyway;
+   * Expose actual timestamp knots for a contiguous fully-written resident run
+   * covering the anchor. Wrapped runs are linearized once after column changes
+   * and reused across animation frames. Warm-restart seams can remain anywhere
+   * in the ring, so wrapping never licenses a nominal-dt fallback.
    *  - the run is the contiguous seq run tracked in
    *    {@link slotT0RunStart}/{@link slotT0RunEnd} (R1-M1), so a warm attach
    *    works; every knot handed to coords.ts's helpers is finite (slots outside
    *    the run are never included);
    *  - the anchor must lie inside, so the table and the affine fallback agree
    *    at the seed column.
-   * Returns null otherwise: callers use the affine, which is bit-identical to
-   * the pre-CP2 behaviour.
+   * Returns null for absent or incomplete tables; callers use the affine there.
    */
   private overlaySlotsFor(): TimeSlots | null {
     const ring = this.ring;
@@ -2555,7 +2976,19 @@ export class Renderer {
     const fromSlot = ((from % cap) + cap) % cap;
     const len = to - from + 1;
     if (len < 2) return null; // coords.ts needs two knots
-    if (fromSlot + len > cap) return null; // wrapped in slot space → affine fallback
+    if (fromSlot + len > cap) {
+      // A warm-restart seam can exist anywhere in the ring. Linearize only
+      // after columns change; every animation frame reuses the same table.
+      const memo = this.slotT0Memo;
+      if (memo && memo.source === t0 && memo.from === from && memo.to === to && memo.revision === this.slotT0Revision) return memo.slots;
+      const dense = new Float64Array(len);
+      const first = cap - fromSlot;
+      dense.set(t0.subarray(fromSlot), 0);
+      dense.set(t0.subarray(0, len - first), first);
+      const slots = { t0: dense, startSeq: from };
+      this.slotT0Memo = { source: t0, from, to, revision: this.slotT0Revision, slots };
+      return slots;
+    }
     return { t0: t0.subarray(fromSlot, fromSlot + len), startSeq: from };
   }
 
@@ -2564,8 +2997,8 @@ export class Renderer {
    * piecewise slot table when it covers the column, else the affine map. e2e
    * verification of the reconstructed-history time warp (survey S2/D1).
    */
-  colToTsForTest(col: number): bigint | null {
-    const time = this.overlayTimeMap();
+  timestampAtColumn(col: number): bigint | null {
+    const time = this.activeTimeMap();
     if (time === null) return null;
     if (time.slots !== undefined) {
       const ts = slotColToTsNs(time.slots, col);
@@ -2578,8 +3011,8 @@ export class Renderer {
    * CP2 test hook: the (fractional) column containing `tsNs`, piecewise when the
    * slot table covers it, else the affine inverse. e2e verification hook.
    */
-  colForTsForTest(tsNs: bigint): number | null {
-    const time = this.overlayTimeMap();
+  columnAtTimestamp(tsNs: bigint): number | null {
+    const time = this.activeTimeMap();
     if (time === null) return null;
     if (time.slots !== undefined) {
       const col = slotTsToCol(time.slots, tsNs);
@@ -2588,12 +3021,17 @@ export class Renderer {
     return time.anchorSeq + Number(tsNs - time.anchorT0Ns) / time.dtNs;
   }
 
+  colToTsForTest(col: number): bigint | null { return this.timestampAtColumn(col); }
+  colForTsForTest(tsNs: bigint): number | null { return this.columnAtTimestamp(tsNs); }
+
   // --- context-loss lifecycle (§8.3) --------------------------------------------
 
   /** GL context lost: preventDefault so the browser will restore it, then stop
    *  touching the (now invalid) GL objects until `restored` rebuilds them. */
   private onContextLost = (e: Event): void => {
     e.preventDefault();
+    this.resetOverview();
+    this.presentedSessionId = null;
     this.contextLost = true;
     this.contextLostCountN += 1;
     this.perf = null; // any in-flight perf run is void
@@ -2612,6 +3050,9 @@ export class Renderer {
   /** Rebuild ctx + LUT + ring + heatmap + mips after a restore, preserving the
    *  camera view, then re-fetch the columns the viewport needs. */
   private recreateGL(): void {
+    // Context loss already freed the old program; deleting a stale handle on
+    // the restored context would poison the next allocation error check.
+    releaseHeatmapProgram(this.ctx.gl, false);
     // getContext on the restored canvas returns the same (now-revived) context;
     // re-obtain extension handles + caps and rebuild all GPU resources.
     this.ctx = initGL(this.canvas, {
@@ -2636,7 +3077,7 @@ export class Renderer {
       this.heatmap = new Heatmap(this.ctx, this.ring, this.lut);
       this.heatmap.normalizer = this.normalizer;
       this.heatmap.gamma = this.contrastGamma;
-      this.heatmap.floor = this.toleranceFloor;
+      this.heatmap.toleranceValue = this.toleranceFloor;
       this.heatmap.levelFloor = this.tickGroupingLevel();
       this.applyRamp();
       this.mips = this.createMips(this.ringRows, this.ringLayers);
@@ -2647,18 +3088,13 @@ export class Renderer {
       this.extentSeq = new Int32Array(cap).fill(-1);
       this.slotT0 = new Float64Array(cap).fill(Number.NaN);
       this.slotT0RunStart = -1;
-    this.slotT0RunEnd = -2;
+      this.slotT0RunEnd = -2;
       this.history = this.createHistoryLoader();
-      this.camera.setLimits(limitsFor(this.ringRows, cap));
-      // Rebuild the empty ring's frame, then RESTORE the user's follow intent
-      // (survey #5): a context loss must not silently re-arm follow/fit while
-      // the UI still shows them off. With follow ON — the common case, and what
-      // the previous code hard-coded — this is byte-identical to the old
-      // recovery; with follow OFF the view stays user-owned and the loader
-      // re-fetches the visible range on the next pan.
-      this.camera.reset(null, this.ringRows);
-      this.applyWantedFollow();
-      this.updateView();
+      // Geometry and camera policy survived the GPU loss. Resetting against
+      // the empty cache would shrink All/history views and re-arm tracking
+      // after a manual pan. Restore resources without changing either axis.
+      this.camera.setLimits({ ...this.camera.limits, ...limitsFor(this.ringRows, cap), timeWindow: this.camera.limits.timeWindow });
+      this.view = this.camera.toView();
     }
   }
 
@@ -2673,6 +3109,20 @@ export class Renderer {
       try {
         // A lost context can't draw; wait for `restored` to rebuild GL.
         if (this.glLost()) return;
+
+        if (!renderProgramsReady(this.ctx.gl, this.ctx.caps.colorBufferFloat)) return;
+        if (this.pendingDepth.length > 0) {
+          const ingestStart = performance.now();
+          this.drainingDepth = true;
+          try {
+            for (let n = 0; n < 8 && this.pendingDepth.length > 0; n++) {
+              this.onDepthColumn(this.pendingDepth.shift()!);
+              if (performance.now() - ingestStart >= 4) break;
+            }
+          } finally {
+            this.drainingDepth = false;
+          }
+        }
 
         // Live stats (contract C3): EMA the rAF cadence in place — no
         // allocations, no GL calls. Deltas >1 s (a suspended tab) are skipped
@@ -2706,17 +3156,19 @@ export class Renderer {
       // of jumping once per column. Re-dirties while the glide is in flight.
       this.stepLiveEdgeGlide(ts);
 
+      this.ensureOverview(ts);
+
       // T8: on frames where the view moved, ask the loader to ensure the visible
       // range is populated. This guard is O(1) (visible-left vs resident-oldest) —
       // never O(history) — so the §10 perf gate stays green.
-      if (this.viewMoved && this.history !== null && this.ring !== null) {
+      if (this.viewMoved && this.history !== null && this.ring !== null && this.view.colScale <= this.ring.capacityCols) {
         this.viewMoved = false;
         this.history.ensureVisible({
           leftCol: Math.floor(this.view.colOffset),
           span: this.view.colScale,
-          // NATURAL level: the no-backfill gate tracks zoom-out, not the forced
-          // tick-grouping display — a grouped view still needs resident columns
-          // for the exact crosshair/profile and for its own mip generation.
+          following: this.camera.followTime,
+          // Display LOD does not suppress history: every mip is generated from
+          // the same resident columns, including when the price axis is wide.
           level: this.currentLevel(false),
         });
       }
@@ -2729,7 +3181,10 @@ export class Renderer {
         // outside the measured draw cost; a no-op during the perf preload run).
         this.updateNormalization();
         const t0 = performance.now();
-        this.heatmap.draw(this.view);
+        this.heatmap.priceScale = this.overlayPriceMap()?.scale ?? null;
+        const overview = this.activeOverview();
+        if (overview) overview.draw(this.view, this.heatmap);
+        else this.heatmap.draw(this.view);
         // Overlays (T10) draw OVER the heatmap, O(visible). They are part of the
         // frame the HUD reports (survey #9): the PerfHud chip is the campaign's
         // own regression sensor, and overlays are on by default — measuring only
@@ -2752,6 +3207,9 @@ export class Renderer {
         }
         this.dirty = false;
         this.drawCountN++;
+        if ((this.ring?.residentRange()?.count ?? 0) > 0 && !this.awaitingSession) {
+          this.presentedSessionId = this.lastSessionId;
+        }
         this.lastDrawEndTsN = performance.now();
 
         // Keep redrawing until the viewport norm reaches its target so the
@@ -2826,15 +3284,19 @@ export class Renderer {
 
   /** Deterministic price zoom (factor>1 = zoom out → coarser mip). e2e only. */
   zoomPriceForTest(factor: number): void {
-    this.camera.zoomPrice(factor, this.camera.state.rowCenter);
+    this.pendingOverviewFit = false;
+    this.preparePriceOverview();
+    this.camera.zoomPrice(factor, fractionRow(this.view, this.camera.priceScale, 0.5));
     this.onCameraChanged();
   }
 
   /** Deterministic time zoom (factor>1 = zoom out; clamps at the ring width).
-   *  e2e only. Used to reach the whole-ring deep-zoom-out (no-backfill) state. */
+   *  e2e only. Used to reach the whole-ring zoom-out state. */
   zoomTimeForTest(factor: number): void {
+    this.requestedTimeWindow = undefined;
     this.camera.zoomTime(factor, this.camera.state.colCenter);
     this.onCameraChanged();
+    if (factor > 1 && this.camera.state.colSpan >= maxColSpanFor(this.camera.limits) * 0.999) this.fitPriceOverview(true);
   }
 
   /**
@@ -2899,7 +3361,7 @@ export class Renderer {
     this.dirty = true;
 
     // RG16F storage: colsPerTile × rows × layers texels × 2 channels × 2 bytes.
-    const ringBytes = COLS_PER_TILE * rows * layers * 2 * 2;
+    const ringBytes = ring.fullResBytes();
     return { rows, layers, capacityCols: cap, ringBytes, resident: n };
   }
 
@@ -3047,8 +3509,24 @@ export class Renderer {
     const cssW = Math.max(1, this.canvas.clientWidth);
     const cssH = Math.max(1, this.canvas.clientHeight);
     const uvX = (colSeq + 0.5 - this.view.colOffset) / this.view.colScale;
-    const uvY = (row + 0.5 - this.view.rowOffset) / this.view.rowScale;
+    const uvY = rowFraction(this.view, this.overlayPriceMap()?.scale ?? null, row + 0.5);
     return { x: uvX * cssW, y: (1 - uvY) * cssH };
+  }
+
+  /** Continuous projection for drawings/indicators, without snapping a price
+   *  to an entire coarse storage cell. */
+  canvasCssToGrid(x: number, y: number): { col: number; row: number } | null {
+    if (this.overlayPriceMap() === null) return null;
+    const point = screenToGrid(this.view, x, y, Math.max(1, this.lastResizeCssW), Math.max(1, this.lastResizeCssH), this.overlayPriceMap()?.scale ?? null);
+    return { col: point.colf, row: point.rowf - (this.overlayPriceMap()?.scale?.kind === 'hybrid' ? 0 : 0.5) };
+  }
+
+  gridToCanvasCss(col: number, row: number): { x: number; y: number } {
+    const scale = this.overlayPriceMap()?.scale ?? null;
+    return {
+      x: (col - this.view.colOffset) / this.view.colScale * Math.max(1, this.lastResizeCssW),
+      y: (1 - rowFraction(this.view, scale, row + (scale?.kind === 'hybrid' ? 0 : 0.5))) * Math.max(1, this.lastResizeCssH),
+    };
   }
 
   /** The EMA-smoothed norm currently fed to u_norm (e2e diagnostics). */
@@ -3084,7 +3562,10 @@ export class Renderer {
   snapshot(): string | null {
     if (this.glLost()) return null;
     this.updateNormalization();
-    this.heatmap?.draw(this.view);
+    if (this.heatmap !== null) {
+      this.heatmap.priceScale = this.overlayPriceMap()?.scale ?? null;
+      this.heatmap.draw(this.view);
+    }
     this.drawOverlays();
     return this.canvas.toDataURL('image/png');
   }
@@ -3118,9 +3599,9 @@ export class Renderer {
     const colf = colOf + 0.5;
     // L-1: the row must come from the AUTHORITATIVE scale (hybrid-aware), not
     // the core affine — on a wide-band epoch the two disagree away from the core.
-    const rowf = scalePriceToRow(mapScale(priceMap), price) + 0.5;
+    const rowf = priceToPlotRow(mapScale(priceMap), price);
     const uvX = (colf - this.view.colOffset) / this.view.colScale;
-    const uvY = (rowf - this.view.rowOffset) / this.view.rowScale;
+    const uvY = rowFraction(this.view, this.overlayPriceMap()?.scale ?? null, rowf);
     return { x: uvX * cssW, y: (1 - uvY) * cssH };
   }
 
@@ -3136,17 +3617,20 @@ export class Renderer {
    */
   overlayEffectiveBboForTest(): ReturnType<OverlayManager['effectiveBboForTest']> {
     const newest = this.newestSeq >= 0 ? this.columnCache.arrays(this.newestSeq) : null;
+    const epoch = this.columnCache.epochAt(this.newestSeq);
+    const params = epoch === null ? undefined : this.store.getState().epochs.get(epoch);
     return this.overlays.effectiveBboForTest(
       this.store.getState().capability,
       this.overlayPriceMap(),
       newest,
+      this.columnCache.priceAt(this.newestSeq) ?? (params ? this.priceMapFor(params) : null),
     );
   }
 
   /** Canvas CSS px y of a price row edge (for BBO / axis line sampling). e2e. */
   overlayRowCss(rowf: number): number {
     const cssH = Math.max(1, this.canvas.clientHeight);
-    const uvY = (rowf - this.view.rowOffset) / this.view.rowScale;
+    const uvY = rowFraction(this.view, this.overlayPriceMap()?.scale ?? null, rowf);
     return (1 - uvY) * cssH;
   }
 

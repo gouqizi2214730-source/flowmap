@@ -4,6 +4,10 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 
 import { subscribeQuotes } from '../state/quoteFeed';
+import { flushForTest, ingestForTest, resetForSession, resetForTest } from '../state/bookStore';
+import { useFlowMapStore } from '../state/store';
+import { MODE_L2, MsgType, SIDE_UNKNOWN } from '../proto/types';
+import { DEMO_INTELLIGENCE, useIntelligenceStore } from '../state/intelligenceStore';
 import {
   addToWatchlist,
   getWatchlist,
@@ -12,7 +16,7 @@ import {
   setWatchlistStorage,
   type StorageLike,
 } from '../watchlist/store';
-import { Watchlist, quoteChangeText, quoteDirection, quotePriceText, symbolOf } from './Watchlist';
+import { LIVE_QUOTE_STALE_MS, Watchlist, quoteChangeText, quoteDirection, quotePriceText, symbolOf } from './Watchlist';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -83,6 +87,9 @@ function text(container: HTMLElement, testId: string): string {
 }
 
 beforeEach(() => {
+  resetForTest();
+  useFlowMapStore.setState({ subscription: null, sessionId: null, sessionRevision: 0, status: 'idle', feedState: null });
+  useIntelligenceStore.setState(useIntelligenceStore.getInitialState(), true);
   resetWatchlistForTest();
   setWatchlistStorage(memStorage());
   installFeedMock();
@@ -98,6 +105,8 @@ afterEach(() => {
     }
     container.remove();
   }
+  resetForTest();
+  vi.useRealTimers();
 });
 
 describe('pure helpers', () => {
@@ -121,6 +130,90 @@ describe('pure helpers', () => {
     expect(quotePriceText({ price: 12.5, reachable: true })).toBe('12.50');
     expect(quotePriceText({ price: 12.5, reachable: false })).toBe('—');
     expect(quoteChangeText({ changePct: 1.25, reachable: false })).toBe('—');
+    for (const price of [0, -1, NaN, Infinity]) {
+      expect(quotePriceText({ price, reachable: true })).toBe('—');
+      expect(quoteChangeText({ price, changePct: 0, reachable: true })).toBe('—');
+    }
+  });
+});
+
+describe('Watchlist active stream bridge', () => {
+  const activate = (symbol = 'BTCUSDT', mode: 'live' | 'replay' = 'live', market = 'crypto'): void => {
+    useFlowMapStore.setState({ subscription: { market, symbol, mode, band: 'native' },
+      sessionId: `session-${symbol}-${mode}`, status: 'live', feedState: null });
+  };
+  const inside = (ts: bigint, bid = 100.39, ask = 100.4): void => {
+    ingestForTest({ type: MsgType.BBO, ts_ns: ts, bid_px: bid, bid_sz: 3, ask_px: ask, ask_sz: 4 });
+    flushForTest();
+  };
+
+  it('uses the raw midpoint with a grouped epoch and preserves the genuine daily change', () => {
+    activate();
+    addToWatchlist('crypto:BTCUSDT');
+    useFlowMapStore.setState({ epochs: new Map([[1, { epoch: 1, tick: 0.01, tick_multiple: 50,
+      dt_ns: 1_000_000, p0: 50, rows: 200 }]]), gridEpoch: 1 });
+    ingestForTest({ type: MsgType.DEPTH_COL, epoch: 1, col_seq: 1, t0_ns: 1n,
+      mode: MODE_L2, final: true, bid: new Float32Array(200), ask: new Float32Array(200) });
+    inside(1n);
+    const { container } = render(<Watchlist activeKey="crypto:BTCUSDT" onSelect={vi.fn()} />);
+    const network = Object.freeze({ price: 90, changePct: 2.5, spark: [80, 90], reachable: true });
+    emit('crypto:BTCUSDT', network);
+    expect(text(container, 'watchlist-price-crypto:BTCUSDT')).toBe('100.40');
+    expect(Number(container.querySelector('[data-testid="watchlist-price-crypto:BTCUSDT"]')?.getAttribute('data-raw-price'))).toBeCloseTo(100.395, 10);
+    expect(network.price).toBe(90); // HTTP/alert payload remains untouched
+    expect(text(container, 'watchlist-change-crypto:BTCUSDT')).toBe('+2.50%');
+    expect(text(container, 'watchlist-source-crypto:BTCUSDT')).toBe('LIVE MID');
+    expect(subscribeMock).toHaveBeenCalledTimes(1);
+    expect(lastKeys).toEqual(['crypto:BTCUSDT']);
+  });
+
+  it('coalesces book notifications to ten price updates per second and marks aged quotes stale', () => {
+    vi.useFakeTimers();
+    vi.spyOn(performance, 'now').mockImplementation(() => Date.now());
+    activate();
+    addToWatchlist('crypto:BTCUSDT');
+    inside(1n, 100, 101);
+    const { container } = render(<Watchlist activeKey="crypto:BTCUSDT" onSelect={vi.fn()} />);
+    act(() => { inside(2n, 101, 102); inside(3n, 102, 103); vi.advanceTimersByTime(99); });
+    expect(text(container, 'watchlist-price-crypto:BTCUSDT')).toBe('100.50');
+    act(() => vi.advanceTimersByTime(1));
+    expect(text(container, 'watchlist-price-crypto:BTCUSDT')).toBe('102.50');
+    act(() => vi.advanceTimersByTime(LIVE_QUOTE_STALE_MS));
+    expect(text(container, 'watchlist-stale-crypto:BTCUSDT')).toBe('stale');
+    vi.restoreAllMocks();
+  });
+
+  it('clears the active quote on a switch and never transfers the old instrument price', () => {
+    activate();
+    addToWatchlist('crypto:BTCUSDT');
+    addToWatchlist('crypto:ETHUSDT');
+    inside(1n);
+    const { container, root } = render(<Watchlist activeKey="crypto:BTCUSDT" onSelect={vi.fn()} />);
+    expect(text(container, 'watchlist-source-crypto:BTCUSDT')).toBe('LIVE MID');
+    act(() => {
+      activate('ETHUSDT');
+      root.render(<Watchlist activeKey="crypto:ETHUSDT" onSelect={vi.fn()} />);
+    });
+    expect(text(container, 'watchlist-price-crypto:ETHUSDT')).toBe('—');
+    expect(text(container, 'watchlist-price-crypto:BTCUSDT')).toBe('—');
+    act(() => { resetForSession(); inside(2n, 25, 26); });
+    // Initial reset may await the remainder of the 100ms cadence.
+    expect(text(container, 'watchlist-price-crypto:ETHUSDT')).not.toBe('100.40');
+  });
+
+  it('uses a real last trade only when no quote exists, and excludes replay/demo', () => {
+    activate();
+    addToWatchlist('crypto:BTCUSDT');
+    ingestForTest({ type: MsgType.TRADE, ts_ns: 1n, price: 99, size: 2,
+      side: SIDE_UNKNOWN, side_src: 2, venue: 'binance' });
+    const { container } = render(<Watchlist activeKey="crypto:BTCUSDT" onSelect={vi.fn()} />);
+    expect(text(container, 'watchlist-price-crypto:BTCUSDT')).toBe('99.00');
+    expect(text(container, 'watchlist-source-crypto:BTCUSDT')).toBe('LIVE LAST');
+    expect(text(container, 'watchlist-change-crypto:BTCUSDT')).toBe('—');
+    act(() => activate('BTCUSDT', 'replay'));
+    expect(text(container, 'watchlist-price-crypto:BTCUSDT')).toBe('—');
+    act(() => { activate('BTCUSDT', 'live', 'sim'); resetForSession(); inside(2n); });
+    expect(text(container, 'watchlist-source-crypto:BTCUSDT')).toBe('SNAPSHOT');
   });
 });
 
@@ -237,7 +330,7 @@ describe('Watchlist panel', () => {
     act(() => {
       starB.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     });
-    starB.click(); // native activation path (what the guard preserves)
+    act(() => starB.click()); // native activation path (what the guard preserves)
     expect(getWatchlist()).toEqual(['sim:A']);
     expect(onSelect).not.toHaveBeenCalled();
   });
@@ -290,7 +383,17 @@ describe('Watchlist panel', () => {
     expect(unsubCalls).toBe(1);
   });
 
-  it('renders Talent Index and Executive Jet Alert for symbols with deep intelligence data', () => {
+  it('does not show seeded quotes or institutional alerts before real data arrives', () => {
+    addToWatchlist('nasdaq:NVDA');
+    const { container } = render(<Watchlist activeKey="nasdaq:NVDA" onSelect={vi.fn()} />);
+    expect(text(container, 'watchlist-price-nasdaq:NVDA')).toBe('—');
+    expect(text(container, 'watchlist-change-nasdaq:NVDA')).toBe('—');
+    expect(container.querySelector('[data-testid="watchlist-talent-nasdaq:NVDA"]')).toBeNull();
+    expect(container.querySelector('[data-testid="watchlist-jet-nasdaq:NVDA"]')).toBeNull();
+  });
+
+  it('renders supplied Talent Index and Executive Jet Alert data', () => {
+    useIntelligenceStore.setState({ talent: { NVDA: { ...DEMO_INTELLIGENCE.talent.NVDA } }, corporateJets: [{ ...DEMO_INTELLIGENCE.corporateJets[0] }] });
     addToWatchlist('nasdaq:NVDA');
     const { container } = render(<Watchlist activeKey="nasdaq:NVDA" onSelect={vi.fn()} />);
 

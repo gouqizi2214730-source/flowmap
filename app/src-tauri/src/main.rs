@@ -33,6 +33,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -54,7 +55,77 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const MONITOR_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Holds the sidecar child so it can be terminated exactly once on exit.
-struct SidecarState(Mutex<Option<Child>>);
+struct SidecarState(Mutex<Option<ManagedChild>>);
+
+/// Keep the sidecar tied to the shell even if the shell crashes. A Windows
+/// child otherwise survives its parent, continuing to record and use memory.
+struct ManagedChild {
+    process: Child,
+    #[cfg(windows)]
+    _job: SidecarJob,
+}
+
+impl ManagedChild {
+    fn new(mut process: Child) -> Result<Self, Box<dyn std::error::Error>> {
+        #[cfg(windows)]
+        let job = match SidecarJob::attach(&process) {
+            Ok(job) => job,
+            Err(err) => {
+                let _ = process.kill();
+                let _ = process.wait();
+                return Err(err.into());
+            }
+        };
+        Ok(Self { process, #[cfg(windows)] _job: job })
+    }
+}
+
+impl Deref for ManagedChild {
+    type Target = Child;
+    fn deref(&self) -> &Child { &self.process }
+}
+impl DerefMut for ManagedChild {
+    fn deref_mut(&mut self) -> &mut Child { &mut self.process }
+}
+
+#[cfg(windows)]
+struct SidecarJob {
+    // Store the owned handle as an integer so the monitor can transfer its
+    // ownership across threads. No other object closes or inherits this handle.
+    handle: usize,
+}
+
+#[cfg(windows)]
+impl SidecarJob {
+    fn attach(child: &Child) -> windows::core::Result<Self> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
+            JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        };
+        let handle = unsafe { CreateJobObjectW(None, PCWSTR::null())? };
+        let job = Self { handle: handle.0 as usize };
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(handle, JobObjectExtendedLimitInformation,
+                &limits as *const _ as *const std::ffi::c_void,
+                std::mem::size_of_val(&limits) as u32)?;
+            AssignProcessToJobObject(handle, HANDLE(child.as_raw_handle()))?;
+        }
+        Ok(job)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SidecarJob {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::{CloseHandle, HANDLE};
+        unsafe { let _ = CloseHandle(HANDLE(self.handle as *mut std::ffi::c_void)); }
+    }
+}
 
 /// Set just before teardown begins; the sidecar monitor reads it to stand down
 /// instead of respawning into a dying process.
@@ -344,7 +415,7 @@ fn spawn_sidecar(
     app: &tauri::AppHandle,
     port: u16,
     spawn_index: u32,
-) -> Result<Child, Box<dyn std::error::Error>> {
+) -> Result<ManagedChild, Box<dyn std::error::Error>> {
     let python = resolve_python(app)
         .ok_or("bundled pyruntime not found (expected Contents/Resources/pyruntime)")?;
 
@@ -359,8 +430,14 @@ fn spawn_sidecar(
     eprintln!("[flowmap] sidecar: {} -m flowmap_server on :{port}", python.display());
     eprintln!("[flowmap] server log -> {}", log_path.display());
 
-    let child = Command::new(&python)
-        .arg("-m")
+    let mut command = Command::new(&python);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+        command.creation_flags(CREATE_NO_WINDOW.0);
+    }
+    let child = command.arg("-m")
         .arg("flowmap_server")
         .env("FLOWMAP_HOST", "127.0.0.1")
         .env("FLOWMAP_PORT", port.to_string())
@@ -373,7 +450,7 @@ fn spawn_sidecar(
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err))
         .spawn()?;
-    Ok(child)
+    ManagedChild::new(child)
 }
 
 /// Periodically check the sidecar and respawn it ONCE on the same port if it
@@ -382,12 +459,8 @@ fn spawn_sidecar(
 /// surfaced through the log only — this shell has no webview event channel,
 /// so there is nothing else to append to.
 ///
-/// Residual race, documented honestly: if teardown begins in the microseconds
-/// between this thread's shutdown re-check and `process::exit`, the freshly
-/// respawned child would outlive the shell. `is_shutting_down` is checked
-/// before spawning AND after re-storing the child, which shrinks that window
-/// to a thread-scheduling step; a full fix needs a condvar handshake that is
-/// not worth the complexity for a local viewer.
+/// Windows job ownership also reaps a respawn if the shell exits between the
+/// shutdown checks. Unix retains the explicit signal/wait teardown below.
 fn spawn_sidecar_monitor(handle: tauri::AppHandle, port: u16) {
     std::thread::spawn(move || {
         let mut respawned = false;
@@ -570,6 +643,29 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn closing_the_sidecar_job_terminates_its_process() {
+        use std::os::windows::process::CommandExt;
+        use windows::Win32::System::Threading::CREATE_NO_WINDOW;
+        let mut child = Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"])
+            .creation_flags(CREATE_NO_WINDOW.0).spawn().expect("test child");
+        let job = SidecarJob::attach(&child).expect("attach child to private job");
+        assert!(child.try_wait().unwrap().is_none());
+        drop(job);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if child.try_wait().unwrap().is_some() { break; }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child survived its job owner");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     #[test]
     fn lock_pid_parses_decimal_with_newline() {

@@ -33,6 +33,7 @@ import {
 import { MipChain } from './mips';
 import { MODE_L2 } from '../proto/types';
 import { COLS_PER_TILE, TileRing, type ResidentRange } from './tileRing';
+import type { PriceScale } from './priceScale';
 
 /** Additive per-draw sampler diagnostics (campaign visual 2026-09-11; lane F). */
 export interface HeatmapSampleInfo {
@@ -104,6 +105,7 @@ export interface FlowmapTestApi {
    *  `'theme'` the theme-owned rows 5/6 are used (register them first). */
   setColormap(colormap: Colormap): void;
   setView(view: HeatmapView): void;
+  setPriceScale(scale: PriceScale | null): void;
   /** Fit-to-resident view (fills the canvas with all resident columns). */
   fitView(): HeatmapView;
   render(): void;
@@ -162,6 +164,7 @@ export function installHeatmapTestHook(canvas: HTMLCanvasElement): void {
   let state: HookState | null = null;
 
   const api: FlowmapTestApi = {
+    setPriceScale(scale) { if (state !== null) state.heatmap.priceScale = scale; },
     init(rows, layers, width = 512, height = 512, mips = false) {
       canvas.width = width;
       canvas.height = height;

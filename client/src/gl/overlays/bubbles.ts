@@ -250,19 +250,26 @@ export class Bubbles {
     scale.maxRadiusPx = this.opts.maxRadiusPx;
     this.beginThin(gm);
     points.begin();
-    // Scan newest → oldest. Timestamps are monotonic in insertion order, so the
-    // horizontal position decreases monotonically as we walk back: once a bubble
-    // sits left of the viewport, every remaining (older) one does too → break.
-    // That keeps the pass O(visible) no matter how large the ring is.
-    for (let i = 0; i < this.count; i++) {
-      const idx = (this.head - 1 - i + n) % n;
+    // Seek the right edge before walking backwards. Deep history must not
+    // scan all 120k newer prints each animation frame. Equal timestamps remain
+    // separate legitimate prints; the bound includes the whole equal run.
+    const oldest = (this.head - this.count + n) % n;
+    const rightCol = gm.view.colOffset + gm.view.colScale * 1.02 - .5;
+    let lo = 0, hi = this.count;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (gm.tsToCol(this.ts[(oldest + mid) % n]) <= rightCol) lo = mid + 1;
+      else hi = mid;
+    }
+    for (let i = lo - 1; i >= 0; i--) {
+      const idx = (oldest + i) % n;
       const colf = gm.tsToCol(this.ts[idx]) + 0.5; // center within the column
       const cx = gm.clipX(colf);
       if (cx > 1.04) continue; // newer than the right edge (scrolled back): keep scanning
       if (cx < -1.04) break; // older than the left edge: all remaining are older too
       const size = this.size[idx];
       if (size < minSize) continue;
-      const rowf = gm.priceToRow(this.price[idx]) + 0.5;
+      const rowf = gm.priceEventToRow(this.price[idx]);
       const cy = gm.clipY(rowf);
       if (cy < -1.04 || cy > 1.04) continue;
       const rPx = bubbleRadiusPx(size, scale);

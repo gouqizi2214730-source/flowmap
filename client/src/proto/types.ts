@@ -26,6 +26,7 @@ export enum MsgType {
   HELLO = 0x01,
   EPOCH_START = 0x02,
   DEPTH_COL = 0x03,
+  BOOK_UPDATE = 0x23,
   BAR_COL = 0x04,
   TRADE = 0x05,
   BBO = 0x06,
@@ -71,7 +72,8 @@ export type MarkerKind =
   | 'info'
   | 'capitol'
   | 'defense_contract'
-  | 'clinical';
+  | 'clinical'
+  | 'history_metadata_page';
 export type FeedState = 'live' | 'degraded' | 'closed' | 'reconnecting';
 export type StreamMode = 'live' | 'replay';
 
@@ -116,6 +118,13 @@ export interface DepthColumn {
   final: boolean;
   bid: Float32Array;
   ask: Float32Array | null; // null iff mode === MODE_SYNTH_PROFILE
+  /** Client-only history provenance; decoded from reserved info markers. */
+  coarse_ranges?: readonly (readonly [low: number, high: number, width: number])[];
+}
+
+/** Current book, kept independent of time-weighted historical heatmap columns. */
+export interface BookUpdate extends Omit<DepthColumn, 'type'> {
+  type: MsgType.BOOK_UPDATE;
 }
 
 export interface BarColumn {
@@ -256,6 +265,17 @@ export interface HistoryRequest {
   req_id: number;
   before_t: bigint;
   n_cols: number;
+  start_col?: number;
+  end_col?: number;
+  stride?: number;
+}
+
+/** Independent coarse history request; n_cols counts returned time buckets. */
+export interface HistoryOverviewRequest {
+  start_col: number;
+  end_col: number;
+  stride: number;
+  metadata_cursor?: string;
 }
 
 export interface GexLevelUpdate {
@@ -292,6 +312,7 @@ export interface MacroStressUpdate {
 /** Any decodable message. Discriminated on `type`. */
 export type Msg =
   | DepthColumn
+  | BookUpdate
   | BarColumn
   | Trade
   | BBO

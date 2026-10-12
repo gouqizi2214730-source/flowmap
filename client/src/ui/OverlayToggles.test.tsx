@@ -43,6 +43,8 @@ describe('OverlayToggles', () => {
       expect(btn.getAttribute('aria-pressed')).toBe(String(DEFAULT_OVERLAY_VISIBILITY[
         (btn.textContent === 'BBO'
           ? 'bbo'
+          : btn.textContent === 'Liquidity'
+            ? 'profile'
           : btn.textContent === 'VWAP'
             ? 'vwap'
             : btn.textContent!.toLowerCase()) as keyof typeof DEFAULT_OVERLAY_VISIBILITY
@@ -67,7 +69,7 @@ describe('OverlayToggles', () => {
     // bare abbreviations are expanded in the tooltip
     expect(byLabel.get('BBO')).toContain('best bid/offer');
     expect(byLabel.get('VWAP')).toContain('volume-weighted average price');
-    expect(byLabel.get('Profile')).toContain('volume profile');
+    expect(byLabel.get('Liquidity')).toContain('resting orders');
     expect(byLabel.get('Markers')).toBeTruthy();
     expect(byLabel.get('Axes')).toBeTruthy();
     expect(byLabel.get('Bubbles')).toBeTruthy();

@@ -205,6 +205,17 @@ describe('scope + armed placement', () => {
     expect(s.items[0].tool).toBe('hline');
     expect(s.items[0].points[0].price).toBe(priceAt(80));
   });
+
+  it('places the first drawing in the current epoch after an empty layer slept', async () => {
+    await renderLayer(); await frame();
+    // No intervening animation frame: stale projections still refer to p0=0.
+    act(() => useFlowMapStore.setState({gridEpoch:2,
+      epochs:new Map([[2,{...PARAMS, epoch:2, p0:1000}]])}));
+    act(() => useDrawingsStore.getState().armTool('hline'));
+    fire(wrapper, 'pointerdown', 120, 80);
+    fire(wrapper, 'pointerup', 120, 80);
+    expect(useDrawingsStore.getState().items[0].points[0].price).toBe(1000+priceAt(80));
+  });
 });
 
 describe('select mode: hit + drag on the CONTAINER (layer stays pointer-transparent)', () => {

@@ -54,10 +54,14 @@ const GL_ERROR_NAMES: Record<number, string> = {
 
 /**
  * Throw if the GL error queue is non-empty, tagging the failure with `label`.
- * Drains the queue so one error does not mask later checks. No-op on success —
- * cheap enough to sprinkle after every state-changing batch during bring-up.
+ * Allocation checks always run. Hot-path checks are opt-in: getError is a
+ * synchronous GPU round trip and can wait behind the entire drawing queue.
  */
-export function checkGLError(gl: WebGL2RenderingContext, label: string): void {
+export const checkGLHotPath = import.meta.env.MODE === 'test' ||
+  (typeof location !== 'undefined' && new URLSearchParams(location.search).get('glcheck') === '1');
+
+export function checkGLError(gl: WebGL2RenderingContext, label: string, hotPath = false): void {
+  if (hotPath && !checkGLHotPath) return;
   const errors: string[] = [];
   // Bounded loop: never spin forever if the context is lost.
   for (let i = 0; i < 16; i++) {

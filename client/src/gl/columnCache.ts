@@ -45,6 +45,8 @@
  * Pure CPU, no GL (see columnCache.test.ts).
  */
 
+import type { PriceMap } from './overlays/coords';
+
 /** Exact summed resting size at a cell (or grouped cell). */
 export interface CellSize {
   bid: number;
@@ -87,6 +89,9 @@ export class ColumnCache {
   private readonly seqs: Float64Array;
   private readonly t0s: BigInt64Array;
   private readonly epochs: Int32Array;
+  /** Immutable native geometry captured on ingestion, independent of Hello's
+   * mutable epoch-number table. References are shared across epoch columns. */
+  private readonly prices: (PriceMap | null)[];
   /** Per-slot flags: bit0 present, bit1 ask-present. */
   private readonly flags: Uint8Array;
   private countN = 0;
@@ -97,6 +102,7 @@ export class ColumnCache {
     this.seqs = new Float64Array(this.capacity);
     this.t0s = new BigInt64Array(this.capacity);
     this.epochs = new Int32Array(this.capacity);
+    this.prices = new Array(this.capacity).fill(null);
     this.flags = new Uint8Array(this.capacity);
   }
 
@@ -148,6 +154,7 @@ export class ColumnCache {
     this.pages.fill(null);
     this.poolRows = rows;
     this.flags.fill(0);
+    this.prices.fill(null);
     this.countN = 0;
   }
 
@@ -169,7 +176,7 @@ export class ColumnCache {
    * column re-sent each flush) overwrites its slot in place. Writing a column
    * whose slot holds a different col_seq implicitly evicts it — ring parity.
    */
-  put(colSeq: number, bid: Float32Array, ask: Float32Array | null, t0_ns: bigint, epoch = 0): void {
+  put(colSeq: number, bid: Float32Array, ask: Float32Array | null, t0_ns: bigint, epoch = 0, nativePrice: PriceMap | null = null): void {
     this.ensureRows(bid.length);
     const rows = this.poolRows;
     const slot = this.slotOf(colSeq);
@@ -181,6 +188,8 @@ export class ColumnCache {
     this.seqs[slot] = colSeq;
     this.t0s[slot] = t0_ns;
     this.epochs[slot] = epoch;
+    if (nativePrice?.scale) Object.freeze(nativePrice.scale);
+    this.prices[slot] = nativePrice ? Object.freeze(nativePrice) : null;
     this.flags[slot] = FLAG_PRESENT | (ask !== null ? FLAG_ASK : 0);
   }
 
@@ -226,6 +235,13 @@ export class ColumnCache {
     return this.epochs[slot];
   }
 
+  /** Native row/price geometry of this exact cached column, null when unknown. */
+  priceAt(colSeq: number): PriceMap | null {
+    const slot = this.slotOf(colSeq);
+    return (this.flags[slot] & FLAG_PRESENT) !== 0 && this.seqs[slot] === colSeq
+      ? this.prices[slot] : null;
+  }
+
   /**
    * The EXACT summed resting size at `(colSeq, rowStart)`, summing `groupRows`
    * consecutive rows `[rowStart, rowStart+groupRows)` (clamped to the grid) so a
@@ -262,6 +278,7 @@ export class ColumnCache {
    */
   reset(): void {
     this.flags.fill(0);
+    this.prices.fill(null);
     this.countN = 0;
     this.pages.fill(null);
     this.poolRows = 0;

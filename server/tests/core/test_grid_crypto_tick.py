@@ -23,7 +23,7 @@ import numpy as np
 
 from flowmap_server.config import Config
 from flowmap_server.core.backfill import Candle, columns_from_candles
-from flowmap_server.core.grid import FinalizedColumn, Grid, GridCfg, adaptive_tick_for
+from flowmap_server.core.grid import FinalizedColumn, Grid, GridCfg, adaptive_tick_for, deep_core_multiple
 from flowmap_server.core.session import (
     SessionManager,
     _crypto_tick_auto,
@@ -32,6 +32,21 @@ from flowmap_server.core.session import (
 from flowmap_server.proto.events import SIDE_BUY, BarColumn, EpochParams
 
 import pytest
+
+
+def test_deep_btc_core_keeps_a_thirty_dollar_move_in_detailed_rows():
+    mgr = SessionManager(Config(recording_enabled=False, ring_columns=8), timer=FakeTimer())
+    grid = mgr._grid_for(_adaptive_feed(symbol="BTCUSDT", preferred_tick=.01), "deep")
+    _first_mid(grid, 85500, n=8, step=.01)
+    assert grid.scale.core_step == pytest.approx(.5)
+    assert grid.current_epoch_params().tick == .01
+    assert grid.current_epoch_params().tick_multiple == 50
+    bids = 85530 - np.arange(8) * .5
+    asks = 85530.5 + np.arange(8) * .5
+    grid.on_book(grid.cfg.dt_ns, bids, np.ones(8), asks, np.ones(8))
+    assert np.count_nonzero(grid._state[0]) == 8
+    assert np.count_nonzero(grid._state[1]) == 8
+    assert grid.maybe_reanchor(85530.25) is None
 
 
 class FakeTimer:
@@ -385,3 +400,79 @@ def test_preload_still_rejects_a_foreign_shape() -> None:
     )
     with pytest.raises(ValueError, match="do not match grid cfg"):
         grid.preload(cols, [wrong_rows])
+
+
+SYMBOL_CASES = [
+    ("RUNEUSDT", 0.7835, 0.001, 17_000.0),
+    ("BTCUSDT", 85_372.005, 0.01, 0.25),
+    ("ETHUSDT", 3_210.005, 0.01, 2.0),
+    ("SOLUSDT", 142.005, 0.01, 100.0),
+    ("DOGEUSDT", 0.123455, 0.00001, 80_000.0),
+    ("SHIBUSDT", 0.000012345, 0.00000001, 800_000_000.0),
+    ("PEPEUSDT", 0.000008345, 0.00000001, 2_000_000_000.0),
+    ("ETHBTC", 0.038555, 0.00001, 4.0),
+]
+
+
+@pytest.mark.parametrize("symbol,mid,tick,size", SYMBOL_CASES, ids=[c[0] for c in SYMBOL_CASES])
+@pytest.mark.parametrize("band", ["native", "deep", "wide", "full"])
+def test_symbol_geometry_uses_venue_tick_in_every_band(symbol, mid, tick, size, band):
+    mgr = SessionManager(Config(recording_enabled=False, ring_columns=8), timer=FakeTimer())
+    grid = mgr._grid_for(_adaptive_feed(symbol=symbol, preferred_tick=tick), band)
+    best_bid = math.floor(mid / tick) * tick
+    bids = best_bid - np.arange(8) * tick
+    asks = best_bid + (np.arange(8) + 1) * tick
+    qty = np.full(8, size)
+    grid.on_book(0, bids, qty, asks, qty)
+    ep = grid.maybe_reanchor(mid)
+    assert ep is not None
+    assert ep.tick == tick
+    if band == "deep":
+        assert grid.scale.kind == 1
+        assert grid.scale.core_p0 > 0
+        assert grid.scale.core_step == pytest.approx(tick * deep_core_multiple(mid, tick, grid.cfg.core_rows))
+        assert grid.scale.core_rows * grid.scale.core_step >= mid * .01
+        assert np.sum(grid._state[0]) == pytest.approx(8 * size)
+        assert np.sum(grid._state[1]) == pytest.approx(8 * size)
+    if band == "native":
+        assert ep.p0 >= 0
+
+
+@pytest.mark.parametrize("band", ["deep", "wide", "full"])
+def test_unavailable_metadata_fallback_adapts_before_band_anchor(band):
+    mgr = SessionManager(Config(recording_enabled=False, ring_columns=8), timer=FakeTimer())
+    grid = mgr._grid_for(_adaptive_feed(), band)
+    ep = _first_mid(grid, 0.7835, n=8, step=0.001)
+    assert ep is not None and ep.tick == pytest.approx(1e-5)
+    assert grid._step < 0.01
+    if band == "deep":
+        assert grid.scale.kind == 1 and grid.scale.core_p0 > 0
+
+
+def test_large_quantities_survive_finalize_history_recording_and_rehydration(tmp_path):
+    from flowmap_server.core.record import Recorder
+
+    cfg = GridCfg(tick=0.001, tick_multiple=1, dt_ns=250_000_000,
+                  p0=0.75, rows=64, ring_columns=8, mode=0)
+    grid = Grid(cfg)
+    px = np.array([0.78, 0.779, 0.778])
+    qty = np.array([80_000., 8_000_000., 2_000_000_000.])
+    args = (px, qty, px + 0.01, qty * 2)
+    grid.on_book(0, *args)
+    col = grid.on_book(cfg.dt_ns, *args)[0]
+    depth = grid.to_depth(col)
+    np.testing.assert_allclose(depth.bid[[30, 29, 28]], qty, rtol=0.001)
+    assert depth.bid.max() > 1e9 and np.isfinite(depth.bid).all()
+    historical = grid.history(cfg.dt_ns, 1)
+    np.testing.assert_array_equal(historical[0].bid, col.bid)
+    rec = Recorder(tmp_path, 20)
+    writer = rec.open_session("binance-spot", "SHIBUSDT")
+    writer.record_epoch(grid.current_epoch_params())
+    writer.record_column(col)
+    writer.close()
+    tail = rec.load_tail("binance-spot", "SHIBUSDT", max_age_ns=10**15, now_ns=cfg.dt_ns, limit_cols=8)
+    assert tail is not None
+    np.testing.assert_array_equal(tail.columns[0].bid, col.bid)
+    restored = Grid(cfg)
+    restored.preload(tail.columns, tail.epochs)
+    np.testing.assert_array_equal(restored.history(cfg.dt_ns, 1)[0].bid, col.bid)

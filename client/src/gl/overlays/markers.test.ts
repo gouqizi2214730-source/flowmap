@@ -33,6 +33,7 @@ function makeFrame() {
     // Bottom-of-canvas for row 0, so an off-canvas label is easy to detect.
     cssY: (row: number) => CSS_H - row,
     priceToRow: (_p: number) => 5,
+    priceEventToRow: (_p: number) => 5.5,
   };
   const frame = {
     gm,

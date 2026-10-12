@@ -95,7 +95,7 @@ def test_crypto_routes_and_keeps_its_market_string(
 def test_crypto_routing_is_capability_honest() -> None:
     """Routing does not flatten the native/ccxt distinction on the way through."""
     native = build_feed(_sub("binance-usdm"), Config(), realtime_sim=False)
-    ccxt_only = build_feed(_sub("kraken"), Config(), realtime_sim=False)
+    ccxt_only = build_feed(_sub("kucoin"), Config(), realtime_sim=False)
     assert native.native and native.capability["depth"] == "L2"
     assert not ccxt_only.native and ccxt_only.capability["depth"] == "L2-snapshot"
 

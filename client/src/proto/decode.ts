@@ -366,6 +366,7 @@ type HotDecoder = (view: DataView, off: number, plen: number) => Msg;
 
 const HOT_DECODERS: Partial<Record<number, HotDecoder>> = {
   [MsgType.DEPTH_COL]: decDepth,
+  [MsgType.BOOK_UPDATE]: (view, off, plen) => ({ ...decDepth(view, off, plen), type: MsgType.BOOK_UPDATE }),
   [MsgType.BAR_COL]: decBar,
   [MsgType.TRADE]: decTrade,
   [MsgType.BBO]: decBbo,

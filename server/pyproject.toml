@@ -1,6 +1,6 @@
 [project]
 name = "flowmap-server"
-version = "1.4.0"
+version = "1.5.0"
 requires-python = ">=3.13"
 dependencies = [
   # One engine for both markets. The `market` extra pulls ccxt, which is what
@@ -32,7 +32,7 @@ dev = [
 ]
 
 [tool.uv.sources]
-crocodile = { git = "https://github.com/nazmiefearmutcu/Crocodile.git", rev = "2e22c901dff7f0b4ec98ef7e66b8a10de4464d9c" }
+crocodile = { path = "vendor/crocodile-0.3.1-py3-none-any.whl" }
 
 [build-system]
 requires = ["hatchling"]

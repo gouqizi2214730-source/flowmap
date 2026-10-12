@@ -23,8 +23,8 @@
  */
 
 import type { StreamMsg } from '../net/connection';
-import { MsgType, type BBO, type DepthColumn, type Trade } from '../proto/types';
-import { useFlowMapStore } from './store';
+import { MsgType, type BBO, type BookUpdate, type DepthColumn, type Trade } from '../proto/types';
+import { sessionResetKey, useFlowMapStore, type FlowMapState } from './store';
 import { LIVE_UPDATE_MS } from './cadence';
 
 /** Max trades retained for the tape (spec §9: "last ~200"); ring is a touch larger. */
@@ -34,6 +34,8 @@ export const THROTTLE_MS = LIVE_UPDATE_MS;
 
 /** Current book: the newest DepthColumn's density arrays + identity. */
 export interface BookBuffer {
+  /** Current resting size, instead of the last settled heatmap average. */
+  instant?: boolean;
   epoch: number;
   /** MODE_L2 | MODE_L1_BAND | MODE_SYNTH_PROFILE (proto/types). */
   mode: number;
@@ -46,6 +48,8 @@ export interface BookBuffer {
 }
 
 export interface BboBuffer {
+  /** Local monotonic arrival clock; never inferred from an exchange timestamp. */
+  receivedAtMs?: number;
   tsNs: bigint;
   bidPx: number;
   bidSz: number;
@@ -54,16 +58,24 @@ export interface BboBuffer {
 }
 
 export interface TapeTrade {
+  /** Local arrival clock for freshness; optional for old recordings/test models. */
+  receivedAtMs?: number;
   tsNs: bigint;
   price: number;
   size: number;
   /** SIDE_BUY | SIDE_SELL | SIDE_UNKNOWN (proto/types). */
   side: number;
+  /** Wire attribution for the aggressor side, when provided by the feed. */
+  sideSrc?: number;
   venue: string;
 }
 
 /** Immutable per-flush view the panels render off. `trades` is NEWEST-FIRST. */
 export interface BookSnapshot {
+  /** Local context of this buffer, so old rows cannot acquire a new symbol label. */
+  sessionKey?: string;
+  /** Changes on a buffer reset even when the subscription metadata stays the same. */
+  sessionVersion?: number;
   version: number;
   book: BookBuffer | null;
   bbo: BboBuffer | null;
@@ -89,6 +101,14 @@ const tradeRing: (TapeTrade | undefined)[] = new Array(TRADE_RING);
 let tradeHead = -1; // slot index of the newest trade
 let tradeCount = 0; // valid slots (≤ TRADE_RING)
 let version = 0;
+let sessionVersion = 0;
+let bufferSessionKey: string | undefined;
+let cachedTrades: readonly TapeTrade[] | null = EMPTY_TRADES;
+
+/** Includes mode and handshake identity: replay prints are never live quotes. */
+export function bookSessionKey(state: FlowMapState = useFlowMapStore.getState()): string {
+  return `${sessionResetKey(state.subscription) ?? ''}:${state.subscription?.mode ?? ''}:${state.sessionId ?? ''}:${state.sessionRevision}`;
+}
 
 let cachedSnapshot: BookSnapshot | null = null;
 
@@ -137,6 +157,7 @@ function pushTrade(t: TapeTrade): void {
   tradeHead = (tradeHead + 1) % TRADE_RING;
   tradeRing[tradeHead] = t;
   if (tradeCount < TRADE_RING) tradeCount += 1;
+  cachedTrades = null;
 }
 
 /**
@@ -145,6 +166,7 @@ function pushTrade(t: TapeTrade): void {
  * `slice().reverse()` per flush allocated the slice AND the reversed copy.
  */
 function tradesNewestFirst(): readonly TapeTrade[] {
+  if (cachedTrades !== null) return cachedTrades;
   if (tradeCount === 0) return EMPTY_TRADES;
   const out: TapeTrade[] = new Array(tradeCount);
   let idx = tradeHead;
@@ -153,7 +175,8 @@ function tradesNewestFirst(): readonly TapeTrade[] {
     idx -= 1;
     if (idx < 0) idx = TRADE_RING - 1;
   }
-  return out;
+  cachedTrades = Object.freeze(out);
+  return cachedTrades;
 }
 
 function flush(): void {
@@ -164,15 +187,19 @@ function flush(): void {
 
 /** The single handler wired to the raw stream (and the test-injection seam). */
 function handle(msg: StreamMsg): void {
+  // Keep the old context until a reset; an in-flight frame cannot relabel it.
+  bufferSessionKey ??= bookSessionKey();
   switch (msg.type) {
+    case MsgType.BOOK_UPDATE:
     case MsgType.DEPTH_COL: {
-      const c = msg as DepthColumn;
+      const c = msg as DepthColumn | BookUpdate;
+      const instant = msg.type === MsgType.BOOK_UPDATE;
       // The live-edge column is the in-progress PARTIAL (final=false): it starts
       // EMPTY and fills over its interval, so it is NOT the current book. The
       // settled book is the newest FINALIZED column (server/core/session.py emits
       // both). Ignore partials for the ladder — the heatmap/crosshair use them, the
       // DOM ladder wants the last settled snapshot.
-      if (!c.final) return;
+      if (!instant && !c.final) return;
       // Newest SESSION position wins, epoch-major: a late column from an OLD
       // epoch (a straggler frame arriving after a mid-stream re-anchor or a
       // replay seek — the server bumps epoch and resnapshots) must never clobber
@@ -180,9 +207,14 @@ function handle(msg: StreamMsg): void {
       // equal col_seq overwrites idempotently (re-delivery), lower is stale.
       if (book !== null) {
         if (c.epoch < book.epoch) return;
-        if (c.epoch === book.epoch && c.col_seq < book.colSeq) return;
+        if (c.epoch === book.epoch) {
+          if (!instant && book.instant) return;
+          if (instant && book.instant && toBigNs(c.t0_ns) < book.t0Ns) return;
+          if (!instant && c.col_seq < book.colSeq) return;
+        }
       }
       book = {
+        instant,
         epoch: c.epoch,
         mode: c.mode,
         colSeq: c.col_seq,
@@ -202,11 +234,15 @@ function handle(msg: StreamMsg): void {
         !Number.isFinite(b.bid_sz) ||
         !Number.isFinite(b.ask_px) ||
         !Number.isFinite(b.ask_sz)
+        || b.bid_px <= 0 || b.ask_px < b.bid_px || b.bid_sz < 0 || b.ask_sz < 0
       ) {
         return;
       }
+      const tsNs = toBigNs(b.ts_ns);
+      if (bbo && tsNs < bbo.tsNs) return;
       bbo = {
-        tsNs: toBigNs(b.ts_ns),
+        tsNs,
+        receivedAtMs: performance.now(),
         bidPx: b.bid_px,
         bidSz: b.bid_sz,
         askPx: b.ask_px,
@@ -222,10 +258,12 @@ function handle(msg: StreamMsg): void {
       // `toBigNs(NaN)` from ever being reached).
       if (!Number.isFinite(t.price) || !Number.isFinite(t.size)) return;
       pushTrade({
+        receivedAtMs: performance.now(),
         tsNs: toBigNs(t.ts_ns),
         price: t.price,
         size: t.size,
         side: t.side,
+        ...(typeof t.side_src === 'number' ? { sideSrc: t.side_src } : {}),
         venue: t.venue,
       });
       bump();
@@ -252,6 +290,8 @@ function ensureStreamSubscription(): void {
 export function getSnapshot(): BookSnapshot {
   if (cachedSnapshot === null) {
     cachedSnapshot = {
+      sessionKey: bufferSessionKey ?? bookSessionKey(),
+      sessionVersion,
       version,
       book,
       bbo,
@@ -290,6 +330,8 @@ export function subscribe(cb: (s: BookSnapshot) => void): () => void {
  * switch (see Renderer.resetForSession).
  */
 export function resetForSession(): void {
+  sessionVersion += 1;
+  bufferSessionKey = bookSessionKey();
   book = null;
   bbo = null;
   clearTradeRing();
@@ -317,10 +359,13 @@ function clearTradeRing(): void {
   tradeRing.fill(undefined);
   tradeHead = -1;
   tradeCount = 0;
+  cachedTrades = EMPTY_TRADES;
 }
 
 /** Reset all buffer + subscription state. Unit tests only. */
 export function resetForTest(): void {
+  sessionVersion = 0;
+  bufferSessionKey = undefined;
   book = null;
   bbo = null;
   clearTradeRing();

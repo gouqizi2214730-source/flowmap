@@ -97,6 +97,41 @@ function liveRenderer(): Renderer {
 }
 
 describe('CvdPane loop pacing', () => {
+  it('historical CVD corrections repaint a stationary window with an unchanged live tip', () => {
+    let revision = 0;
+    let value = 2;
+    const renderer = {
+      timeline: () => ({ viewStartCol: 0, viewEndCol: 10, newestSeq: 100, timeBase: null }),
+      cvdValueAt: () => 5,
+      cvdSeries: () => [{ col: 1, cvd: value }],
+      get cvdRevision() { return revision; },
+    } as unknown as Renderer;
+    renderWith({ current: renderer });
+    vi.advanceTimersByTime(500);
+    expect(clearRect).toHaveBeenCalledTimes(1);
+    value = 9;
+    revision++;
+    vi.advanceTimersByTime(300);
+    expect(clearRect).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears CVD ink when the current market frame is unavailable', () => {
+    let ready = true;
+    const series = vi.fn(() => [{ col: 1, cvd: 2 }]);
+    const renderer = {
+      timeline: () => ({ viewStartCol: 0, viewEndCol: 10, newestSeq: 100, timeBase: null }),
+      cvdValueAt: () => 5,
+      cvdSeries: series,
+      get marketFrameReady() { return ready; },
+    } as unknown as Renderer;
+    renderWith({ current: renderer });
+    vi.advanceTimersByTime(500);
+    expect(series).toHaveBeenCalledTimes(1);
+    ready = false;
+    vi.advanceTimersByTime(300);
+    expect(clearRect).toHaveBeenCalledTimes(2);
+    expect(series).toHaveBeenCalledTimes(1);
+  });
   it('an idle pane paints once and stops spinning rAF (slow poll, not 60 fps)', () => {
     renderWith({ current: null });
     vi.advanceTimersByTime(500); // half a second of a completely idle chart

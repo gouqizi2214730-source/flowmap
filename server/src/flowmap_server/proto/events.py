@@ -35,8 +35,18 @@ SIDE_SRC_INFERRED = 1
 SIDE_SRC_NA = 2
 
 MarkerKind = Literal[
-    "liquidation", "halt", "luld", "gap", "session_break", "large_lot", "iceberg", "info",
-    "capitol", "defense_contract", "clinical"
+    "liquidation",
+    "halt",
+    "luld",
+    "gap",
+    "session_break",
+    "large_lot",
+    "iceberg",
+    "info",
+    "capitol",
+    "defense_contract",
+    "clinical",
+    "history_metadata_page",
 ]
 FeedState = Literal["live", "degraded", "closed", "reconnecting"]
 StreamMode = Literal["live", "replay"]
@@ -160,10 +170,16 @@ class Resume(msgspec.Struct):
     pass
 
 
-class HistoryRequest(msgspec.Struct):
+class HistoryRequest(msgspec.Struct, omit_defaults=True):
     req_id: int
     before_t: int
     n_cols: int
+    # Native history keeps its exact cold-wire bytes. Explicit ranges request
+    # aligned time aggregates; n_cols limits OUTPUT bins, not source columns.
+    start_col: int | None = None
+    end_col: int | None = None
+    stride: int = 1
+    metadata_cursor: str | None = None
 
 
 # --- Hot (hand-packed binary) messages -----------------------------------------
@@ -177,6 +193,14 @@ class DepthColumn(msgspec.Struct):
     final: bool
     bid: np.ndarray  # float32, length n_rows
     ask: np.ndarray | None  # float32, length n_rows; None iff mode == MODE_SYNTH_PROFILE
+
+
+class BookUpdate(DepthColumn):
+    """Instantaneous grouped resting size; never a historical density column.
+
+    Uses the depth payload layout with its own tag. t0_ns is observation time;
+    col_seq is only a live grid position. No time integration or recording.
+    """
 
 
 class BarColumn(msgspec.Struct, frozen=True):
@@ -256,4 +280,3 @@ class MacroStressUpdate(msgspec.Struct):
     yield_10y2y: float
     stress_score: float
     status: str
-

@@ -10,7 +10,6 @@ Pulls daily off-exchange and dark pool volume reports:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, date, datetime, timedelta
 import logging
 from typing import Any

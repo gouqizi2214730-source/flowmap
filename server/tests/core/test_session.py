@@ -809,6 +809,56 @@ class EndingFeed:
         yield BookState(self.calls * DT, *_BOOK)
 
 
+async def test_live_crypto_normal_eof_restarts_without_resubscribe():
+    class LiveCryptoFeed(EndingFeed):
+        market = "binance-spot"
+        symbol = "BTCUSDT"
+
+        def __init__(self):
+            super().__init__()
+            self.recovered = asyncio.Event()
+
+        async def events(self):
+            self.calls += 1
+            price = 100.0 + self.calls
+            yield BookState(self.calls * DT, np.array([price]), np.array([2.0]),
+                            np.array([price + 0.5]), np.array([3.0]))
+            if self.calls > 1:
+                self.recovered.set()
+                await asyncio.Event().wait()
+
+    feed = LiveCryptoFeed()
+    sess = Session("crypto-eof", feed=feed, grid=_mk_grid(rows=64, p0=84.0),
+                   restart_backoff_base_s=0.001)
+    client = ClientTx()
+    sess.attach(client)
+    await sess.start()
+    try:
+        await asyncio.wait_for(feed.recovered.wait(), timeout=1)
+        assert feed.calls == 2
+        assert not sess.run_task.done()
+        statuses = [m.feed_state for m in _drain_all(client) if isinstance(m, Status)]
+        assert statuses == ["degraded", "live"]
+        assert sess._bbo.bid_px == 102.0  # the restarted feed supplied the fresh quote
+    finally:
+        sess.run_task.cancel()
+        await asyncio.gather(sess.run_task, return_exceptions=True)
+
+
+async def test_finite_crypto_replay_eof_does_not_restart():
+    class FiniteReplay(EndingFeed):
+        market = "binance-spot"
+        capability = {"depth": "L2", "replay": True}
+
+    feed = FiniteReplay()
+    sess = Session("replay-eof", feed=feed, grid=_mk_grid(rows=64, p0=84.0),
+                   restart_backoff_base_s=0.001)
+    sess.attach(ClientTx())
+    await sess.start()
+    await asyncio.wait_for(sess.run_task, timeout=1)
+    assert feed.calls == 1
+
+
 async def test_ended_feed_session_restarts_on_new_subscriber():
     cfg = Config(max_sessions=4, ring_columns=256, max_rows=64, dt_crypto_ns=DT)
     feed = EndingFeed()
@@ -1133,21 +1183,17 @@ def test_deep_band_builds_a_hybrid_grid_that_keeps_the_native_ladder():
     assert ep.scale_kind == SCALE_HYBRID
     assert ep.core_p0 == pytest.approx(s.core_p0, rel=1e-12)
     assert ep.dn_rows == s.dn_rows
-    # The frame is FROZEN: a later mid must not rebuild it, because the shader
-    # applies ONE row map to every already-uploaded column.
-    assert grid.maybe_reanchor(mid * 3) is None
-    assert grid.scale == s
+    # The fine core rolls while its resolution is frozen; old epoch geometry
+    # remains available to render the already-uploaded columns at their prices.
+    rolled = grid.maybe_reanchor(mid * 3)
+    assert rolled is not None and rolled.epoch == ep.epoch + 1
+    assert grid.scale.core_p0 > s.core_p0
+    assert (grid.scale.core_step, grid.scale.core_rows) == (s.core_step, s.core_rows)
+    assert grid.epoch_params_for(ep.epoch) is ep
 
 
-def test_deep_band_degrades_to_linear_when_the_core_already_spans_the_band():
-    """An honest no-op, not a crash.
-
-    For an instrument whose native grid is already absurdly wide relative to its
-    price — the sim is exactly that, a $0.50 tick on a $100 price, so 2048 core
-    rows alone span ±512% — a -99%/+1000% band is NARROWER than the core and the
-    hybrid is the wrong tool. `make_hybrid` refuses, and the grid must stay on
-    the linear path rather than install a broken map.
-    """
+def test_deep_band_reduces_core_rows_when_native_ticks_would_cross_zero():
+    """Keep native precision and a positive core even for coarse instruments."""
     from flowmap_server.core.price_scale import SCALE_HYBRID
 
     cfg = Config(recording_enabled=False)
@@ -1155,8 +1201,10 @@ def test_deep_band_degrades_to_linear_when_the_core_already_spans_the_band():
     feed = SimFeed(seed=1, dt_ns=250_000_000, start_ns=0)
     grid = mgr._grid_for(feed, "deep")
 
-    assert grid.maybe_reanchor(100.0) is None  # refused, no epoch bump
-    assert grid.scale.kind != SCALE_HYBRID
+    assert grid.maybe_reanchor(100.0) is not None
+    assert grid.scale.kind == SCALE_HYBRID
+    assert grid.scale.core_rows == 40
+    assert grid.scale.core_p0 == 90.0
     # And the grid still bins normally afterwards — no poisoned state.
     px = np.array([99.0, 100.0, 101.0])
     sz = np.array([1.0, 2.0, 3.0])
@@ -1202,3 +1250,30 @@ def test_norm_seed_ignores_inf_texels():
     seed = sess._norm_seed()
     assert np.isfinite(seed)
     assert seed == pytest.approx(8.0)
+
+
+async def test_crypto_inside_quote_uses_raw_prices_when_depth_rows_are_grouped():
+    from types import SimpleNamespace
+    feed = SimpleNamespace(market="binance-spot", symbol="BTCUSDT", capability={"depth": "L2"})
+    sess = Session("raw-inside", feed=feed, grid=_mk_grid(rows=256))
+    client = ClientTx()
+    sess.attach(client)
+    sess._on_book(BookState(ts_ns=DT, bid_px=np.array([85636.92, 85630.0]),
+        bid_sz=np.array([1.25, 3.0]), ask_px=np.array([85636.93, 85640.0]), ask_sz=np.array([2.5, 4.0])))
+    quote = next(m for m in _drain_all(client) if isinstance(m, BBO))
+    assert quote.bid_px == 85636.92 and quote.ask_px == 85636.93
+    assert quote.bid_sz == 1.25 and quote.ask_sz == 2.5
+
+
+async def test_deep_boot_does_not_fetch_candle_backfill_it_cannot_display():
+    from types import SimpleNamespace
+    called = False
+    async def fetch(*args, **kwargs):
+        nonlocal called
+        called = True
+        return []
+    feed = SimpleNamespace(market="binance-spot", symbol="BTCUSDT", capability={"depth": "L2"})
+    grid = SessionManager(Config(recording_enabled=False, ring_columns=8), timer=FakeTimer())._grid_for(feed, "deep")
+    sess = Session("deep-fast-boot", feed=feed, grid=grid, backfill_fn=fetch, backfill_max_cols=512)
+    await sess._run_backfill()
+    assert not called

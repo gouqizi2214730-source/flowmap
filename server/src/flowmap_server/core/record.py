@@ -72,10 +72,12 @@ with ``kind`` in {columns, trades, markers, epochs}. Load-bearing decisions:
 from __future__ import annotations
 
 import itertools
+import json
 import logging
 import os
 import re
 import threading
+import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,8 +106,10 @@ _HOUR_KEY_MAX = "99991231-99"
 # read) and ``TailData.trades_truncated``/``markers_truncated`` say so.
 _TRADES_MAX_PER_LOAD = 250_000
 _MARKERS_MAX_PER_LOAD = 25_000
+_COLUMN_TIME_CACHE_PARTS = 4096
 
 _COLUMNS_SCHEMA = {
+    "recording_id": pl.String,
     "epoch": pl.UInt32,
     "col_seq": pl.UInt32,
     "t0_ns": pl.Int64,
@@ -122,6 +126,7 @@ _COLUMNS_SCHEMA = {
     "vwap_den_cum": pl.Float64,
 }
 _TRADES_SCHEMA = {
+    "recording_id": pl.String,
     "ts_ns": pl.Int64,
     "price": pl.Float64,
     "size": pl.Float64,
@@ -130,6 +135,7 @@ _TRADES_SCHEMA = {
     "venue": pl.String,
 }
 _MARKERS_SCHEMA = {
+    "recording_id": pl.String,
     "ts_ns": pl.Int64,
     "kind": pl.String,
     "text": pl.String,
@@ -137,6 +143,7 @@ _MARKERS_SCHEMA = {
     "size": pl.Float64,
 }
 _EPOCHS_SCHEMA = {
+    "recording_id": pl.String,
     "epoch": pl.UInt32,
     "tick": pl.Float64,
     "tick_multiple": pl.Int64,
@@ -201,6 +208,28 @@ def _hour_prefix(p: Path) -> str:
     return p.name[:_HOUR_KEY_LEN]
 
 
+def _part_number(p: Path) -> int:
+    return int(p.stem.rsplit("-", 1)[-1])
+
+
+def _epoch_from_row(row: dict) -> EpochParams:
+    return EpochParams(
+        epoch=int(row["epoch"]),
+        tick=row["tick"],
+        tick_multiple=int(row["tick_multiple"]),
+        dt_ns=int(row["dt_ns"]),
+        p0=row["p0"],
+        rows=int(row["rows"]),
+        scale_kind=int(row.get("scale_kind", 0) or 0),
+        dn_rows=int(row.get("dn_rows", 0) or 0),
+        core_rows=int(row.get("core_rows", 0) or 0),
+        core_p0=float(row.get("core_p0", 0.0) or 0.0),
+        core_step=float(row.get("core_step", 0.0) or 0.0),
+        lo_price=float(row.get("lo_price", 0.0) or 0.0),
+        hi_price=float(row.get("hi_price", 0.0) or 0.0),
+    )
+
+
 def _bounded_rows(
     d: Path,
     pattern: str,
@@ -208,6 +237,7 @@ def _bounded_rows(
     hi_key: str,
     in_range: pl.Expr,
     limit: int,
+    recording_id: str | None = None,
 ) -> tuple[Iterator[dict[str, object]], bool]:
     """Stream rows matching ``in_range``, capped at the NEWEST ``limit``.
 
@@ -225,6 +255,11 @@ def _bounded_rows(
         df = _read_parquet_safe(path)
         if df is None:
             continue
+        if recording_id is not None:
+            if "recording_id" not in df.columns and recording_id:
+                continue
+            if "recording_id" in df.columns:
+                df = df.filter(pl.col("recording_id").fill_null("") == recording_id)
         fresh = df.filter(in_range)
         if fresh.height:
             frames.append(fresh)
@@ -247,7 +282,7 @@ def _bounded_rows(
     )
 
 
-def _read_parquet_safe(path: Path) -> pl.DataFrame | None:
+def _read_parquet_safe(path: Path, *, columns: list[str] | None = None) -> pl.DataFrame | None:
     """Read a recording part file, tolerating corruption.
 
     A truncated/garbage file (crash mid-write predates the temp+rename flush,
@@ -255,7 +290,7 @@ def _read_parquet_safe(path: Path) -> pl.DataFrame | None:
     skip it. Returns ``None`` when the file is unreadable.
     """
     try:
-        return pl.read_parquet(path)
+        return pl.read_parquet(path, columns=columns)
     except (pl.exceptions.PolarsError, OSError) as exc:
         logger.warning("skipping unreadable recording file %s: %s", path, exc)
         return None
@@ -280,6 +315,7 @@ class TailData(msgspec.Struct):
     truncated: bool = False
     trades_truncated: bool = False
     markers_truncated: bool = False
+    recording_id: str | None = None
 
 
 class SessionRecorder:
@@ -293,6 +329,10 @@ class SessionRecorder:
 
     def __init__(self, sym_dir: Path | None, *, enabled: bool) -> None:
         self._enabled = enabled and sym_dir is not None
+        # Epoch numbers and column sequences belong to a grid run, not the
+        # symbol directory. Cold starts reuse them; scope every kind to this
+        # writer so another run can never donate its price geometry or tape.
+        self.recording_id = uuid.uuid4().hex
         self._dir = sym_dir
         self._closed = False
         self._columns: list[FinalizedColumn] = []
@@ -502,10 +542,10 @@ class SessionRecorder:
         # every epochs file, so the bucket never affects correctness.
         self._flush_kind("epochs", epochs, lambda _e: self._max_ts_ns, self._epochs_frame)
 
-    @staticmethod
-    def _columns_frame(cols: list[FinalizedColumn]) -> pl.DataFrame:
+    def _columns_frame(self, cols: list[FinalizedColumn]) -> pl.DataFrame:
         return pl.DataFrame(
             {
+                "recording_id": [self.recording_id] * len(cols),
                 "epoch": [c.epoch for c in cols],
                 "col_seq": [c.col_seq for c in cols],
                 "t0_ns": [c.t0_ns for c in cols],
@@ -525,10 +565,10 @@ class SessionRecorder:
             schema=_COLUMNS_SCHEMA,
         )
 
-    @staticmethod
-    def _trades_frame(trades: list[Trade]) -> pl.DataFrame:
+    def _trades_frame(self, trades: list[Trade]) -> pl.DataFrame:
         return pl.DataFrame(
             {
+                "recording_id": [self.recording_id] * len(trades),
                 "ts_ns": [t.ts_ns for t in trades],
                 "price": [t.price for t in trades],
                 "size": [t.size for t in trades],
@@ -539,10 +579,10 @@ class SessionRecorder:
             schema=_TRADES_SCHEMA,
         )
 
-    @staticmethod
-    def _markers_frame(markers: list[Marker]) -> pl.DataFrame:
+    def _markers_frame(self, markers: list[Marker]) -> pl.DataFrame:
         return pl.DataFrame(
             {
+                "recording_id": [self.recording_id] * len(markers),
                 "ts_ns": [m.ts_ns for m in markers],
                 "kind": [m.kind for m in markers],
                 "text": [m.text for m in markers],
@@ -552,10 +592,10 @@ class SessionRecorder:
             schema=_MARKERS_SCHEMA,
         )
 
-    @staticmethod
-    def _epochs_frame(epochs: list[EpochParams]) -> pl.DataFrame:
+    def _epochs_frame(self, epochs: list[EpochParams]) -> pl.DataFrame:
         return pl.DataFrame(
             {
+                "recording_id": [self.recording_id] * len(epochs),
                 "epoch": [e.epoch for e in epochs],
                 "tick": [e.tick for e in epochs],
                 "tick_multiple": [e.tick_multiple for e in epochs],
@@ -592,6 +632,26 @@ class Recorder:
         # session): the lock keeps two walks from racing each other's
         # rglob/unlink pass. Works from both loop and worker threads.
         self._retention_lock = threading.Lock()
+        # Part files are immutable after their atomic rename. A timestamp-only
+        # index lets ranged pages skip newer files within the same hour without
+        # reading density arrays or using up the bounded disk-page allowance.
+        # Size/mtime also invalidate replaced legacy/test files safely.
+        self._column_time_cache: dict[Path, tuple[int, int, tuple[int, int] | None]] = {}
+        self._column_time_lock = threading.Lock()
+        self.retention_status = {
+            "coverage_loss": False,
+            "deleted_parts": 0,
+            "deleted_columns_parts": 0,
+            "deleted_bytes": 0,
+            "generation": 0,
+            "recent_deleted": [],
+        }
+        try:
+            previous = json.loads((self._base / ".flowmap-retention.json").read_bytes())
+            if isinstance(previous, dict):
+                self.retention_status.update(previous)
+        except (OSError, ValueError):
+            pass
 
     def open_session(self, market: str, symbol: str) -> SessionRecorder:
         """Create the append-only writer for one (market, symbol). When
@@ -607,6 +667,31 @@ class Recorder:
 
     # -- tail load -------------------------------------------------------------
 
+    def _column_time_bounds(self, path: Path) -> tuple[int, int] | None:
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        stamp = (stat.st_size, stat.st_mtime_ns)
+        with self._column_time_lock:
+            cached = self._column_time_cache.get(path)
+            if cached is not None and cached[:2] == stamp:
+                return cached[2]
+        frame = _read_parquet_safe(path, columns=["t0_ns"])
+        bounds = None
+        if frame is not None and frame.height:
+            minimum, maximum = frame["t0_ns"].min(), frame["t0_ns"].max()
+            if minimum is not None and maximum is not None:
+                bounds = (int(minimum), int(maximum))
+        with self._column_time_lock:
+            if (
+                path not in self._column_time_cache
+                and len(self._column_time_cache) >= _COLUMN_TIME_CACHE_PARTS
+            ):
+                self._column_time_cache.pop(next(iter(self._column_time_cache)))
+            self._column_time_cache[path] = (*stamp, bounds)
+        return bounds
+
     def load_tail(
         self,
         market: str,
@@ -616,6 +701,9 @@ class Recorder:
         now_ns: int,
         limit_cols: int,
         end_ns: int | None = None,
+        recording_id: str | None = None,
+        max_column_parts: int | None = None,
+        include_events: bool = True,
     ) -> TailData | None:
         """The newest recorded columns for (market, symbol) that satisfy
         ``t0_ns >= now_ns - max_age_ns`` (and, when *end_ns* is given,
@@ -627,6 +715,8 @@ class Recorder:
 
         ``TailData.truncated`` is True when older recorded columns exist that
         this capped read did not serve; the tape flags mark the row caps.
+        ``max_column_parts`` bounds density-file reads. Timestamp-only probes
+        skip files outside a ranged window before spending that allowance.
 
         Returns ``None`` when recording is disabled, nothing fresh exists, or
         the epochs referenced by the surviving columns were pruned (the
@@ -648,9 +738,7 @@ class Recorder:
         cut_key = _hour_key(max(cutoff, 0))
         hi_key = _HOUR_KEY_MAX if upper is None else _hour_key(max(upper - 1, 0))
         candidates = [
-            p
-            for p in d.glob("*-columns-*.parquet")
-            if cut_key <= _hour_prefix(p) <= hi_key
+            p for p in d.glob("*-columns-*.parquet") if cut_key <= _hour_prefix(p) <= hi_key
         ]
         # Newest -> oldest over part files (filename order == chronological);
         # stop as soon as we have limit_cols or hit an entirely-stale file.
@@ -666,13 +754,35 @@ class Recorder:
         have = 0
         paths = sorted(candidates, key=_by_name, reverse=True)
         scan_capped = False
+        density_reads = 0
         for i, path in enumerate(paths):
+            if max_column_parts is not None and upper is not None:
+                bounds = self._column_time_bounds(path)
+                if bounds is None or bounds[0] >= upper or bounds[1] < cutoff:
+                    continue
+            if max_column_parts is not None and density_reads >= max(0, max_column_parts):
+                scan_capped = True
+                break
+            density_reads += 1
             df = _read_parquet_safe(path)
             if df is None or df.height == 0:
                 continue  # unreadable (warned) or empty: try the next-older part
+            if recording_id is not None:
+                if "recording_id" not in df.columns:
+                    if recording_id:
+                        continue
+                else:
+                    df = df.filter(pl.col("recording_id").fill_null("") == recording_id)
+                    if df.height == 0:
+                        continue
             fresh = df.filter(fresh_expr)
             if fresh.height:
-                frames.append(fresh)
+                # Internal source metadata is scalar; it never duplicates the
+                # large density arrays. Old files remain readable explicitly
+                # as legacy, without modifying any recording on disk.
+                if "recording_id" not in fresh.columns:
+                    fresh = fresh.with_columns(pl.lit("").alias("recording_id"))
+                frames.append(fresh.with_columns(pl.lit(_part_number(path)).alias("_part")))
                 have += fresh.height
                 if have >= limit_cols:
                     # Older candidate parts (if any) were never opened — the
@@ -686,43 +796,120 @@ class Recorder:
                 break  # older files are older still
         if not frames:
             return None  # nothing fresh (or every candidate unreadable)
-        # Dedup by col_seq (defense in depth against overlapping recordings;
-        # frames are newest-file-first, so keep="first" prefers the newest).
-        table = (
-            pl.concat(frames)
-            .unique(subset="col_seq", keep="first", maintain_order=True)
-            .sort("col_seq")
-        )
-        truncated = scan_capped or table.height > limit_cols
+        table = pl.concat(frames, how="diagonal_relaxed").sort(["t0_ns", "_part"])
+        # TailData has one params table and u32 sequences. It cannot represent
+        # multiple independent cold-start runs with duplicate epoch/seq IDs.
+        # Select the latest run in this time window, rather than merging old
+        # high sequences with a newer run that started again at zero.
+        recording_id = table["recording_id"][-1] or ""
+        run = table.filter(pl.col("recording_id") == recording_id)
+        truncated = scan_capped or run.height < table.height
+        table = run.unique(subset=["col_seq", "t0_ns"], keep="last", maintain_order=True)
+        seqs = table["col_seq"].to_numpy().astype(np.int64)
+        resets = np.flatnonzero(np.diff(seqs) <= 0)
+        if len(resets):
+            table = table.slice(int(resets[-1]) + 1)
+            truncated = True
+        truncated = truncated or table.height > limit_cols
         table = table.tail(limit_cols)
 
         # Resolve epochs BEFORE materializing columns: the row count comes from
         # the epochs (and the vectorized bid/ask reshape below needs it).
         needed_epochs = set(table["epoch"].to_numpy().tolist())
         epoch_map: dict[int, EpochParams] = {}
+        legacy_epochs: list[tuple[int, str, EpochParams]] = []
         for path in sorted(d.glob("*-epochs-*.parquet"), key=_by_name):
             df = _read_parquet_safe(path)
             if df is None:
                 continue
             for row in df.iter_rows(named=True):
-                # .get with the linear defaults: recordings written before the
-                # hybrid-scale columns existed (H1) must load as the linear
-                # state they were recorded under, not crash on a missing key.
-                epoch_map[int(row["epoch"])] = EpochParams(
-                    epoch=int(row["epoch"]),
-                    tick=row["tick"],
-                    tick_multiple=int(row["tick_multiple"]),
-                    dt_ns=int(row["dt_ns"]),
-                    p0=row["p0"],
-                    rows=int(row["rows"]),
-                    scale_kind=int(row.get("scale_kind", 0) or 0),
-                    dn_rows=int(row.get("dn_rows", 0) or 0),
-                    core_rows=int(row.get("core_rows", 0) or 0),
-                    core_p0=float(row.get("core_p0", 0.0) or 0.0),
-                    core_step=float(row.get("core_step", 0.0) or 0.0),
-                    lo_price=float(row.get("lo_price", 0.0) or 0.0),
-                    hi_price=float(row.get("hi_price", 0.0) or 0.0),
-                )
+                row_id = row.get("recording_id", "") or ""
+                if row_id != recording_id:
+                    continue
+                params = _epoch_from_row(row)
+                if not recording_id:
+                    legacy_epochs.append((_part_number(path), _hour_prefix(path), params))
+                elif params.epoch in epoch_map and epoch_map[params.epoch] != params:
+                    logger.warning(
+                        "conflicting epoch geometry in recording %s; cold start", recording_id
+                    )
+                    return None
+                else:
+                    epoch_map[params.epoch] = params
+        if not recording_id:
+            # Old files lack run identity. Infer only from the append-only part
+            # order. An initial flush writes columns BEFORE its epoch metadata,
+            # so that following metadata belongs to the column only if no
+            # intervening columns part starts another flush/run. A ranged read
+            # must never choose an arbitrary future same-numbered epoch.
+            column_paths = {_part_number(p): p for p in d.glob("*-columns-*.parquet")}
+            column_parts = sorted(column_paths)
+            for part in table["_part"].unique().to_list():
+                rows = table.filter(pl.col("_part") == part)
+                next_part = next((p for p in column_parts if p > part), 2**63)
+                hour = _hour_key(int(rows["t0_ns"].max()))
+                for epoch in rows["epoch"].unique().to_list():
+                    following = [
+                        entry
+                        for entry in legacy_epochs
+                        if part < entry[0] < next_part
+                        and entry[1] <= hour
+                        and entry[2].epoch == epoch
+                    ]
+                    preceding = [
+                        entry
+                        for entry in legacy_epochs
+                        if entry[0] < part and entry[1] <= hour and entry[2].epoch == epoch
+                    ]
+                    choices = following or preceding
+                    if not following and (not choices or int(rows["col_seq"].min()) == 0):
+                        # A single flush may have columns in several hour files
+                        # before its one epochs file. Verify only scalar identity
+                        # across those parts; never infer geometry through a
+                        # sequence reset, time seam, or another epoch.
+                        future = [
+                            entry
+                            for entry in legacy_epochs
+                            if entry[0] > part and entry[2].epoch == epoch
+                        ]
+                        if future:
+                            candidate = min(future, key=lambda entry: entry[0])
+                            chain_parts = [p for p in column_parts if part <= p < candidate[0]]
+                            if len(chain_parts) <= 16:
+                                chain = [
+                                    _read_parquet_safe(
+                                        column_paths[p], columns=["epoch", "col_seq", "t0_ns"]
+                                    )
+                                    for p in chain_parts
+                                ]
+                                if all(frame is not None and frame.height for frame in chain):
+                                    identity = pl.concat(chain).sort("col_seq")
+                                    seq = identity["col_seq"].to_numpy().astype(np.int64)
+                                    times = identity["t0_ns"].to_numpy().astype(np.int64)
+                                    if (
+                                        identity["epoch"].unique().to_list() == [epoch]
+                                        and np.all(np.diff(seq) == 1)
+                                        and np.all(np.diff(times) == candidate[2].dt_ns)
+                                        and candidate[1] == _hour_key(int(times[-1]))
+                                    ):
+                                        following = [candidate]
+                                        choices = following
+                    # A reset at seq zero needs its own initial epoch metadata;
+                    # borrowing a previous run's identical ID is unprovable.
+                    if not choices or (int(rows["col_seq"].min()) == 0 and not following):
+                        logger.warning(
+                            "ambiguous legacy recording epoch %s at part %s; cold start",
+                            epoch,
+                            part,
+                        )
+                        return None
+                    params = max(choices, key=lambda entry: entry[0])[2]
+                    if epoch in epoch_map and epoch_map[epoch] != params:
+                        logger.warning(
+                            "ambiguous legacy recording geometry for epoch %s; cold start", epoch
+                        )
+                        return None
+                    epoch_map[epoch] = params
         if not needed_epochs.issubset(epoch_map):
             return None  # epochs pruned: recording unusable -> cold start
 
@@ -746,8 +933,18 @@ class Recorder:
         lo_key = _hour_key(max(t_lo, 0))
         hi_key = _hour_key(max(t_hi - 1, 0))
         in_range = (pl.col("ts_ns") >= t_lo) & (pl.col("ts_ns") < t_hi)
-        trade_rows, trades_truncated = _bounded_rows(
-            d, "*-trades-*.parquet", lo_key, hi_key, in_range, _TRADES_MAX_PER_LOAD
+        trade_rows, trades_truncated = (
+            _bounded_rows(
+                d,
+                "*-trades-*.parquet",
+                lo_key,
+                hi_key,
+                in_range,
+                _TRADES_MAX_PER_LOAD,
+                recording_id=recording_id,
+            )
+            if include_events
+            else (iter(()), False)
         )
         trades = [
             Trade(
@@ -761,8 +958,18 @@ class Recorder:
             for row in trade_rows
         ]
         trades.sort(key=lambda t: t.ts_ns)
-        marker_rows, markers_truncated = _bounded_rows(
-            d, "*-markers-*.parquet", lo_key, hi_key, in_range, _MARKERS_MAX_PER_LOAD
+        marker_rows, markers_truncated = (
+            _bounded_rows(
+                d,
+                "*-markers-*.parquet",
+                lo_key,
+                hi_key,
+                in_range,
+                _MARKERS_MAX_PER_LOAD,
+                recording_id=recording_id,
+            )
+            if include_events
+            else (iter(()), False)
         )
         markers = [
             Marker(
@@ -785,6 +992,7 @@ class Recorder:
             truncated=truncated,
             trades_truncated=trades_truncated,
             markers_truncated=markers_truncated,
+            recording_id=recording_id or None,
         )
 
     def newest_column_t0(self, market: str, symbol: str) -> int | None:
@@ -821,21 +1029,17 @@ class Recorder:
         per-row ``iter_rows`` pass materialized ~134M Python floats at a full
         32 768-column × 2048-row ring and blocked the first attach for tens of
         seconds. The two list columns flatten to one numpy f32 block each and
-        reshape in C; only the 13 scalar columns walk Python. The f32 → f16
-        cast is bit-lossless: every stored value is an exact f16.
+        reshape in C; only the 13 scalar columns walk Python. Keep f32 venue
+        units: a cast to f16 here would overflow high-quantity coin books.
         """
         height = table.height
         rows = int(epoch_map[int(table["epoch"][-1])].rows)
-        bid = (
-            np.ascontiguousarray(table["bid"].list.explode().to_numpy(), dtype=np.float32)
-            .astype(np.float16)
-            .reshape(height, rows)
-        )
-        ask = (
-            np.ascontiguousarray(table["ask"].list.explode().to_numpy(), dtype=np.float32)
-            .astype(np.float16)
-            .reshape(height, rows)
-        )
+        bid = np.ascontiguousarray(
+            table["bid"].list.explode().to_numpy(), dtype=np.float32
+        ).reshape(height, rows)
+        ask = np.ascontiguousarray(
+            table["ask"].list.explode().to_numpy(), dtype=np.float32
+        ).reshape(height, rows)
         out: list[FinalizedColumn] = []
         for i, row in enumerate(table.drop(["bid", "ask"]).iter_rows(named=True)):
             epoch = int(row["epoch"])
@@ -921,8 +1125,7 @@ class Recorder:
                     {
                         h
                         for f in files
-                        if "-columns-" in f.name
-                        and _HOUR_KEY_RE.fullmatch(h := _hour_prefix(f))
+                        if "-columns-" in f.name and _HOUR_KEY_RE.fullmatch(h := _hour_prefix(f))
                     }
                 )
                 first_ns = last_ns = None
@@ -985,4 +1188,28 @@ class Recorder:
             f.unlink(missing_ok=True)
             total -= size
             pruned.append(f)
+            self.retention_status["deleted_parts"] += 1
+            self.retention_status["deleted_bytes"] += size
+            if "-columns-" in f.name:
+                self.retention_status["deleted_columns_parts"] += 1
+            self.retention_status["coverage_loss"] = True
+            self.retention_status["recent_deleted"].append(f.relative_to(self._base).as_posix())
+            self.retention_status["recent_deleted"] = self.retention_status["recent_deleted"][-256:]
+        if pruned:
+            self.retention_status["generation"] += 1
+            logger.warning(
+                "recording retention removed authoritative sources: %s", self.retention_status
+            )
+            try:
+                from flowmap_server.core.pyramid import _atomic
+
+                _atomic(
+                    self._base / ".flowmap-retention.json",
+                    msgspec.json.encode(self.retention_status),
+                )
+            except OSError:
+                logger.exception("retention coverage-loss telemetry could not be persisted")
+            from flowmap_server.core.pyramid import collect_retained_caches
+
+            collect_retained_caches(self, [part.parent for part in pruned])
         return pruned

@@ -44,7 +44,7 @@ from flowmap_server.feeds.crypto import (
 
 # The five venues that have BOTH a hand-written connector and a ccxt driver —
 # the whole reason `ccxt_knows` is not `is_ccxt_exchange`.
-DUAL_VENUES = ("binance", "bybit", "coinbase", "deribit", "okx")
+DUAL_VENUES = ("binance", "bybit", "coinbase", "deribit", "okx", "kraken", "bitfinex", "dydx")
 
 
 @pytest.fixture(autouse=True)
@@ -97,7 +97,8 @@ def test_catalog_native_flags_match_the_engines_connector_list() -> None:
         assert info.native is (venue_id in NATIVE_EXCHANGES), venue_id
     assert catalog["binance"].native is True
     assert catalog["okx"].native is True
-    assert catalog["kraken"].native is False
+    assert catalog["kraken"].native is True
+    assert catalog["kucoin"].native is False
 
 
 def test_catalog_segments_only_where_a_connector_takes_one() -> None:
@@ -168,7 +169,7 @@ def test_ccxt_knows_differs_from_is_ccxt_exchange_on_dual_venues(venue: str) -> 
 
 
 def test_ccxt_knows_agrees_where_there_is_no_native_connector() -> None:
-    for venue in ("kraken", "kucoin", "gate", "bitfinex"):
+    for venue in ("kucoin", "gate", "bitget"):
         assert is_ccxt_exchange(venue) is True
         assert ccxt_knows(venue) is True
 
@@ -181,6 +182,16 @@ def test_ccxt_knows_is_false_for_non_ccxt_readers(venue: str) -> None:
 def test_ccxt_knows_is_false_for_a_non_venue() -> None:
     assert ccxt_knows("nasdaq") is False
     assert ccxt_knows("") is False
+
+
+def test_universal_exchange_precision_is_not_confused_with_decimal_count():
+    import ccxt
+
+    assert venues._ccxt_price_tick(0.001, ccxt.TICK_SIZE) == 0.001
+    assert venues._ccxt_price_tick(8, ccxt.DECIMAL_PLACES) == 1e-8
+    assert venues._ccxt_price_tick(0, ccxt.DECIMAL_PLACES) == 1.0
+    assert venues._ccxt_price_tick(5, ccxt.SIGNIFICANT_DIGITS) is None
+    assert venues._ccxt_price_tick(float("nan"), ccxt.TICK_SIZE) is None
 
 
 # --- venue_symbols: cache / single-flight / failure ----------------------------
@@ -206,6 +217,47 @@ async def test_ttl_cache_collapses_repeated_calls(monkeypatch) -> None:
     # Past the TTL the venue is asked again.
     assert await venue_symbols("kraken", now_ns=SYMBOL_TTL_NS) == ["AAA", "BBB"]
     assert calls == ["kraken", "kraken"]
+
+
+async def test_instrument_ticks_are_cached_per_symbol_and_segment(monkeypatch):
+    from types import SimpleNamespace
+    import crocodile.crypto.exchanges.factory as factory
+
+    async def listing():
+        return [SimpleNamespace(symbol_raw="RUNEUSDT", tick_size=0.001),
+                SimpleNamespace(symbol_raw="SHIBUSDT", tick_size=1e-8),
+                SimpleNamespace(symbol_raw="INVALID", tick_size=float("nan"))]
+    conn = SimpleNamespace(list_instruments=listing)
+    monkeypatch.setattr(factory, "make_connector", lambda *args, **kw: conn)
+    monkeypatch.setattr(venues, "_harden_rest_ssl", lambda c: None)
+    monkeypatch.setattr(venues, "_price_ticks", {})
+    assert await venues.venue_price_tick("binance-spot", "RUNEUSDT") == 0.001
+    assert await venues.venue_price_tick("binance-spot", "SHIBUSDT") == 1e-8
+    assert await venues.venue_price_tick("binance-spot", "INVALID") is None
+    async def futures_listing():
+        return [SimpleNamespace(symbol_raw="RUNEUSDT", tick_size=0.0001)]
+    conn.list_instruments = futures_listing
+    assert await venues.venue_price_tick("binance-usdm", "RUNEUSDT") == 0.0001
+    assert await venues.venue_price_tick("binance-spot", "RUNEUSDT") == 0.001
+
+
+@pytest.mark.parametrize("exchange", ["bitfinex", "kraken", "dydx"])
+async def test_book_only_native_listing_does_not_require_a_trade_channel(monkeypatch, exchange):
+    from types import SimpleNamespace
+    import crocodile.crypto.exchanges.factory as factory
+
+    async def listing():
+        return [SimpleNamespace(symbol_raw="BTC-USD", tick_size=0.01)]
+
+    def make(exchange_name, **kwargs):
+        assert exchange_name == exchange
+        assert kwargs["symbols"] == []
+        assert kwargs["channels"] == []
+        return SimpleNamespace(list_instruments=listing)
+
+    monkeypatch.setattr(factory, "make_connector", make)
+    monkeypatch.setattr(venues, "_harden_rest_ssl", lambda c: None)
+    assert await venues._native_symbols(exchange, "") == ["BTC-USD"]
 
 
 async def test_cache_is_per_market(monkeypatch) -> None:
@@ -335,7 +387,9 @@ async def test_later_empty_listing_also_keeps_the_last_good_list(monkeypatch) ->
     [
         ("binance-spot", "ETHBTC"),  # native venue, native spelling
         ("okx", "BTC-USDT-SWAP"),
-        ("kraken", "ETH/BTC"),  # ccxt venue, unified spelling
+        ("kraken", "ETH/BTC"),  # native WebSocket v2 spelling
+        ("bitfinex", "tBTCUSD"),
+        ("dydx", "BTC-USD"),
         ("base_onchain", "WETHUSDC"),  # no ccxt driver -> nothing to translate
     ],
 )

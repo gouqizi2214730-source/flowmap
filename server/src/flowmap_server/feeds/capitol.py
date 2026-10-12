@@ -10,14 +10,15 @@ Tracks trading disclosures filed by members of the US House and Senate:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import UTC, datetime, timedelta
+import json
 import logging
 import time
 from typing import Any
 
 import aiohttp
 
+from flowmap_server import __version__
 from flowmap_server.data.warehouse import DuckWarehouse
 
 log = logging.getLogger(__name__)
@@ -36,7 +37,7 @@ class CapitolTradesWatcher:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(headers={"User-Agent": "FlowMap-CapitolWatcher/1.4.0"})
+            self._session = aiohttp.ClientSession(headers={"User-Agent": f"FlowMap-CapitolWatcher/{__version__}"})
         return self._session
 
     async def close(self) -> None:
@@ -59,43 +60,68 @@ class CapitolTradesWatcher:
                 else:
                     log.warning("Capitol transactions returned status %d", resp.status)
         except Exception as exc:
-            log.warning("Failed querying Congressional Stock Watcher: %s. Using recent sample ledger.", exc)
+            log.warning("Failed querying Congressional Stock Watcher: %s", exc)
+
+        if not isinstance(raw_data, list):
+            return []
 
         results: list[dict[str, Any]] = []
         now = datetime.now(UTC)
-        cutoff = (now - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+        cutoff = (now - timedelta(days=lookback_days)).date()
         now_ns = time.time_ns()
 
-        sym_filter = {s.upper() for s in symbols} if symbols else None
+        sym_filter = {s.strip().upper() for s in symbols} if symbols is not None else None
 
         for item in raw_data:
-            ticker = str(item.get("ticker", "")).strip().upper()
+            if not isinstance(item, dict):
+                continue
+            ticker = str(item.get("ticker") or "").strip().upper()
             if not ticker or ticker == "--":
                 continue
-            if sym_filter and ticker not in sym_filter:
+            if sym_filter is not None and ticker not in sym_filter:
                 continue
 
             trans_date = str(item.get("transaction_date", ""))
-            if trans_date < cutoff:
+            parsed_date = None
+            for date_format in ("%Y-%m-%d", "%m/%d/%Y"):
+                try:
+                    parsed_date = datetime.strptime(trans_date, date_format).date()
+                    break
+                except ValueError:
+                    continue
+            if parsed_date is None or not cutoff <= parsed_date <= now.date():
                 continue
 
-            rep = str(item.get("representative", "Congress Member"))
-            ttype = str(item.get("type", "purchase")).lower()
-            amount_str = str(item.get("amount", "$15,001 - $50,000"))
-            party = str(item.get("party", ""))
-            state = str(item.get("state", ""))
+            rep = str(item.get("representative") or "").strip()
+            ttype = str(item.get("type") or "").strip().lower()
+            amount_str = str(item.get("amount") or "").strip()
+            party = str(item.get("party") or "").strip()
+            state = str(item.get("state") or "").strip()
 
-            headline = f"🏛️ {rep} ({party}-{state}) {ttype.upper()}: {ticker} ({amount_str})"
-            detail = f"Filing Date: {item.get('disclosure_date', '')} | Trans Date: {trans_date} | Amount: {amount_str}"
+            headline = f"🏛️ {rep or 'Representative unavailable'} {ttype.upper() or 'TRANSACTION'}: {ticker}"
+            if amount_str:
+                headline += f" ({amount_str})"
+            detail = json.dumps({
+                "politician": rep or None,
+                "chamber": "House",
+                "type": ttype.title() if ttype else None,
+                "amount_range": amount_str or None,
+                "date": parsed_date.isoformat(),
+                "transaction_date": trans_date,
+                "disclosure_date": item.get("disclosure_date") or None,
+                "party": party or None,
+                "state": state or None,
+            }, ensure_ascii=False)
 
             ev = {
                 "ts_ns": now_ns,
                 "kind": "capitol",
                 "symbol": ticker,
                 "headline": headline,
-                "amount_usd": 50_000.0,
+                # Disclosures report a range, not an exact transaction amount.
+                "amount_usd": None,
                 "detail": detail,
-                "source": "CapitolTrades",
+                "source": "House Stock Watcher",
             }
             results.append(ev)
             self.warehouse.insert_intelligence(
@@ -103,39 +129,9 @@ class CapitolTradesWatcher:
                 "capitol",
                 ticker,
                 headline,
-                50_000.0,
+                None,
                 detail,
-                "CapitolTrades",
+                "House Stock Watcher",
             )
-
-        if not results:
-            # High-signal fallback filings for demonstration / offline use
-            samples = [
-                ("NVDA", "Rep. Nancy Pelosi", "purchase", "$1,000,001 - $5,000,000", "2024-06-26"),
-                ("MSFT", "Rep. Josh Gottheimer", "purchase", "$15,001 - $50,000", "2024-06-20"),
-                ("LMT", "Sen. Mark Kelly", "purchase", "$50,001 - $100,000", "2024-06-15"),
-            ]
-            for ticker, rep, ttype, amt_str, d in samples:
-                hl = f"🏛️ {rep} {ttype.upper()}: {ticker} ({amt_str})"
-                det = f"Date: {d} | Amount: {amt_str}"
-                ev = {
-                    "ts_ns": now_ns,
-                    "kind": "capitol",
-                    "symbol": ticker,
-                    "headline": hl,
-                    "amount_usd": 100_000.0,
-                    "detail": det,
-                    "source": "CapitolTrades",
-                }
-                results.append(ev)
-                self.warehouse.insert_intelligence(
-                    now_ns,
-                    "capitol",
-                    ticker,
-                    hl,
-                    100_000.0,
-                    det,
-                    "CapitolTrades",
-                )
 
         return results

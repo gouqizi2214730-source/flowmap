@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any
 
@@ -162,6 +163,13 @@ def venue_catalog() -> list[VenueInfo]:
 
 _cache: dict[str, tuple[int, list[str]]] = {}
 _locks: dict[str, asyncio.Lock] = {}
+_price_ticks: dict[str, dict[str, float]] = {}
+
+
+async def venue_price_tick(market: str, symbol: str) -> float | None:
+    """Use the same cached instrument listing as the picker, including segment."""
+    await venue_symbols(market)
+    return _price_ticks.get(market, {}).get(symbol)
 
 
 async def venue_symbols(market: str, *, now_ns: int | None = None) -> list[str]:
@@ -233,7 +241,7 @@ async def _native_symbols(exchange: str, segment: str) -> list[str]:
     conn = make_connector(
         exchange,
         symbols=[],
-        channels=["trade"],
+        channels=[],
         out=MemorySink(),
         registry=InstrumentRegistry(),
         **kw,
@@ -243,6 +251,12 @@ async def _native_symbols(exchange: str, segment: str) -> list[str]:
         instruments = await conn.list_instruments()
     finally:
         await _close_quietly(conn)
+    market = f"{exchange}-{segment}" if segment else exchange
+    _price_ticks[market] = {
+        str(i.symbol_raw): float(i.tick_size)
+        for i in instruments
+        if getattr(i, "tick_size", None) is not None and math.isfinite(i.tick_size) and i.tick_size > 0
+    }
     return sorted({str(i.symbol_raw) for i in instruments if i.symbol_raw})
 
 
@@ -274,7 +288,34 @@ async def _ccxt_symbols(exchange: str) -> list[str]:
         markets = await ex.load_markets()
     finally:
         await ex.close()
+    # Universal connectors already load this table for discovery. Reuse its
+    # price precision rather than assigning the simulation tick to each coin.
+    ticks: dict[str, float] = {}
+    for sym, item in markets.items():
+        precision = (item or {}).get("precision", {}).get("price")
+        tick = _ccxt_price_tick(precision, ex.precisionMode)
+        if tick is not None:
+            ticks[str(sym)] = tick
+            raw = (item or {}).get("id")
+            if raw:
+                ticks[str(raw)] = tick
+    _price_ticks[exchange] = ticks
     return sorted(str(sym) for sym, m in markets.items() if (m or {}).get("active", True))
+
+
+def _ccxt_price_tick(precision: object, mode: int) -> float | None:
+    import ccxt
+
+    if not isinstance(precision, (int, float)) or not math.isfinite(precision):
+        return None
+    if mode == ccxt.TICK_SIZE:
+        tick = float(precision)
+    elif mode == ccxt.DECIMAL_PLACES and -20 <= precision <= 20:
+        tick = 10.0 ** -precision
+    else:
+        # Significant-digit precision is price-dependent, not a fixed tick.
+        return None
+    return tick if tick > 0 and math.isfinite(tick) else None
 
 
 async def resolve_symbol(market: str, symbol: str) -> str:
@@ -288,7 +329,10 @@ async def resolve_symbol(market: str, symbol: str) -> str:
     """
     exchange, segment = split_market(market)
     native = exchange in NATIVE_EXCHANGES
-    if native == ("/" not in symbol):
+    already_native = (('/' in symbol and ':' not in symbol) if exchange == 'kraken'
+                      else symbol.startswith('t') if exchange == 'bitfinex'
+                      else '/' not in symbol)
+    if (native and already_native) or (not native and '/' in symbol):
         # Native venue with a native-looking symbol, or ccxt venue with a
         # unified one: already the right shape.
         return symbol
@@ -321,7 +365,12 @@ async def resolve_symbol(market: str, symbol: str) -> str:
                 return symbol
             if not native:
                 return unified
+            if exchange == 'kraken':
+                # Spot WebSocket v2 takes BTC/USD, unlike REST's XXBTZUSD.
+                return unified.split(':', 1)[0].replace('XBT', 'BTC')
             venue_id = (markets.get(unified) or {}).get("id")
+            if exchange == 'bitfinex' and venue_id:
+                return str(venue_id) if str(venue_id).startswith('t') else 't' + str(venue_id)
             return str(venue_id) if venue_id else symbol
         finally:
             await ex.close()

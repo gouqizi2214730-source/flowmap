@@ -10,8 +10,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
-import { useIntelligenceStore, type IntelTab } from '../state/intelligenceStore';
-import { useFlowMapStore } from '../state/store';
+import { DEMO_INTELLIGENCE, useIntelligenceStore } from '../state/intelligenceStore';
 import './IntelligenceDrawer.css';
 
 interface IntelligenceDrawerProps {
@@ -23,15 +22,16 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
   const activeTab = useIntelligenceStore((s) => s.activeTab);
   const setActiveTab = useIntelligenceStore((s) => s.setActiveTab);
 
-  const gexMap = useIntelligenceStore((s) => s.gex);
-  const darkPoolMap = useIntelligenceStore((s) => s.darkPool);
-  const secDiffs = useIntelligenceStore((s) => s.secDiffs);
-  const vocalStress = useIntelligenceStore((s) => s.vocalStress);
-  const contracts = useIntelligenceStore((s) => s.contracts);
-  const capitolTrades = useIntelligenceStore((s) => s.capitolTrades);
-  const corporateJets = useIntelligenceStore((s) => s.corporateJets);
-  const talentMap = useIntelligenceStore((s) => s.talent);
-  const macro = useIntelligenceStore((s) => s.macro);
+  const liveGex = useIntelligenceStore((s) => s.gex);
+  const liveDarkPool = useIntelligenceStore((s) => s.darkPool);
+  const liveDiffs = useIntelligenceStore((s) => s.secDiffs);
+  const liveStress = useIntelligenceStore((s) => s.vocalStress);
+  const liveContracts = useIntelligenceStore((s) => s.contracts);
+  const liveTrades = useIntelligenceStore((s) => s.capitolTrades);
+  const liveJets = useIntelligenceStore((s) => s.corporateJets);
+  const liveTalent = useIntelligenceStore((s) => s.talent);
+  const liveMacro = useIntelligenceStore((s) => s.macro);
+  const events = useIntelligenceStore((s) => s.events);
 
   const [filterActiveSymbol, setFilterActiveSymbol] = useState(false);
   const drawerRef = useRef<HTMLElement>(null);
@@ -48,15 +48,24 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
   }, [onClose]);
 
   const sym = activeSymbol.toUpperCase();
-  const currentGex = gexMap[sym] ?? gexMap['SIM-DEMO'] ?? null;
-  const currentDarkPool = darkPoolMap[sym] ?? darkPoolMap['SIM-DEMO'] ?? null;
-  const currentTalent = talentMap[sym] ?? talentMap['SIM-DEMO'] ?? null;
+  const demo = sym === 'SIM-DEMO';
+  const currentGex = demo ? DEMO_INTELLIGENCE.gex[sym] : liveGex[sym];
+  const currentDarkPool = demo ? DEMO_INTELLIGENCE.darkPool[sym] : liveDarkPool[sym];
+  const currentTalent = demo ? DEMO_INTELLIGENCE.talent[sym] : liveTalent[sym];
+  const secDiffs = demo ? DEMO_INTELLIGENCE.secDiffs : liveDiffs;
+  const vocalStress = demo ? DEMO_INTELLIGENCE.vocalStress : liveStress;
+  const contracts = demo ? DEMO_INTELLIGENCE.contracts : liveContracts;
+  const capitolTrades = demo ? DEMO_INTELLIGENCE.capitolTrades : liveTrades;
+  const corporateJets = demo ? DEMO_INTELLIGENCE.corporateJets : liveJets;
+  const macro = demo ? DEMO_INTELLIGENCE.macro : liveMacro;
+  const unavailable = 'Unavailable — no connected source supplied data.';
 
   const filteredDiffs = filterActiveSymbol ? secDiffs.filter((d) => d.symbol === sym) : secDiffs;
   const filteredStress = filterActiveSymbol ? vocalStress.filter((v) => v.symbol === sym) : vocalStress;
   const filteredContracts = filterActiveSymbol ? contracts.filter((c) => c.symbol === sym) : contracts;
   const filteredTrades = filterActiveSymbol ? capitolTrades.filter((t) => t.symbol === sym) : capitolTrades;
   const filteredJets = filterActiveSymbol ? corporateJets.filter((j) => j.symbol === sym) : corporateJets;
+  const filteredEvents = filterActiveSymbol ? events.filter((event) => event.symbol === sym) : events;
 
   return (
     <>
@@ -148,6 +157,28 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
         </div>
 
         <div className="drawer__body intel-drawer__body">
+          {demo && (
+            <div className="intel-empty" data-testid="intel-demo-label">
+              DEMO FIXTURES — all values, names and events below are synthetic examples.
+            </div>
+          )}
+          {!demo && filteredEvents.length > 0 && (
+            <section className="intel-section" data-testid="intel-received-events">
+              <h3 className="intel-section__title">Received intelligence</h3>
+              {filteredEvents.map((event) => (
+                <article key={event.id} className="intel-card">
+                  <div className="intel-card__top">
+                    <span className="intel-card__sym">{event.symbol}</span>
+                    <span>{event.kind}</span>
+                    <span>{event.source || 'Source not supplied'}</span>
+                  </div>
+                  <div className="intel-card__heading">{event.headline}</div>
+                  <div className="intel-card__desc">{event.detail}</div>
+                  {event.amountUsd !== undefined && <div>Amount: ${event.amountUsd.toLocaleString('en-US')}</div>}
+                </article>
+              ))}
+            </section>
+          )}
           {/* TAB 1: DOCS <GO> */}
           {activeTab === 'DOCS' && (
             <div className="intel-tab-pane" data-testid="pane-docs">
@@ -162,7 +193,7 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                 </p>
 
                 {filteredDiffs.length === 0 ? (
-                  <div className="intel-empty">No SEC Risk Factor changes detected for {sym}.</div>
+                  <div className="intel-empty">{unavailable}</div>
                 ) : (
                   filteredDiffs.map((diff) => (
                     <article key={diff.id} className="intel-card intel-card--diff">
@@ -201,12 +232,13 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
               <section className="intel-section">
                 <div className="intel-section__head">
                   <span className="intel-section__tag">EARNINGS CALL ACOUSTICS</span>
-                  <h3 className="intel-section__title">Vocal Stress & Deception Telemetry</h3>
+                  <h3 className="intel-section__title">Call Transcript & Acoustic Metrics</h3>
                 </div>
                 <p className="intel-section__desc">
-                  Q&amp;A acoustic pitch jitter (F0), shimmer, and micro-hesitation ratio extracted via Praat/Parselmouth.
+                  Acoustic metrics require supplied audio measurements. Any score is an unvalidated heuristic; text phrase matches do not establish stress or deception.
                 </p>
 
+                {filteredStress.length === 0 && <div className="intel-empty">{unavailable}</div>}
                 {filteredStress.map((voc) => {
                   const pct = Math.round(voc.stressScore * 100);
                   const isHigh = voc.stressScore >= 0.6;
@@ -219,7 +251,7 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                       </div>
                       <div className="vocal-metrics-grid">
                         <div className="vocal-metric">
-                          <span className="vocal-metric__lbl">STRESS INDEX</span>
+                          <span className="vocal-metric__lbl">HEURISTIC SCORE (UNVALIDATED)</span>
                           <span className={`vocal-metric__val${isHigh ? ' is-alert' : ''}`}>
                             {pct}%
                           </span>
@@ -240,7 +272,7 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                       {voc.evasiveAnswersDetected > 0 && (
                         <div className="intel-triggers">
                           <span className="intel-trigger-badge is-warn">
-                            🚨 {voc.evasiveAnswersDetected} Non-Answers / Deflections Detected during Analyst Q&amp;A
+                            {voc.evasiveAnswersDetected} tracked phrase matches (text only)
                           </span>
                         </div>
                       )}
@@ -263,18 +295,19 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                   Live official federal procurement allocations matched against FlowMap defense &amp; tech tickers.
                 </p>
 
+                {filteredContracts.length === 0 && <div className="intel-empty">{unavailable}</div>}
                 {filteredContracts.map((c) => (
                   <article key={c.id} className="intel-card intel-card--contract">
                     <div className="intel-card__top">
                       <span className="intel-card__sym">🛡️ {c.symbol}</span>
                       <span className="intel-card__amount">
-                        ${(c.amount / 1_000_000).toLocaleString('en-US', { maximumFractionDigits: 1 })}M
+                        {c.amount === undefined ? 'Amount not supplied' : `$${(c.amount / 1_000_000).toLocaleString('en-US', { maximumFractionDigits: 1 })}M`}
                       </span>
                       <span className="intel-card__date">{c.date}</span>
                     </div>
-                    <div className="intel-card__recipient">{c.recipient} · {c.agency}</div>
+                    {(c.recipient || c.agency) && <div className="intel-card__recipient">{[c.recipient, c.agency].filter(Boolean).join(' · ')}</div>}
                     <div className="intel-card__desc">{c.description}</div>
-                    <div className="intel-card__award-id">Award ID: {c.awardId}</div>
+                    {c.awardId && <div className="intel-card__award-id">Award ID: {c.awardId}</div>}
                   </article>
                 ))}
               </section>
@@ -288,20 +321,21 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                   Transactions disclosed under the STOCK Act by members of Armed Services, Intelligence, and Banking committees.
                 </p>
 
+                {filteredTrades.length === 0 && <div className="intel-empty">{unavailable}</div>}
                 {filteredTrades.map((t) => (
                   <article key={t.id} className="intel-card intel-card--capitol">
                     <div className="intel-card__top">
                       <span className="intel-card__sym">🏛️ {t.symbol}</span>
-                      <span className={`intel-card__side is-${t.transactionType.toLowerCase()}`}>
+                      {t.transactionType && <span className={`intel-card__side is-${t.transactionType.toLowerCase()}`}>
                         {t.transactionType.toUpperCase()}
-                      </span>
+                      </span>}
                       <span className="intel-card__date">{t.date}</span>
                     </div>
-                    <div className="intel-card__politician">
-                      <strong>{t.politician}</strong> ({t.chamber})
-                    </div>
-                    <div className="intel-card__committee">Committee: {t.committee}</div>
-                    <div className="intel-card__amount-range">Amount: {t.amountRange}</div>
+                    {(t.politician || t.chamber) && <div className="intel-card__politician">
+                      <strong>{t.politician}</strong> {t.chamber && `(${t.chamber})`}
+                    </div>}
+                    {t.committee && <div className="intel-card__committee">Committee: {t.committee}</div>}
+                    {t.amountRange && <div className="intel-card__amount-range">Amount: {t.amountRange}</div>}
                   </article>
                 ))}
               </section>
@@ -317,18 +351,19 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                   <h3 className="intel-section__title">Gamma Exposure (GEX) Microstructure</h3>
                 </div>
                 <p className="intel-section__desc">
-                  Net dealer gamma positioning and critical volatility barrier boundaries drawn on the price chart.
+                  Gamma estimate from an observed option chain. Calls positive and puts negative is a model assumption; dealer inventory is unknown.
                 </p>
 
+                {!currentGex && <div className="intel-empty">{unavailable}</div>}
                 {currentGex && (
                   <div className="gex-summary-card">
                     <div className="gex-stat">
-                      <span className="gex-stat__lbl">NET GEX</span>
+                      <span className="gex-stat__lbl">NET GEX (MODEL)</span>
                       <span className={`gex-stat__val ${currentGex.netGex >= 0 ? 'is-pos' : 'is-neg'}`}>
-                        {currentGex.netGex >= 0 ? '+' : ''}${(currentGex.netGex / 1_000_000).toFixed(1)}M/pt
+                        {currentGex.netGex >= 0 ? '+' : ''}${(currentGex.netGex / 1_000_000).toFixed(1)}M / 100% spot move
                       </span>
                       <span className="gex-stat__sub">
-                        {currentGex.netGex >= 0 ? 'Vol Dampening (Dealers Long)' : 'Vol Accelerating (Dealers Short)'}
+                        {currentGex.netGex >= 0 ? 'Positive under call/put sign assumption' : 'Negative under call/put sign assumption'}
                       </span>
                     </div>
 
@@ -336,12 +371,12 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                       <div className="gex-level-item is-call">
                         <span className="gex-level-item__name">CALL WALL (CEILING)</span>
                         <span className="gex-level-item__px">${currentGex.callWall.toFixed(2)}</span>
-                        <span className="gex-level-item__note">Dealer Short Call Resistance</span>
+                        <span className="gex-level-item__note">Largest call gamma magnitude</span>
                       </div>
                       <div className="gex-level-item is-put">
                         <span className="gex-level-item__name">PUT WALL (FLOOR)</span>
                         <span className="gex-level-item__px">${currentGex.putWall.toFixed(2)}</span>
-                        <span className="gex-level-item__note">Dealer Long Put Floor / Gamma Ramp</span>
+                        <span className="gex-level-item__note">Largest put gamma magnitude</span>
                       </div>
                       <div className="gex-level-item is-flip">
                         <span className="gex-level-item__name">GAMMA FLIP (TRIGGER)</span>
@@ -362,6 +397,7 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                   ATS (Alternative Trading Systems) daily off-exchange volume. Ratios &gt;50% flag institutional accumulation or distribution.
                 </p>
 
+                {!currentDarkPool && <div className="intel-empty">{unavailable}</div>}
                 {currentDarkPool && (
                   <div className="darkpool-card">
                     <div className="darkpool-row">
@@ -405,19 +441,20 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                   FAA ICAO24 transponder tracking. Flights to private executive hubs (Omaha, Zurich, Sun Valley) alert potential M&amp;A or restructuring.
                 </p>
 
+                {filteredJets.length === 0 && <div className="intel-empty">{unavailable}</div>}
                 {filteredJets.map((j) => (
                   <article key={j.id} className="intel-card intel-card--jet">
                     <div className="intel-card__top">
                       <span className="intel-card__sym">✈️ {j.symbol}</span>
-                      <span className="intel-card__tail">{j.tailNumber} ({j.icao24})</span>
+                      <span className="intel-card__tail">{j.tailNumber} {j.icao24 && `(${j.icao24})`}</span>
                       <span className="intel-card__date">{j.date}</span>
                     </div>
-                    <div className="intel-jet-route">
+                    {(j.origin || j.destination) && <div className="intel-jet-route">
                       <span>{j.origin}</span>
                       <span className="intel-jet-arrow">──✈──▶</span>
                       <span>{j.destination}</span>
-                    </div>
-                    {j.isMaHub && (
+                    </div>}
+                    {j.isMaHub && j.hubName && (
                       <div className="intel-triggers">
                         <span className="intel-trigger-badge is-alert">
                           🎯 Executive Transit Alert: {j.hubName}
@@ -437,6 +474,7 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
                   Weekly differential of open engineering and R&amp;D positions. Identifies covert product cycles or unannounced hiring freezes.
                 </p>
 
+                {!currentTalent && <div className="intel-empty">{unavailable}</div>}
                 {currentTalent && (
                   <div className="talent-card">
                     <div className="talent-row">
@@ -467,21 +505,20 @@ export function IntelligenceDrawer({ activeSymbol, onClose }: IntelligenceDrawer
         <div className="intel-drawer__macro-bar" data-testid="intel-macro-bar">
           <div className="macro-chip">
             <span className="macro-chip__lbl">SOFR</span>
-            <span className="macro-chip__val">{macro.sofrRate.toFixed(2)}%</span>
+            <span className="macro-chip__val">{macro ? `${macro.sofrRate.toFixed(2)}%` : '—'}</span>
           </div>
           <div className="macro-chip">
-            <span className="macro-chip__lbl">HY SPREAD (CDS)</span>
-            <span className="macro-chip__val">{macro.hySpreadBps.toFixed(0)} bps</span>
+            <span className="macro-chip__lbl">HY SPREAD (OAS)</span>
+            <span className="macro-chip__val">{macro ? `${macro.hySpreadBps.toFixed(0)} bps` : '—'}</span>
           </div>
           <div className="macro-chip">
             <span className="macro-chip__lbl">10Y-2Y YIELD CURVE</span>
-            <span className={`macro-chip__val ${macro.yieldCurve10Y2Y < 0 ? 'is-neg' : 'is-pos'}`}>
-              {macro.yieldCurve10Y2Y < 0 ? '' : '+'}
-              {macro.yieldCurve10Y2Y.toFixed(2)}% {macro.yieldCurve10Y2Y < 0 ? '(INVERTED)' : ''}
+            <span className={`macro-chip__val ${macro ? (macro.yieldCurve10Y2Y < 0 ? 'is-neg' : 'is-pos') : ''}`}>
+              {macro ? `${macro.yieldCurve10Y2Y < 0 ? '' : '+'}${macro.yieldCurve10Y2Y.toFixed(2)}% ${macro.yieldCurve10Y2Y < 0 ? '(INVERTED)' : ''}` : '—'}
             </span>
           </div>
-          <div className={`macro-regime-badge is-${macro.stressRegime.toLowerCase()}`}>
-            {macro.stressRegime} CREDIT STRESS
+          <div className={`macro-regime-badge is-${macro?.stressRegime.toLowerCase() ?? 'unavailable'}`} title={!macro ? unavailable : macro.status}>
+            {demo ? 'DEMO · ' : ''}{macro ? `${macro.stressRegime} CREDIT STRESS` : 'MACRO UNAVAILABLE'}
           </div>
         </div>
       </aside>

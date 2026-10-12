@@ -124,7 +124,7 @@ test('overlays off (Price last) and Axes off clear the 2D text + gutters (S3 C-2
   // --- Everything else off, then PRICE LAST (S3 C-2 worst order). ---------------
   // NOTE: 'Volume' (F26 vol-bars, Bookmap H7) also paints on the shared text
   // layer, so it belongs to the same all-off contract (2026-09-14).
-  for (const label of ['Bubbles', 'BBO', 'VWAP', 'CVD', 'Profile', 'Markers', 'Volume']) {
+  for (const label of ['Bubbles', 'BBO', 'VWAP', 'CVD', 'Liquidity', 'GEX', 'Markers', 'Volume']) {
     const toggle = page.locator(`.overlay-toggle[aria-label^="${label} "]`);
     if ((await toggle.getAttribute('aria-pressed')) === 'true') await toggle.click();
     await expect(toggle).toHaveAttribute('aria-pressed', 'false');

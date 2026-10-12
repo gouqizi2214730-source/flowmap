@@ -13,6 +13,7 @@
 import type { GridMap } from './coords';
 import type { PointBatch, SolidBatch } from './primitives';
 import type { TextLayer } from '../textLayer';
+import type { PriceScale } from '../priceScale';
 
 export interface OverlayFrame {
   /** Immutable camera + epoch transform for this frame. */
@@ -33,11 +34,13 @@ export interface OverlayFrame {
    * uncached columns (deep history not fetched).
    */
   columnArrays: (col: number) => { bid: Float32Array; ask: Float32Array | null } | null;
+  /** Native epoch price intervals for the cached column, when available. */
+  columnScale?: (col: number) => PriceScale | null;
+  dataVersion?: number;
+  changed?: () => void;
   /**
-   * The SUM-mip level the heatmap paints this frame (0/1/2). The volume profile
-   * samples rows at 4^mipLevel granularity — the same block the heatmap shows —
-   * so it never claims price resolution the display cannot distinguish. Absent
-   * (direct unit tests) means 0 = every row, the exact legacy path.
+   * Legacy frame-wide heatmap LOD diagnostics. The profile always accumulates
+   * native rows; a projected heatmap chooses its footprint locally per pixel.
    */
   mipLevel?: number;
 }

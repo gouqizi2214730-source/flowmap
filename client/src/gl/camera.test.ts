@@ -14,8 +14,10 @@ import {
   KILL_TIME,
   limitsFor,
   maxColSpanFor,
+  HISTORY_VIEW_PADDING,
+  MAX_COL_SPAN,
+  MAX_ROW_SPAN,
   MIN_COL_SPAN,
-  MIN_RESIDENT_COVERAGE,
   MIN_ROW_SPAN,
   pan,
   priceFrame,
@@ -30,6 +32,8 @@ import {
   type CameraState,
 } from './camera';
 import type { ResidentRange } from './tileRing';
+import { makeHybrid, priceToRow, rowToPrice } from './priceScale';
+import { fractionRow, rowFraction } from './priceProjection';
 
 // A representative geometry: 512-row price grid, ring holds 4096 columns.
 const ROWS = 512;
@@ -203,7 +207,7 @@ describe('zoomTime — cursor anchored', () => {
     expect(past.colSpan).toBe((CAP / 2) * 100);
     expect(past.colSpan).toBeGreaterThan(LIMITS.maxColSpan);
     // ...but there is still a hard ceiling (maxColSpanZoom) for numeric safety.
-    const capped = zoomTime({ ...baseState(), colSpan: CAP / 2 }, LIMITS, 1e9, 1000);
+    const capped = zoomTime({ ...baseState(), colSpan: CAP / 2 }, LIMITS, 1e15, 1000);
     expect(capped.colSpan).toBe(LIMITS.maxColSpanZoom);
   });
 
@@ -242,15 +246,11 @@ describe('zoomPrice — cursor anchored', () => {
     expect(zoomPrice(s, LIMITS, 0.001, s.rowCenter).rowSpan).toBe(MIN_ROW_SPAN);
   });
 
-  it('caps the user price zoom-out at the grid height — the full band', () => {
-    // Campaign 4.2: the zoom-out cap and the framing height COINCIDE. Zooming
-    // past the full band only produced black margins plus a sub-sampled mip
-    // image (the owner-reported dashed rows), so the wall is now meaningful.
-    const past = zoomPrice({ ...baseState(), rowSpan: 400 }, LIMITS, 1e6, 256);
-    expect(past.rowSpan).toBe(ROWS);
-    // ...and the hard ceiling is the same grid height.
+  it('allows manual price zoom beyond the texture height with a finite numeric ceiling', () => {
+    const past = zoomPrice({ ...baseState(), rowSpan: 400 }, LIMITS, 16, 256);
+    expect(past.rowSpan).toBe(6400);
     const capped = zoomPrice({ ...baseState(), rowSpan: 400 }, LIMITS, 1e9, 256);
-    expect(capped.rowSpan).toBe(ROWS);
+    expect(capped.rowSpan).toBe(MAX_ROW_SPAN);
   });
 
   it('an in-between span within the grid is legal and untouched', () => {
@@ -261,15 +261,15 @@ describe('zoomPrice — cursor anchored', () => {
 });
 
 describe('maxRowSpanZoom — the user price zoom-out cap', () => {
-  it('limitsFor pins it to the grid height (the widest meaningful view)', () => {
-    expect(LIMITS.maxRowSpanZoom).toBe(ROWS);
-    // A taller grid gets its full height, never less.
-    expect(limitsFor(512 * 4, CAP).maxRowSpanZoom).toBe(512 * 4);
+  it('is independent of grid height and cache capacity', () => {
+    expect(LIMITS.maxRowSpanZoom).toBe(MAX_ROW_SPAN);
+    expect(limitsFor(512 * 4, 256).maxRowSpanZoom).toBe(MAX_ROW_SPAN);
   });
 
-  it('clampCamera allows any span in [MIN_ROW_SPAN, rows]', () => {
+  it('clampCamera allows spans beyond the grid up to the numeric ceiling', () => {
     expect(clampCamera({ ...baseState(), rowSpan: 500 }, LIMITS).rowSpan).toBe(500);
-    expect(clampCamera({ ...baseState(), rowSpan: 1e12 }, LIMITS).rowSpan).toBe(ROWS);
+    expect(clampCamera({ ...baseState(), rowSpan: 8192 }, LIMITS).rowSpan).toBe(8192);
+    expect(clampCamera({ ...baseState(), rowSpan: 1e12 }, LIMITS).rowSpan).toBe(MAX_ROW_SPAN);
   });
 
   it('rowCenterBounds stays span-relative at the widest legal span', () => {
@@ -424,14 +424,14 @@ describe('clampCamera', () => {
     );
     expect(c.colCenter).toBe(-50); // time center free
     expect(c.colSpan).toBe(MIN_COL_SPAN);
-    expect(c.rowSpan).toBe(ROWS); // span tops out at the USER zoom cap (grid height)
+    expect(c.rowSpan).toBe(MAX_ROW_SPAN);
     // rowCenter is bounded by the POST-clamp span, not the 1e12 it came in with.
-    expect(c.rowCenter).toBe(ROWS + ROWS);
+    expect(c.rowCenter).toBe(ROWS + MAX_ROW_SPAN);
   });
 
   it('clamps rowSpan BEFORE deriving the rowCenter band (order matters)', () => {
     // If the band were derived from the pre-clamp span (1e12), rowCenter (1e9)
-    // would pass unclamped; it must use the clamped span (ROWS) → rows + ROWS.
+    // would pass unclamped; it must use the numeric span ceiling.
     const c = clampCamera(
       {
         colCenter: 0,
@@ -443,8 +443,8 @@ describe('clampCamera', () => {
       },
       LIMITS,
     );
-    expect(c.rowSpan).toBe(ROWS);
-    expect(c.rowCenter).toBe(rowCenterBounds(ROWS, LIMITS).hi);
+    expect(c.rowSpan).toBe(MAX_ROW_SPAN);
+    expect(c.rowCenter).toBe(rowCenterBounds(MAX_ROW_SPAN, LIMITS).hi);
   });
 });
 
@@ -454,9 +454,7 @@ describe('clampCamera', () => {
  * bounds it drives:
  *   - pan  → colOffset stops one small overscroll band past either history end
  *            (QA3 measured colOffset −92 129 at oldest 0, 0.31 % painted);
- *   - zoom → the span cap is the resident window over MIN_RESIDENT_COVERAGE, so
- *            the field can never squeeze sub-pixel blank (M3: 60 notches out →
- *            colScale 1 048 576 covering 2 717 resident columns, 0/420 probes).
+ *   - zoom → the full known history can be shown despite a small GPU cache.
  * The window is OPT-IN: bare limits keep the legacy free camera.
  */
 describe('time data window — pan + zoom bounds (F3)', () => {
@@ -471,30 +469,43 @@ describe('time data window — pan + zoom bounds (F3)', () => {
     expect(maxColSpanFor(LIMITS)).toBe(LIMITS.maxColSpanZoom);
   });
 
-  it('maxColSpanFor is the resident count over the coverage floor', () => {
-    // 200 resident columns must cover half the viewport at the widest zoom.
-    expect(maxColSpanFor(winLimits(800, 999))).toBe(200 / MIN_RESIDENT_COVERAGE);
-    // Grows with residency (deep scroll-back widens the allowed zoom-out).
-    expect(maxColSpanFor(winLimits(600, 999))).toBe(400 / MIN_RESIDENT_COVERAGE);
-    // Never below the minimum span, never above the hard numeric ceiling.
-    expect(maxColSpanFor(winLimits(5, 5))).toBe(2);
-    expect(maxColSpanFor(winLimits(0, 10_000_000))).toBe(LIMITS.maxColSpanZoom);
+  it('maxColSpanFor uses all known history independently of residency', () => {
+    const allHistory = 1000 * (1 + HISTORY_VIEW_PADDING);
+    expect(maxColSpanFor(winLimits(800, 999))).toBe(allHistory);
+    expect(maxColSpanFor(winLimits(600, 999))).toBe(allHistory);
+    expect(maxColSpanFor(winLimits(999, 999))).toBe(allHistory);
+    expect(maxColSpanFor({ ...LIMITS, timeWindow: { newest: 999, resident: null } })).toBe(allHistory);
+    expect(maxColSpanFor({ ...winLimits(800, 999), timeWindow: { floor: 500, newest: 999, resident: range(999, 999) } })).toBe(500 * (1 + HISTORY_VIEW_PADDING));
   });
 
-  it('zoomTime caps the span at the resident coverage floor', () => {
-    const z = zoomTime({ ...baseState(), colSpan: 50 }, winLimits(800, 999), 1e9, 1000);
-    expect(z.colSpan).toBe(200 / MIN_RESIDENT_COVERAGE);
+  it('maximum zoom shows all known history even with only one GPU column loaded', () => {
+    const z = zoomTime({ ...baseState(), colSpan: 50 }, winLimits(999, 999), 1e9, 1000);
+    expect(z.colSpan).toBe(1000 * (1 + HISTORY_VIEW_PADDING));
+    expect(toView(z).colOffset).toBeLessThanOrEqual(0);
+    expect(toView(z).colOffset + z.colSpan).toBeGreaterThanOrEqual(1000);
     expect(z.followTime).toBe(false);
   });
 
+  it('can show multi-day history beyond the old 2^20-column limit', () => {
+    const limits = { ...LIMITS, timeWindow: { floor: 0, newest: 4_999_999, resident: range(4_999_744, 4_999_999) } };
+    const cam = new Camera(limits, baseState());
+    cam.zoomTime(1e12, 1000);
+    expect(cam.state.colSpan).toBe(5_000_000 * (1 + HISTORY_VIEW_PADDING));
+    expect(cam.state.colCenter).toBe(2_500_000);
+    expect(cam.state.colSpan).toBeGreaterThan(1_048_576);
+    expect(MAX_COL_SPAN).toBe(Number.MAX_SAFE_INTEGER);
+    const before = cam.state.colSpan;
+    cam.setTimeWindow({ floor: 0, newest: 4_999_999, resident: range(17, 17) });
+    cam.pan(1, 0, KILL_TIME);
+    expect(cam.state.colSpan).toBe(before);
+  });
+
   it('the cap is applied BEFORE the anchor math, so anchoring stays exact', () => {
-    // View [4900, 5100], cursor at 70 % → column 5040. The zoom-out lands the
-    // span at the 4000-column cap (2000 resident / 0.5) with the view well
-    // inside the extent, so the pan bound must not interfere and the anchor is
-    // exact.
+    // Away from history ends, cursor anchoring is exact even when the viewport
+    // already covers more columns than the GPU ring retains.
     const s = { ...baseState(), colCenter: 5000 };
     const anchor = colAtFrac(s, 0.7);
-    const z = zoomTime(s, winLimits(8000, 9999), 1e9, anchor);
+    const z = zoomTime(s, winLimits(8000, 9999), 20, anchor);
     expect(z.colSpan).toBe(4000);
     expect(colAtFrac(z, 0.7)).toBeCloseTo(anchor, 9);
   });
@@ -529,9 +540,9 @@ describe('time data window — pan + zoom bounds (F3)', () => {
   });
 
   it('centres the extent when the view is wider than it (degenerate band)', () => {
-    const limits = winLimits(0, 999); // extent length 1000; cap = 2000
+    const limits = winLimits(0, 999);
     const c = clampCamera({ ...baseState(), colCenter: -5000, colSpan: 2000 }, limits);
-    expect(c.colSpan).toBe(2000);
+    expect(c.colSpan).toBe(1000 * (1 + HISTORY_VIEW_PADDING));
     expect(c.colCenter).toBe(500); // (floor + newest + 1) / 2
   });
 
@@ -549,7 +560,7 @@ describe('time data window — pan + zoom bounds (F3)', () => {
     expect(cam.state.colSpan).toBe(1000);
     // ...but the NEXT gesture is bounded by the fresh window.
     cam.pan(-1, 0);
-    expect(cam.state.colCenter).toBe(COL_SEQ_FLOOR - COL_OVERSCROLL + 1000 / 2);
+    expect(cam.state.colCenter).toBe(500);
   });
 });
 
@@ -599,16 +610,13 @@ describe('Camera (imperative wrapper)', () => {
     expect(cam.followTime).toBe(true);
   });
 
-  it('re-clamps state when limits shrink', () => {
+  it('cache geometry changes preserve the manual price span', () => {
     const cam = new Camera(LIMITS);
     cam.setFollowFrame(0, 100, 0, 500); // rowSpan 500 within 512
     cam.setLimits(limitsFor(256, CAP)); // grid shrinks to 256 rows
-    // Campaign 4.2: the user zoom-out cap IS the grid height, so the 500-row
-    // span now clamps to the shrunk grid's 256 rows, and the centre re-bounds
-    // to the new span-relative band.
-    expect(cam.toView().rowScale).toBe(256);
+    expect(cam.toView().rowScale).toBe(500);
     expect(cam.state.rowCenter).toBe(250); // already inside the new span's band
-    // A span past the USER cap clamps to the new cap (256).
+    // Only a numeric overflow is clamped.
     cam.state = { ...cam.state, rowSpan: 2_000_000 };
     cam.setLimits(limitsFor(256, CAP));
     expect(cam.toView().rowScale).toBe(cam.limits.maxRowSpanZoom);
@@ -643,7 +651,88 @@ describe('applyKill — the follow release policy', () => {
   });
 });
 
+describe('hybrid manual navigation uses physical prices independently of storage', () => {
+  const scale = makeHybrid({ mid: 85000, rows: 4096, coreRows: 2048, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+  function camera(low = 84500, high = 85500): Camera {
+    const cam = new Camera(limitsFor(scale.rows, 256));
+    cam.priceScale = scale;
+    const bottom = priceToRow(scale, low);
+    const top = priceToRow(scale, high);
+    cam.remapPrice((bottom + top) / 2, top - bottom);
+    return cam;
+  }
+  function physicalRange(cam: Camera): { low: number; high: number } {
+    const view = cam.toView();
+    return { low: rowToPrice(scale, view.rowOffset), high: rowToPrice(scale, view.rowOffset + view.rowScale) };
+  }
+
+  it('zooms beyond visible-market overview bounds and preserves the physical cursor anchor', () => {
+    const cam = camera();
+    cam.priceZoomBounds = { low: 84900, high: 85100 };
+    const anchor = fractionRow(cam.toView(), scale, 0.4);
+    cam.zoomPrice(10, anchor);
+    const span = physicalRange(cam);
+    expect(span.low).toBeCloseTo(80900, 5);
+    expect(span.high).toBeCloseTo(90900, 5);
+    expect(rowFraction(cam.toView(), scale, anchor)).toBeCloseTo(0.4, 9);
+    expect(cam.followTime).toBe(true);
+    expect(cam.followPrice).toBe('track');
+  });
+
+  it('can zoom past the stored price band with finite positive price labels', () => {
+    const cam = camera();
+    cam.zoomPrice(1e9, fractionRow(cam.toView(), scale, 0.5));
+    const prices = physicalRange(cam);
+    expect(prices.low).toBeGreaterThan(0);
+    expect(prices.high).toBeGreaterThan(scale.hiPrice);
+    expect(cam.state.rowSpan).toBeGreaterThan(scale.rows);
+    expect(Object.values(cam.toView()).every(Number.isFinite)).toBe(true);
+  });
+
+  it('pans past stored high/low prices while preserving the chosen physical span', () => {
+    const cam = camera();
+    cam.pan(0, cam.state.rowSpan * 10_000, KILL_PRICE);
+    const above = physicalRange(cam);
+    expect(above.low).toBeGreaterThan(scale.hiPrice);
+    expect(above.high - above.low).toBeCloseTo(1000, 4);
+    cam.pan(0, -cam.state.rowSpan * 100_000, KILL_PRICE);
+    const below = physicalRange(cam);
+    expect(below.low).toBeGreaterThan(0);
+    expect(below.low).toBeLessThan(scale.loPrice);
+    expect(below.high - below.low).toBeCloseTo(1000, 4);
+    expect(Object.values(cam.toView()).every(Number.isFinite)).toBe(true);
+  });
+
+  it('does not reset a sub-row manual frame when GPU limits change', () => {
+    const cam = camera(84999.999, 85000.001);
+    const before = cam.state.rowSpan;
+    expect(before).toBeLessThan(1);
+    cam.setLimits(limitsFor(scale.rows, 64));
+    expect(cam.state.rowSpan).toBe(before);
+    expect(cam.limits.rowDomain?.hi).toBeGreaterThan(scale.rows);
+  });
+
+  it('rejects non-finite hybrid gestures without changing the camera', () => {
+    const cam = camera();
+    const before = { ...cam.state };
+    cam.zoomPrice(Infinity, scale.dnRows);
+    cam.zoomPrice(2, Infinity);
+    cam.pan(0, NaN);
+    expect(cam.state).toEqual(before);
+  });
+});
+
 describe('priceFrame — the pure auto-fit framing rule', () => {
+  it('pads a narrow hybrid core in dollars, without opening enormous log-wing margins', () => {
+    const scale = makeHybrid({ mid: 85505, rows: 4096, coreRows: 2048, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+    const f = priceFrame(scale.dnRows, scale.dnRows + scale.coreRows - 1, scale.rows, 0.08, 3, scale);
+    const low = rowToPrice(scale, f.rowBottom);
+    const high = rowToPrice(scale, f.rowBottom + f.rowSpan);
+    expect(low).toBeCloseTo(85505 - 10.24 - 1.6384, 5);
+    expect(high).toBeCloseTo(85505 + 10.24 + 1.6384, 5);
+    expect(high - low).toBeLessThan(25);
+  });
+
   it('pads proportionally and clamps to the grid', () => {
     const f = priceFrame(100, 200, ROWS, 0.08, 3);
     expect(f.rowBottom).toBe(92); // 100 - round(100*0.08)
@@ -705,7 +794,7 @@ describe('non-finite gesture inputs — poison-proof by construction', () => {
   });
 
   it('zoomTime still honours the span clamp for a huge (finite) factor', () => {
-    const out = zoomTime(baseState(), LIMITS, 1e12, 1000);
+    const out = zoomTime(baseState(), LIMITS, 1e18, 1000);
     expect(out.colSpan).toBe(LIMITS.maxColSpanZoom);
     expect(Number.isFinite(out.colCenter)).toBe(true);
   });

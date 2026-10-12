@@ -73,6 +73,7 @@ FLAG_JSON = 0x0001
 MSG_HELLO = 0x01
 MSG_EPOCH_START = 0x02
 MSG_DEPTH_COL = 0x03
+MSG_BOOK_UPDATE = 0x23
 MSG_BAR_COL = 0x04
 MSG_TRADE = 0x05
 MSG_BBO = 0x06
@@ -318,8 +319,15 @@ def _dec_gex(buf: bytes, off: int, plen: int) -> events.GexLevelUpdate:
 
 # --- registries (table-driven dispatch) -----------------------------------------
 
+def _dec_book(buf: bytes, off: int, plen: int) -> events.BookUpdate:
+    d = _dec_depth(buf, off, plen)
+    return events.BookUpdate(epoch=d.epoch, col_seq=d.col_seq, t0_ns=d.t0_ns,
+                             mode=d.mode, final=False, bid=d.bid, ask=d.ask)
+
+
 _HOT_ENCODERS: dict[type, tuple[int, Callable]] = {
     events.DepthColumn: (MSG_DEPTH_COL, _enc_depth),
+    events.BookUpdate: (MSG_BOOK_UPDATE, _enc_depth),
     events.BarColumn: (MSG_BAR_COL, _enc_bar),
     events.Trade: (MSG_TRADE, _enc_trade),
     events.BBO: (MSG_BBO, _enc_bbo),
@@ -331,6 +339,7 @@ _HOT_ENCODERS: dict[type, tuple[int, Callable]] = {
 
 _HOT_DECODERS: dict[int, Callable] = {
     MSG_DEPTH_COL: _dec_depth,
+    MSG_BOOK_UPDATE: _dec_book,
     MSG_BAR_COL: _dec_bar,
     MSG_TRADE: _dec_trade,
     MSG_BBO: _dec_bbo,

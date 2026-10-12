@@ -83,6 +83,49 @@ afterEach(() => {
 });
 
 describe('bookStore buffer', () => {
+  it('preserves the immutable trades reference for book/BBO-only updates', () => {
+    ingestForTest(trade(1, 100, 2, SIDE_BUY));
+    const prints = getSnapshot().trades;
+    expect(Object.isFrozen(prints)).toBe(true);
+    ingestForTest(depthCol(1, 1, [2, 0], [0, 3]));
+    expect(getSnapshot().trades).toBe(prints);
+    ingestForTest(bbo(100, 2, 101, 3));
+    expect(getSnapshot().trades).toBe(prints);
+    ingestForTest(trade(2, 101, 4, SIDE_SELL));
+    expect(getSnapshot().trades).not.toBe(prints);
+    resetForSession();
+    expect(getSnapshot().trades).not.toBe(prints);
+    expect(getSnapshot().trades).toHaveLength(0);
+  });
+
+  it('keeps side attribution and genuine duplicate prints intact', () => {
+    const print = { ...trade(1, 100, 2, SIDE_BUY), side_src: 2 };
+    ingestForTest(print);
+    ingestForTest(print);
+    expect(getSnapshot().trades).toHaveLength(2);
+    expect(getSnapshot().trades.map((t) => t.sideSrc)).toEqual([2, 2]);
+    expect(getSnapshot().trades[0].receivedAtMs).toBeTypeOf('number');
+  });
+  it('keeps instantaneous resting size independent of historical column averages', () => {
+    ingestForTest({ ...depthCol(1, 10, [1, 2, 3], [0, 0, 4]), type: MsgType.BOOK_UPDATE, final: false, t0_ns: 20n } as never);
+    expect(getSnapshot().book?.instant).toBe(true);
+    ingestForTest(depthCol(1, 11, [99, 99, 99], [0, 0, 99]));
+    expect(Array.from(getSnapshot().book!.bid)).toEqual([1, 2, 3]);
+    ingestForTest({ ...depthCol(1, 10, [8, 2, 3], [0, 0, 4]), type: MsgType.BOOK_UPDATE, final: false, t0_ns: 21n } as never);
+    expect(getSnapshot().book!.bid[0]).toBe(8);
+    ingestForTest({ ...depthCol(1, 10, [1, 1, 1], [0, 0, 1]), type: MsgType.BOOK_UPDATE, final: false, t0_ns: 19n } as never);
+    expect(getSnapshot().book!.bid[0]).toBe(8);
+  });
+
+  it('rejects stale/crossed quotes and keeps the last real inside market', () => {
+    ingestForTest({ ...bbo(85636.92, 1, 85636.93, 2), ts_ns: 10n });
+    const good = getSnapshot().bbo;
+    expect(good?.receivedAtMs).toBeTypeOf('number');
+    ingestForTest({ ...bbo(85500, 1, 85500.01, 2), ts_ns: 9n });
+    ingestForTest({ ...bbo(85640, 1, 85630, 2), ts_ns: 11n });
+    expect(getSnapshot().bbo).toBe(good);
+  });
+
   it('keeps the NEWEST depth column as the current book', () => {
     ingestForTest(depthCol(1, 10, [1, 2, 3], [0, 0, 4]));
     ingestForTest(depthCol(1, 11, [5, 6, 7], [0, 0, 8]));

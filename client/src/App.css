@@ -792,6 +792,7 @@ body,
 }
 
 .stage {
+  position: relative;
   --price-axis-w: 62px;
   --time-axis-h: 22px;
   --cvd-h: 96px;
@@ -1048,6 +1049,8 @@ body,
 }
 
 .right-rail {
+  /* Live tape/ladder mutations must not relayout the chart's sibling tree. */
+  contain: layout style;
   flex: 0 0 var(--rail-w);
   min-width: 0;
   display: flex;

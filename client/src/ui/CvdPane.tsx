@@ -145,6 +145,17 @@ export function CvdPane({ rendererRef }: CvdPaneProps): JSX.Element {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
+    let paneWidth = canvas.clientWidth;
+    let paneHeight = canvas.clientHeight;
+    const sizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.target !== canvas) continue;
+        paneWidth = Math.round(entry.contentRect.width);
+        paneHeight = Math.round(entry.contentRect.height);
+      }
+    });
+    sizeObserver?.observe(canvas);
+
     let raf = 0;
     let pollTimer = 0;
     let lastSig = '';
@@ -316,8 +327,8 @@ export function CvdPane({ rendererRef }: CvdPaneProps): JSX.Element {
     const draw = (): void => {
       const r = rendererRef.current;
       const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
-      const cssW = canvas.clientWidth;
-      const cssH = canvas.clientHeight;
+      const cssW = sizeObserver ? paneWidth : canvas.clientWidth;
+      const cssH = sizeObserver ? paneHeight : canvas.clientHeight;
       const cap = cvdCapRef.current;
       let painted = false;
       if (cssW !== 0 && cssH !== 0) {
@@ -330,12 +341,13 @@ export function CvdPane({ rendererRef }: CvdPaneProps): JSX.Element {
         // quiet pane immediately (the tokens live on documentElement).
         const themeKey = document.documentElement.dataset.theme ?? '';
         const tipCvd = tl && r ? r.cvdValueAt(tl.newestSeq) : Number.NaN;
+        const ready = r?.marketFrameReady !== false;
         const sig = tl
-          ? `${cssW}x${cssH}|${dpr}|${cap}|${themeKey}|${tl.viewStartCol.toFixed(2)}|${tl.viewEndCol.toFixed(2)}|${tl.newestSeq}|${Number.isFinite(tipCvd) ? tipCvd : ''}`
+          ? `${cssW}x${cssH}|${dpr}|${cap}|${themeKey}|${tl.viewStartCol.toFixed(2)}|${tl.viewEndCol.toFixed(2)}|${tl.newestSeq}|${Number.isFinite(tipCvd) ? tipCvd : ''}|${r?.cvdRevision ?? 0}|${ready}|${r?.overviewStats?.()?.revision ?? 0}`
           : `${cssW}x${cssH}|${dpr}|${cap}|${themeKey}|empty`;
         if (sig !== lastSig) {
           lastSig = sig;
-          paint(r, tl, cap, cssW, cssH, dpr);
+          paint(ready ? r : null, ready ? tl : null, cap, cssW, cssH, dpr);
           painted = true;
         }
       }
@@ -346,6 +358,7 @@ export function CvdPane({ rendererRef }: CvdPaneProps): JSX.Element {
     return () => {
       cancelAnimationFrame(raf);
       window.clearTimeout(pollTimer);
+      sizeObserver?.disconnect();
     };
   }, [rendererRef]);
 

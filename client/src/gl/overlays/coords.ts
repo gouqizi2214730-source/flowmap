@@ -27,6 +27,7 @@
 import type { HeatmapView } from '../heatmap';
 import {
   priceToRow as scalePriceToRow,
+  priceToPlotRow,
   rowToPrice as scaleRowToPrice,
   stepAtRow as scaleStepAtRow,
   type PriceScale,
@@ -46,7 +47,9 @@ export interface SurfaceDims {
 
 /**
  * Per-column start-time table for a resident window: `t0[i]` is the ns start
- * time of column `startSeq + i` (ascending). Present when the session's column
+ * time of column `startSeq + i * stride` (ascending, stride defaults to 1).
+ * Sparse overview knots preserve real timestamps while storing far fewer
+ * samples than original history. Present when the session's column
  * cadence is NOT uniform in time: a reconstructed (1 m-candle) history block is
  * 60 s-spaced while the live epoch is `dtNs` apart, so the single affine
  * `anchorT0Ns + (col − anchorSeq)·dtNs` lies about every reconstructed column
@@ -63,6 +66,12 @@ export interface TimeSlots {
   t0: Float64Array;
   /** Absolute `col_seq` of `t0[0]`. */
   startSeq: number;
+  /** Column distance between neighbouring timestamp knots. Default 1. */
+  stride?: number;
+  /** Explicit ascending column coordinates for nonuniformly spaced real
+   * knots. When present, authoritative over startSeq/stride. Gaps interpolate
+   * only the clock; they do not imply that liquidity exists in those columns. */
+  cols?: Float64Array;
 }
 
 /**
@@ -97,14 +106,35 @@ export interface TimeMap {
 export function slotColToTsNs(s: TimeSlots, col: number): bigint | null {
   const n = s.t0.length;
   if (n < 2) return null;
-  const last = s.startSeq + n - 1;
-  if (!(col >= s.startSeq) || !(col <= last)) return null;
   const t0 = s.t0;
   if (!(t0[n - 1] >= t0[0])) return null; // reversed ends → not usable
-  const pos = col - s.startSeq;
-  const i = Math.floor(pos);
-  if (i >= n - 1) return BigInt(Math.round(t0[n - 1]));
-  const v = t0[i] + (pos - i) * (t0[i + 1] - t0[i]);
+  let i: number;
+  let fraction: number;
+  if (s.cols !== undefined) {
+    const cols = s.cols;
+    if (cols.length !== n || !(cols[n - 1] > cols[0])) return null;
+    if (!(col >= cols[0]) || !(col <= cols[n - 1])) return null;
+    let lo = 0;
+    let hi = n - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cols[mid] <= col) lo = mid;
+      else hi = mid - 1;
+    }
+    i = lo;
+    fraction = i >= n - 1 ? 0 : (col - cols[i]) / (cols[i + 1] - cols[i]);
+  } else {
+    const stride = s.stride ?? 1;
+    if (!(stride > 0) || !Number.isFinite(stride)) return null;
+    const last = s.startSeq + (n - 1) * stride;
+    if (!(col >= s.startSeq) || !(col <= last)) return null;
+    const pos = (col - s.startSeq) / stride;
+    i = Math.floor(pos);
+    fraction = pos - i;
+  }
+  if (i >= n - 1) return Number.isFinite(t0[n - 1]) ? BigInt(Math.round(t0[n - 1])) : null;
+  const v = t0[i] + fraction * (t0[i + 1] - t0[i]);
+  if (!Number.isFinite(v)) return null;
   return BigInt(Math.round(v));
 }
 
@@ -118,6 +148,11 @@ export function slotColToTsNs(s: TimeSlots, col: number): bigint | null {
 export function slotTsToCol(s: TimeSlots, tsNs: bigint): number | null {
   const n = s.t0.length;
   if (n < 2) return null;
+  const cols = s.cols;
+  const stride = s.stride ?? 1;
+  if (cols !== undefined) {
+    if (cols.length !== n || !(cols[n - 1] > cols[0])) return null;
+  } else if (!(stride > 0) || !Number.isFinite(stride)) return null;
   const t0 = s.t0;
   if (!(t0[n - 1] >= t0[0])) return null;
   const ts = Number(tsNs);
@@ -131,10 +166,10 @@ export function slotTsToCol(s: TimeSlots, tsNs: bigint): number | null {
     if (t0[mid] <= ts) lo = mid;
     else hi = mid - 1;
   }
-  if (lo >= n - 1) return s.startSeq + n - 1;
+  if (lo >= n - 1) return cols?.[n - 1] ?? s.startSeq + (n - 1) * stride;
   const span = t0[lo + 1] - t0[lo];
   const frac = span > 0 ? (ts - t0[lo]) / span : 0;
-  return s.startSeq + lo + frac;
+  return cols !== undefined ? cols[lo] + frac * (cols[lo + 1] - cols[lo]) : s.startSeq + (lo + frac) * stride;
 }
 
 /**
@@ -153,6 +188,8 @@ export function slotTsToCol(s: TimeSlots, tsNs: bigint): number | null {
  */
 export interface PriceMap {
   p0: number;
+  /** Venue tick, independent of grouped depth storage resolution. */
+  tick?: number;
   /** `tick · tick_multiple` — grid price increment per row (the CORE's, if hybrid). */
   step: number;
   /** Non-uniform scale, when the epoch declares one. Authoritative if set. */
@@ -179,6 +216,8 @@ export class GridMap {
   dims: SurfaceDims;
   time: TimeMap | null;
   price: PriceMap | null;
+  private screenPriceLow = 0;
+  private screenPriceSpan = 0;
 
   constructor(
     view: HeatmapView,
@@ -190,6 +229,7 @@ export class GridMap {
     this.dims = dims;
     this.time = time;
     this.price = price;
+    this.refillPriceProjection();
   }
 
   /** Point this GridMap at a new frame's view + geometry (no allocation). */
@@ -198,7 +238,20 @@ export class GridMap {
     this.dims = dims;
     this.time = time;
     this.price = price;
+    this.refillPriceProjection();
     return this;
+  }
+
+  private refillPriceProjection(): void {
+    const scale = this.price?.scale;
+    if (scale?.kind !== 'hybrid') { this.screenPriceSpan = 0; return; }
+    this.screenPriceLow = scaleRowToPrice(scale, this.view.rowOffset);
+    this.screenPriceSpan = scaleRowToPrice(scale, this.view.rowOffset + this.view.rowScale) - this.screenPriceLow;
+  }
+
+  private screenFraction(row: number): number {
+    if (!(this.screenPriceSpan > 0)) return (row - this.view.rowOffset) / this.view.rowScale;
+    return (this.rowToPrice(row) - this.screenPriceLow) / this.screenPriceSpan;
   }
 
   /** Whether `(ts_ns, price)` events can be placed (both affines known). */
@@ -241,6 +294,11 @@ export class GridMap {
     return scalePriceToRow(mapScale(p), price);
   }
 
+  /** Row for event ink, with no price-distorting half-row shift in log wings. */
+  priceEventToRow(price: number): number {
+    return this.price === null ? Number.NaN : priceToPlotRow(mapScale(this.price), price);
+  }
+
   /** Price at a (fractional) row, or NaN when the price map is unknown. */
   rowToPrice(row: number): number {
     const p = this.price;
@@ -268,7 +326,7 @@ export class GridMap {
   }
 
   clipY(rowf: number): number {
-    return ((rowf - this.view.rowOffset) / this.view.rowScale) * 2 - 1;
+    return this.screenFraction(rowf) * 2 - 1;
   }
 
   // --- grid space → CSS pixels (2D canvas, y-down) ------------------------------
@@ -278,7 +336,7 @@ export class GridMap {
   }
 
   cssY(rowf: number): number {
-    return (1 - (rowf - this.view.rowOffset) / this.view.rowScale) * this.dims.cssH;
+    return (1 - this.screenFraction(rowf)) * this.dims.cssH;
   }
 
   // --- pixel sizes → clip deltas (thickness / radius stay pixel-constant) --------

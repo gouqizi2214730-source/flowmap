@@ -14,10 +14,10 @@ Design spec §8.1–8.2. Semantics that are load-bearing for the whole product:
   When mid exits the central 70 % of the span, :meth:`Grid.maybe_reanchor`
   bumps the epoch and recenters ``p0`` (snapped to the ``tick * tick_multiple``
   grid). History in the ring is NEVER rewritten — old columns keep their epoch.
-  The in-progress accumulator is row-shifted into the new epoch's coordinates
-  (the p0 delta is always an integer number of rows because both p0 values sit
-  on the tick*multiple grid), so a column finalized after a mid-interval
-  re-anchor is exact and carries the new epoch.
+  A linear accumulator is row-shifted into the new epoch's coordinates. A
+  hybrid accumulator is conservatively redistributed by its buckets' physical
+  price overlap; unresolved coarse buckets stay unresolved. A column finalized
+  after a mid-interval re-anchor carries the new epoch.
 - **Interval boundaries:** interval ``k`` covers ``[k*dt, (k+1)*dt)``. An
   ``on_book`` at exactly a boundary finalizes the ending interval using the
   previous book integrated to the boundary; the new state applies from the
@@ -47,6 +47,7 @@ from flowmap_server.core.price_scale import (
     epoch_scale_fields,
     linear_scale,
     make_hybrid,
+    row_to_price,
     scale_of,
 )
 from flowmap_server.core.price_scale_np import rows_for_prices
@@ -55,6 +56,7 @@ from flowmap_server.proto.events import (
     SIDE_BUY,
     SIDE_SELL,
     BarColumn,
+    BookUpdate,
     DepthColumn,
     EpochParams,
 )
@@ -85,6 +87,18 @@ TICK_COARSE_RATIO = 1e-3
 # 1e-6 (half-frame $0.0010, ~10 rows per $0.00001 venue tick) and SOL $99.6 ->
 # 1e-3, while every mid keeps a strictly positive frame at 2048 rows.
 TICK_SIG_DIGITS = 5
+
+# Native ticks give BTC only ~$20 of deep-core coverage at 2048 rows.
+# Group depth into venue-tick multiples; trade/quote prices stay exact.
+DEEP_CORE_MIN_SPAN_RATIO = 0.01
+
+
+def deep_core_multiple(mid: float, tick: float, rows: int) -> int:
+    if not (math.isfinite(mid) and mid > 0 and math.isfinite(tick) and tick > 0 and rows > 0):
+        return 1
+    required = max(1, math.ceil(mid * DEEP_CORE_MIN_SPAN_RATIO / (rows * tick)))
+    decade = 10 ** int(math.floor(math.log10(required)))
+    return next(n * decade for n in (1, 2, 5, 10) if n * decade >= required)
 
 
 def adaptive_tick_for(mid: float, tick: float) -> float:
@@ -165,12 +179,12 @@ def band_frame(
         return None
     tm = max(1, math.ceil(span / (rows * tick)))
     step = tick * tm
-    p0 = round((mid - span / 2.0) / step) * step
+    p0 = max(0.0, math.floor((lo - (span - (hi - lo)) / 2.0) / step) * step)
     # Re-check against the SNAPPED frame; rounding p0 down can uncover the top.
     while p0 + rows * step < hi and tm < 1 << 30:
         tm += 1
         step = tick * tm
-        p0 = round((mid - span / 2.0) / step) * step
+        p0 = max(0.0, math.floor((lo - (span - (hi - lo)) / 2.0) / step) * step)
     return (p0, tm)
 
 
@@ -180,8 +194,8 @@ class FinalizedColumn(msgspec.Struct):
     epoch: int
     col_seq: int
     t0_ns: int
-    bid: np.ndarray  # float16, length rows
-    ask: np.ndarray  # float16, length rows
+    bid: np.ndarray  # venue units, f16 or unpacked f32, length rows
+    ask: np.ndarray  # venue units, f16 or unpacked f32, length rows
     bar: BarColumn
 
 
@@ -260,6 +274,10 @@ class Grid:
         # Ring storage: float16 [ring_columns, 2, rows] + parallel metadata.
         rc = cfg.ring_columns
         self._ring = np.zeros((rc, 2, rows), dtype=np.float16)
+        # Block-floating storage keeps the f16 RAM budget without clipping
+        # large base-unit books (SHIB/PEPE) to 65504. Wire and recordings carry
+        # reconstructed venue units, not the packed mantissas.
+        self._ring_scale = np.ones(rc, dtype=np.float64)
         self._ring_epoch = np.zeros(rc, dtype=np.uint32)
         self._ring_t0 = np.zeros(rc, dtype=np.int64)
         self._ring_seq = np.zeros(rc, dtype=np.uint32)
@@ -352,6 +370,9 @@ class Grid:
         # it would perpetuate the sub-row collapse; the caller cold-starts and
         # the backfill re-bins the candles in the adapted frame.
         newest_close = columns[-1].bar.c
+        # A hybrid tail's fine resolution is authoritative. A large price
+        # drift must roll its restored core, not recompute a coarser multiple
+        # or reject the unchanged native step used by its historical epochs.
         if (
             cfg.auto_tick
             and math.isfinite(newest_close)
@@ -386,8 +407,9 @@ class Grid:
         rc = cfg.ring_columns
         for c in columns:
             i = c.col_seq % rc
-            self._ring[i, 0] = np.asarray(c.bid, dtype=np.float16)
-            self._ring[i, 1] = np.asarray(c.ask, dtype=np.float16)
+            packed, scale = self._pack_density(np.stack((c.bid, c.ask)))
+            self._ring[i] = packed
+            self._ring_scale[i] = scale
             self._ring_epoch[i] = c.epoch
             self._ring_t0[i] = c.t0_ns
             self._ring_seq[i] = c.col_seq
@@ -407,8 +429,8 @@ class Grid:
         self._tick = newest.tick
         self._tick_multiple = newest.tick_multiple
         self._step = self._tick * self._tick_multiple
-        # The restored frame freezes the tick: a rehydrated grid must never
-        # adapt mid-session (resident columns share one row affine).
+        # The restored frame freezes the tick; each historical column keeps
+        # its own epoch map when the live core subsequently rolls.
         self._tick_anchored = True
         if self._banded:
             self._band_anchored = True
@@ -416,9 +438,9 @@ class Grid:
         # Rebuild the row<->price map from the tail's epoch, not the __init__
         # linear seed (H1): a hybrid tail restored without its scale would bin
         # every live book with the linear map from core_p0 — wing rows land on
-        # wrong prices or off-grid forever (maybe_reanchor is already pinned by
-        # _band_anchored above). scale_of returns the same hybrid/linear kind
-        # the epoch was recorded with.
+        # wrong prices or off-grid. scale_of returns the same hybrid/linear
+        # kind the epoch was recorded with; a stale hybrid core can then roll
+        # on the next real midpoint without changing old columns.
         self._scale = scale_of(ep_map[last.epoch])
         # Bar continuity across the restart.
         self._prev_close = last.bar.c
@@ -551,21 +573,31 @@ class Grid:
         mask = (r >= 0) & (r < rows)
         return np.bincount(r[mask], weights=sz64[mask], minlength=rows)
 
+    @staticmethod
+    def _pack_density(density: np.ndarray) -> tuple[np.ndarray, float]:
+        peak = float(np.max(density))
+        if not math.isfinite(peak):
+            finite = density[np.isfinite(density)]
+            peak = float(finite.max()) if finite.size else 0.0
+        scale = 2.0 ** max(0, math.ceil(math.log2(peak / 60000.0))) if peak > 60000 else 1.0
+        return (density / scale).astype(np.float16), scale
+
+    @staticmethod
+    def _unpack_density(packed: np.ndarray, scale: float) -> np.ndarray:
+        return packed.copy() if scale == 1.0 else packed.astype(np.float32) * scale
+
     def _finalize_current(self) -> FinalizedColumn:
         assert self._cur_idx is not None
         dt = self._cfg.dt_ns
         t0 = self._cur_idx * dt
-        # Division in float64, then a single cast to float16 (spec §8.1).
-        # Saturate first: a raw venue unit above float16's max finite (65 504)
-        # would cast to +inf and poison ring, wire and recording alike (the
-        # backfill path normalizes instead — see backfill PEAK_TARGET — but the
-        # live path keeps venue units, so the clamp is the only guard).
-        density64 = np.minimum(self._acc / float(dt), np.float16(65504).astype(np.float64))
-        density16 = density64.astype(np.float16)
+        # Integrate in venue units, then pack with a per-column exponent.
+        density16, scale = self._pack_density(self._acc / float(dt))
+        density = self._unpack_density(density16, scale)
         bar = self._snap_bar(t0)
 
         i = self._count % self._cfg.ring_columns
         self._ring[i] = density16
+        self._ring_scale[i] = scale
         self._ring_epoch[i] = self._epoch
         self._ring_t0[i] = t0
         self._ring_seq[i] = self._count
@@ -577,8 +609,8 @@ class Grid:
             epoch=self._epoch,
             col_seq=self._count,
             t0_ns=t0,
-            bid=density16[0],
-            ask=density16[1],
+            bid=density[0],
+            ask=density[1],
             bar=bar,
         )
         self._count += 1
@@ -593,8 +625,8 @@ class Grid:
             epoch=int(self._ring_epoch[i]),
             col_seq=int(self._ring_seq[i]),
             t0_ns=int(self._ring_t0[i]),
-            bid=self._ring[i, 0].copy(),
-            ask=self._ring[i, 1].copy(),
+            bid=self._unpack_density(self._ring[i, 0], self._ring_scale[i]),
+            ask=self._unpack_density(self._ring[i, 1], self._ring_scale[i]),
             bar=bar,
         )
 
@@ -721,6 +753,13 @@ class Grid:
             final=False,
         )
 
+    def book_update(self, ts_ns: int) -> BookUpdate:
+        """Current resting size for DOM; separate from integrated heatmap data."""
+        return BookUpdate(epoch=self._epoch, col_seq=self._count, t0_ns=ts_ns,
+                          mode=self._cfg.mode, final=False,
+                          bid=self._state[0].astype(np.float32),
+                          ask=None if self._cfg.mode == MODE_SYNTH_PROFILE else self._state[1].astype(np.float32))
+
     def bar_partial(self) -> BarColumn:
         """The current interval's bar state (not yet finalized)."""
         t0 = 0 if self._cur_idx is None else self._cur_idx * self._cfg.dt_ns
@@ -735,7 +774,10 @@ class Grid:
 
         - **Legacy (no band):** re-anchor if ``mid`` sits outside the central
           70 % of the fixed span, recentring ``p0``.
-        - **Banded:** the FIRST call with a usable mid builds the percentage
+        - **Hybrid:** the FIRST call builds the broad frame and freezes the
+          fine core's step and row count. Later calls roll the core when mid
+          exits its central 70 %, preserving each historical epoch's map.
+        - **Linear banded:** the FIRST call with a usable mid builds the percentage
           frame and FREEZES ``tick_multiple`` for the session; afterwards a
           re-anchor fires on a RATIO trip (``mid`` outside
           ``[anchor/BAND_TRIP_RATIO, anchor*BAND_TRIP_RATIO]``) and moves
@@ -751,65 +793,77 @@ class Grid:
         affine), and a preloaded frame sets ``_tick_anchored`` in
         :meth:`preload`, so a rehydrated grid never adapts.
 
-        Freezing the multiple is load-bearing, not tidiness. In band mode the
-        multiple is proportional to mid, so recomputing it on every re-anchor
-        would CHANGE ``step`` mid-session — and the fragment shader applies ONE
-        row affine to every resident column (gl/shaders/heatmap.ts), so all the
-        already-uploaded history would be redrawn at the wrong prices. With the
-        multiple frozen, a re-anchor is a pure integer row translation on the
-        same step grid, exactly the legacy ``_shift_rows`` path.
-
-        History in the ring is NEVER rewritten; the in-progress accumulator is
-        shifted into the new row coordinates so the current column stays exact.
+        Freezing the multiple keeps native resolution stable throughout the
+        session. History in the ring is NEVER rewritten. Linear accumulators
+        shift by whole rows; hybrid accumulators redistribute by physical-price
+        overlap rather than treating a moving log wing as a row translation.
         A non-finite / non-positive ``mid`` is ignored rather than raised — this
         is called straight off feed data with no ``try`` around it.
         """
         cfg = self._cfg
-        if not math.isfinite(mid):
+        if not math.isfinite(mid) or mid <= 0:
             return None
+
+        # Resolve the fallback BEFORE any band branch uses the step. Deep,
+        # wide and full views used to bypass this and keep the sim's $0.50.
+        tick_changed = False
+        if cfg.auto_tick and not self._tick_anchored:
+            self._tick_anchored = True
+            new_tick = adaptive_tick_for(mid, self._tick)
+            if new_tick != self._tick and not self._frozen_nonzero:
+                self._tick = new_tick
+                self._tick_multiple = 1
+                self._step = new_tick
+                self._acc[:] = 0
+                tick_changed = True
 
         if self._banded and cfg.band_hybrid:
             assert cfg.band_up is not None and cfg.band_down is not None
-            if self._band_anchored:
-                # The hybrid frame is FROZEN for the session. Re-anchoring it
-                # would change the row<->price map wholesale (not the integer
-                # translation a linear re-anchor is), and the fragment shader
-                # applies ONE row map to every resident column — so every
-                # already-uploaded column would be redrawn at the wrong prices.
-                # The core is wide enough that ordinary intraday movement stays
-                # inside it; a sustained move walks the book into the wings,
-                # which is stated plainly in the drawer copy.
-                return None
-            core_rows = cfg.core_rows if cfg.core_rows > 0 else cfg.rows // 2
+            rolling = self._band_anchored and self._scale.kind == SCALE_HYBRID
+            if rolling:
+                span = self._scale.core_rows * self._scale.core_step
+                if self._scale.core_p0 + 0.15 * span <= mid <= self._scale.core_p0 + 0.85 * span:
+                    return None
+                core_rows = self._scale.core_rows
+                core_step = self._scale.core_step
+            else:
+                core_rows = cfg.core_rows if cfg.core_rows > 0 else cfg.rows // 2
+                self._tick_multiple = max(self._tick_multiple, deep_core_multiple(mid, self._tick, core_rows))
+                self._step = self._tick * self._tick_multiple
+                # A native tick can cover more than the entire price of a cheap
+                # coin. Choose the core row count once, then preserve it on rolls.
+                core_rows = min(core_rows, max(2, int(mid * 0.2 / self._step)))
+                core_step = self._step
             scale = make_hybrid(
                 mid=mid,
                 rows=cfg.rows,
                 core_rows=core_rows,
-                core_step=cfg.tick * cfg.tick_multiple,
+                core_step=core_step,
                 up_mult=1.0 + cfg.band_up,
                 dn_floor=max(1e-6, 1.0 - cfg.band_down),
             )
-            if scale is None:
-                return None  # degenerate request: stay on the linear grid
-            self._scale = scale
-            self._band_anchored = True
-            self._anchor_mid = mid
-            # The core's step becomes the grid's nominal step; p0 is the core's
-            # base so the legacy scalars still describe the tradeable band.
-            self._p0 = scale.core_p0
-            self._step = scale.core_step
-            return self._commit_anchor(scale.core_p0, rebuild_state=True)
+            if scale is not None:
+                self._band_anchored = True
+                self._anchor_mid = mid
+                self._step = scale.core_step
+                return self._commit_anchor(scale.core_p0, rebuild_state=True, new_scale=scale)
+            if rolling:
+                # An extreme fall may no longer fit the frozen core above zero.
+                # Preserve the last valid hybrid rather than changing resolution.
+                return None
+            # Near the minimum venue price a positive hybrid core may not fit;
+            # still anchor a valid positive linear band below.
 
         if self._banded:
             assert cfg.band_up is not None and cfg.band_down is not None
             if not self._band_anchored:
-                frame = band_frame(mid, cfg.band_up, cfg.band_down, cfg.tick, cfg.rows)
+                frame = band_frame(mid, cfg.band_up, cfg.band_down, self._tick, cfg.rows)
                 if frame is None:
                     return None
                 new_p0, tm = frame
                 # First real anchor: adopt the multiple and freeze it.
                 self._tick_multiple = tm
-                self._step = cfg.tick * tm
+                self._step = self._tick * tm
                 self._band_anchored = True
                 self._anchor_mid = mid
                 return self._commit_anchor(new_p0, rebuild_state=True)
@@ -823,50 +877,38 @@ class Grid:
                 return None
             # p0 ONLY — the multiple is frozen, so this is an exact row shift.
             span = cfg.rows * self._step
-            new_p0 = round((mid - span / 2.0) / self._step) * self._step
+            new_p0 = max(0.0, round((mid - span / 2.0) / self._step) * self._step)
             self._anchor_mid = mid
             return self._commit_anchor(new_p0, rebuild_state=True)
 
         # --- legacy fixed-span rule --------------------------------------
-        if cfg.auto_tick and not self._tick_anchored:
-            self._tick_anchored = True
-            new_tick = adaptive_tick_for(mid, self._tick)
-            if new_tick != self._tick and not self._frozen_nonzero:
-                # First real mid on a fallback tick too coarse for this
-                # instrument (DOGE at $0.50/row collapses into <1 row and puts
-                # negative prices in the frame). Install the price-proportional
-                # tick and centre the frame in one commit. Only ever safe
-                # before any density was finalized (pre-book trade intervals
-                # may have emitted all-zero columns; they stay zero under the
-                # new affine), and epoch 0 announced no painted column.
-                self._tick = new_tick
-                self._tick_multiple = 1
-                self._step = new_tick
-                span = cfg.rows * self._step
-                new_p0 = round((mid - span / 2.0) / self._step) * self._step
-                self._anchor_mid = mid
-                return self._commit_anchor(new_p0, rebuild_state=True)
         span = cfg.rows * self._step
+        if tick_changed:
+            new_p0 = max(0.0, round((mid - span / 2.0) / self._step) * self._step)
+            self._anchor_mid = mid
+            return self._commit_anchor(new_p0, rebuild_state=True)
         lo = self._p0 + 0.15 * span
         hi = self._p0 + 0.85 * span
         if lo <= mid <= hi:
             return None
-        new_p0 = round((mid - span / 2.0) / self._step) * self._step
+        new_p0 = max(0.0, round((mid - span / 2.0) / self._step) * self._step)
         return self._commit_anchor(new_p0, rebuild_state=True)
 
-    def _commit_anchor(self, new_p0: float, *, rebuild_state: bool) -> EpochParams:
+    def _commit_anchor(
+        self, new_p0: float, *, rebuild_state: bool, new_scale: PriceScale | None = None
+    ) -> EpochParams:
         """Move the frame to ``new_p0``, bump the epoch, publish the params.
 
-        The in-progress accumulator is row-shifted by the p0 delta when that
-        delta is an exact whole number of rows (always true when the step is
-        unchanged); when the step itself just changed — only possible on the
-        FIRST band anchor or the FIRST real mid of an auto_tick grid, before
-        any column of this session has been finalized — the accumulator is
-        zeroed instead, because there is no integer row mapping between the
-        two grids.
+        Hybrid maps must be remapped by actual r±.5 price intervals. The
+        linear path keeps its exact integer shift when the step is unchanged.
         """
         cfg = self._cfg
-        if self._step == self._tick * self._tick_multiple and self._p0 != new_p0:
+        target = new_scale or linear_scale(new_p0, self._step, cfg.rows)
+        if self._scale.kind == SCALE_HYBRID or target.kind == SCALE_HYBRID:
+            self._reproject_rows(self._acc, self._scale, target)
+        elif self._scale.step != target.step:
+            self._acc[:] = 0.0
+        elif self._p0 != new_p0:
             delta = (new_p0 - self._p0) / self._step
             offset = round(delta)
             if abs(delta - offset) < 1e-9:
@@ -874,15 +916,12 @@ class Grid:
             else:
                 self._acc[:] = 0.0
         self._p0 = new_p0
+        self._scale = target
         self._epoch += 1
         if rebuild_state and self._last_book is not None:
             bid_px, bid_sz, ask_px, ask_sz = self._last_book
             self._state[0] = self._map_levels(bid_px, bid_sz)
             self._state[1] = self._map_levels(ask_px, ask_sz)
-        # Keep the linear scale in lockstep with p0/step; a hybrid scale was
-        # already installed by its own branch and must not be overwritten here.
-        if self._scale.kind != SCALE_HYBRID:
-            self._scale = linear_scale(new_p0, self._step, cfg.rows)
         params = EpochParams(
             epoch=self._epoch,
             tick=self._tick,
@@ -894,6 +933,38 @@ class Grid:
         )
         self._epoch_params[self._epoch] = params
         return params
+
+    def _reproject_rows(self, a: np.ndarray, source: PriceScale, target: PriceScale) -> None:
+        """Move bucket mass by physical overlap, preserving unresolved density.
+
+        Nearest-row binning owns [r-.5,r+.5]. The union of source and target
+        price edges splits their shared coverage into intervals owned by one
+        source and one target row each. Local scatter avoids subtracting large
+        cumulative totals, which could erase a small level beside a huge one.
+        Only mass outside target coverage is discarded; finalized ring rows
+        and the accumulated time/bar state are untouched.
+        """
+        if not np.any(a):
+            return
+        rows = self._cfg.rows
+        source_edges = np.fromiter((row_to_price(source, r - 0.5) for r in range(rows + 1)),
+                                   dtype=np.float64, count=rows + 1)
+        target_edges = np.fromiter((row_to_price(target, r - 0.5) for r in range(rows + 1)),
+                                   dtype=np.float64, count=rows + 1)
+        lo = max(source_edges[0], target_edges[0])
+        hi = min(source_edges[-1], target_edges[-1])
+        if hi <= lo:
+            a[:] = 0.0
+            return
+        edges = np.unique(np.concatenate(([lo, hi],
+            source_edges[(source_edges > lo) & (source_edges < hi)],
+            target_edges[(target_edges > lo) & (target_edges < hi)])))
+        source_rows = np.searchsorted(source_edges, edges[:-1], side="right") - 1
+        target_rows = np.searchsorted(target_edges, edges[:-1], side="right") - 1
+        share = np.diff(edges) / np.diff(source_edges)[source_rows]
+        for channel in range(a.shape[0]):
+            a[channel] = np.bincount(target_rows, weights=a[channel, source_rows] * share,
+                                     minlength=rows)
 
     def epoch_params_for(self, epoch: int) -> EpochParams:
         """Params of any epoch this grid has lived through.
@@ -957,3 +1028,23 @@ class Grid:
         keep = self._ring_t0[idxs] < before_t_ns
         chosen = idxs[keep][-n:]
         return [self._column_from_ring(int(i)) for i in chosen]
+
+    def retained_sequence_range(self) -> tuple[int, int] | None:
+        """Scalar cache bounds; overview requests need no full-ring copy."""
+        retained = min(self._count - self._oldest_seq, self._cfg.ring_columns)
+        return None if retained <= 0 else (self._count - retained, self._count - 1)
+
+    def history_sequence_batch(self, start: int, end: int, limit: int = 64) -> list[FinalizedColumn]:
+        """Copy a small explicit sequence interval on the feed's event loop.
+
+        Executor readers never race the mutable ring. Session yields between
+        these byte-bounded snapshots, aggregates them off-loop, and discards
+        each source batch after its quantities have joined the output bins.
+        """
+        retained = self.retained_sequence_range()
+        if retained is None or limit <= 0:
+            return []
+        low = max(start, retained[0])
+        high = min(end, retained[1], low + min(limit, 64) - 1)
+        return [self._column_from_ring(seq % self._cfg.ring_columns)
+                for seq in range(low, high + 1)]

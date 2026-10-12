@@ -18,7 +18,7 @@
  *     the 4×4 SUM mip would paint 4-column blocks; the row-only chain groups
  *     price alone and keeps the time axis crisp.
  *
- * All are `RG16F` and color-renderable (needs `EXT_color_buffer_float`, a hard
+ * All are `RG32F` and color-renderable (needs `EXT_color_buffer_float`, a hard
  * §8.3 requirement) so the downsample runs on the GPU: an FBO ping-pong where a
  * fragment shader reads the finer level via `texelFetch` and writes the 4×4 sum
  * into the coarser level's FBO-attached layer. The per-texel coordinate mapping
@@ -45,96 +45,11 @@
  * below it, and the crosshair readout comes from the CPU cache, not these texels.
  */
 
-import { checkGLError, type GLContext } from './context';
+import { checkGLError, checkGLHotPath, type GLContext } from './context';
 import type { TileRing } from './tileRing';
 
-const DOWNSAMPLE_VERT = /* glsl */ `#version 300 es
-precision highp float;
-layout(location = 0) in vec2 a_pos;
-void main() { gl_Position = vec4(a_pos, 0.0, 1.0); }
-`;
-
-// 4×4 SUM downsample. Output coords come from gl_FragCoord (the viewport is
-// offset to the destination column(s), so int(gl_FragCoord.x) IS the first
-// destination column of the pass). Each output texel sums the 4×4 block of the
-// finer level rooted at (4·ox, 4·oy).
-//
-// validFrom gating: after any col_seq gap (reconnect resume, go-live after deep
-// scroll-back) the ring slots between the old resident window and the new first
-// column still hold PREVIOUS columns. Level 0 masks those stale texels with
-// u_validFrom (see shaders/heatmap.ts); the mips must apply the SAME gate while
-// summing, or a pre-gap column bakes into the mip forever and a zoomed-out view
-// shows a permanently over-bright block. The group a destination column ox
-// covers ends at ABSOLUTE `u_groupNewest - (u_xEnd - ox)·4`: a single-group pass
-// sets u_xEnd to its own destination column so this reduces to u_groupNewest
-// exactly (the historical behavior), while a batched RANGE pass covers many
-// groups in one draw with u_xEnd at the range's last destination column.
-export const DOWNSAMPLE_FRAG = /* glsl */ `#version 300 es
-precision highp float;
-precision highp int;
-precision highp sampler2DArray;
-
-uniform highp sampler2DArray u_src;
-uniform int u_srcLayer;
-// First VALID absolute col_seq (TileRing.validFromSeq) and the newest absolute
-// col_seq of the last 4-column group this pass sums (see u_xEnd).
-uniform int u_validFrom;
-uniform int u_groupNewest;
-// Tile-local destination column of the pass's LAST group (itself for a 1-wide
-// pass) — reconstructs each fragment's group end from u_groupNewest.
-uniform int u_xEnd;
-// Row-only mode (campaign visual 2026-09-11, R2-M1): each destination texel
-// sums the 4 ROWS of the SINGLE source column at the same x — no column summing,
-// so a collapsing price axis no longer drags the 4-column block average into a
-// deeply time-zoomed view. Groups are one column wide here.
-uniform int u_rowOnly;
-
-out vec4 outColor;
-
-void main() {
-  int ox = int(gl_FragCoord.x);
-  int oy = int(gl_FragCoord.y);
-  int by = oy * 4;
-  vec2 s = vec2(0.0);
-  if (u_rowOnly == 1) {
-    // The single source column's absolute col_seq (groups are 1 wide).
-    int col = u_groupNewest - (u_xEnd - ox);
-    if (col >= u_validFrom) {
-      for (int j = 0; j < 4; j++) {
-        s += texelFetch(u_src, ivec3(ox, by + j, u_srcLayer), 0).rg;
-      }
-    }
-  } else {
-    int bx = ox * 4;
-    int gn = u_groupNewest - (u_xEnd - ox) * 4;
-    for (int j = 0; j < 4; j++) {
-      for (int i = 0; i < 4; i++) {
-        // Mask the source column against the valid window BEFORE summing (the
-        // level-0 rule, applied at the source): stale pre-gap texels contribute 0.
-        if (gn - 3 + i >= u_validFrom) {
-          s += texelFetch(u_src, ivec3(bx + i, by + j, u_srcLayer), 0).rg;
-        }
-      }
-    }
-  }
-  // Saturate (not wrap): keep an extreme wall inside the f16 range across levels.
-  s = min(s, vec2(60000.0));
-  outColor = vec4(s, 0.0, 0.0);
-}
-`;
-
-function compile(gl: WebGL2RenderingContext, type: number, src: string): WebGLShader {
-  const sh = gl.createShader(type);
-  if (!sh) throw new Error('flowmap/mips: createShader returned null');
-  gl.shaderSource(sh, src);
-  gl.compileShader(sh);
-  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
-    const log = gl.getShaderInfoLog(sh);
-    gl.deleteShader(sh);
-    throw new Error(`flowmap/mips: shader compile failed: ${log}`);
-  }
-  return sh;
-}
+import { downsampleProgram } from './heatmapProgram';
+export { DOWNSAMPLE_FRAG } from './shaders/downsample';
 
 function allocLevel(
   gl: WebGL2RenderingContext,
@@ -145,7 +60,7 @@ function allocLevel(
   const tex = gl.createTexture();
   if (!tex) throw new Error('flowmap/mips: createTexture returned null');
   gl.bindTexture(gl.TEXTURE_2D_ARRAY, tex);
-  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG16F, cols, rows, layers);
+  gl.texStorage3D(gl.TEXTURE_2D_ARRAY, 1, gl.RG32F, cols, rows, layers);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
   gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -196,6 +111,9 @@ export class MipChain {
    * the renderer's level selection both consult this).
    */
   private usableFlag = true;
+  // Immutable texture storage: completeness is stable for each texture/layer.
+  // Rechecking every partial column serializes the GPU and UI threads.
+  private readonly checkedTargets = new Map<WebGLTexture, Set<number>>();
 
   /** Whether the FBO passes are (still) known-complete — see {@link usableFlag}. */
   get usable(): boolean {
@@ -234,20 +152,7 @@ export class MipChain {
     this.texRow1 = allocLevel(gl, colsPerTile, rows / 4, layers);
 
     // Downsample program + a clip-space quad (viewport clips to one column).
-    const vs = compile(gl, gl.VERTEX_SHADER, DOWNSAMPLE_VERT);
-    const fs = compile(gl, gl.FRAGMENT_SHADER, DOWNSAMPLE_FRAG);
-    const prog = gl.createProgram();
-    if (!prog) throw new Error('flowmap/mips: createProgram returned null');
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      const log = gl.getProgramInfoLog(prog);
-      gl.deleteProgram(prog);
-      throw new Error(`flowmap/mips: downsample link failed: ${log}`);
-    }
+    const prog = downsampleProgram(gl);
     this.prog = prog;
     this.uSrc = gl.getUniformLocation(prog, 'u_src');
     this.uSrcLayer = gl.getUniformLocation(prog, 'u_srcLayer');
@@ -342,7 +247,7 @@ export class MipChain {
 
     // Restore the default framebuffer so the display draw targets the screen.
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
-    checkGLError(this.gl, 'MipChain.updateFrom');
+    checkGLError(this.gl, 'MipChain.updateFrom', true);
   }
 
   /**
@@ -418,7 +323,7 @@ export class MipChain {
       // No complete 4-group in range: the SUM levels keep their previous bakes,
       // but the row-only chain above still ran (and the FBO is restored).
       this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
-      checkGLError(this.gl, 'MipChain.updateRange');
+      checkGLError(this.gl, 'MipChain.updateRange', true);
       return;
     }
 
@@ -483,7 +388,7 @@ export class MipChain {
 
     // Restore the default framebuffer so the display draw targets the screen.
     this.gl.bindFramebuffer(this.gl.FRAMEBUFFER, null);
-    checkGLError(this.gl, 'MipChain.updateRange');
+    checkGLError(this.gl, 'MipChain.updateRange', true);
   }
 
   private pass(
@@ -511,10 +416,19 @@ export class MipChain {
     // would leave the pass drawing into nothing / garbage. Disable the chain —
     // the heatmap falls back to the exact level-0 path — instead of baking
     // broken mips that a zoomed-out view would sample forever.
-    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
-      this.usableFlag = false;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      return;
+    // Storage allocation/errors and EXT_color_buffer_float are checked at
+    // creation. These immutable, in-range RG16F attachments are complete by
+    // construction. Only diagnostics query the driver after uploads/draws:
+    // even the FIRST query can block on lazy texture clearing/shader work.
+    let checked = this.checkedTargets.get(dstTex);
+    if (checkGLHotPath && !checked?.has(layer)) {
+      if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) {
+        this.usableFlag = false;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        return;
+      }
+      if (!checked) this.checkedTargets.set(dstTex, checked = new Set());
+      checked.add(layer);
     }
 
     gl.disable(gl.BLEND);
@@ -542,7 +456,6 @@ export class MipChain {
     gl.deleteFramebuffer(this.fbo);
     gl.deleteBuffer(this.quad);
     gl.deleteVertexArray(this.vao);
-    gl.deleteProgram(this.prog);
     gl.deleteTexture(this.tex1);
     gl.deleteTexture(this.texRow1);
     if (this.tex2 !== null) gl.deleteTexture(this.tex2);

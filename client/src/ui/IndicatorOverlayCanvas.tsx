@@ -117,6 +117,7 @@ export function IndicatorOverlayCanvas({
 
     const instances = new Map<string, InstanceState>();
     let lastSig = '';
+    let emptyCleared = false;
     let lastActiveSig = '';
     let snapVersion = -1;
     let cachedSnap: CandleSnapshot | null = null;
@@ -498,10 +499,24 @@ export function IndicatorOverlayCanvas({
     // --- the signature-gated loop (CvdPane pattern) -------------------------------
 
     const draw = (): void => {
+      const store = useIndicatorStore.getState();
+      if (store.active.length === 0) {
+        if (!emptyCleared) {
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          syncInstances([]);
+          lastActiveSig = '';
+          lastSig = '';
+          cachedSnap = null;
+          snapVersion = -1;
+          emptyCleared = true;
+        }
+        scheduleNext(false);
+        return;
+      }
+      emptyCleared = false;
       const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
       const cssW = canvas.clientWidth;
       const cssH = canvas.clientHeight;
-      const store = useIndicatorStore.getState();
       const activeSig = store.active
         .map((a) => `${a.uid}:${a.defId}:${JSON.stringify(a.params)}:${JSON.stringify(a.colors)}`)
         .join(',');

@@ -12,7 +12,7 @@
  * Uses the REAL GridMap/axes math with stub 2D/GL sinks (no canvas).
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { Bbo } from './bbo';
 import { Bubbles } from './bubbles';
@@ -24,6 +24,7 @@ import { Vwap } from './vwap';
 import type { OverlayFrame } from './frame';
 import type { TextLayer, Pt } from '../textLayer';
 import type { BarColumn, Marker, Trade } from '../../proto/types';
+import { makeHybrid, priceToRow } from '../priceScale';
 
 const VIEW = { colOffset: 0, colScale: 10, rowOffset: 0, rowScale: 100 };
 const DIMS = { drawW: 800, drawH: 400, cssW: 800, cssH: 400 };
@@ -76,6 +77,34 @@ describe('half-cell convention — price line (S2 D3)', () => {
 });
 
 describe('half-cell convention — VWAP / BBO / pill (S2 D3)', () => {
+  it.each([
+    { p0: 100, step: .5, tick: .01, price: 100.39, expected: '100.39' },
+    { p0: 0, step: 1e-7, tick: 1e-9, price: 1.01e-7, expected: '0.000000101' },
+    { p0: 100, step: .25, tick: .25, price: 100.25, expected: '100.25' },
+  ])('keeps native quote precision in BBO and last-price labels ($expected)', ({ p0, step, tick, price, expected }) => {
+    const g = new GridMap({ ...VIEW, rowScale: 4 }, DIMS, TIME, { p0, step, tick });
+    const badge = vi.fn();
+    const solid = { begin: () => {}, addThickLine: () => {}, flush: () => {} };
+    const bbo = new Bbo();
+    bbo.set({ bidPx: price, bidSz: 1, askPx: price, askSz: 2, source: 'bbo' });
+    bbo.draw({ gm: g, solid, text: { badge } } as unknown as OverlayFrame);
+    expect(badge.mock.calls[0][2]).toBe(`A ${expected} ×2.00`);
+    const pill = vi.fn();
+    drawPriceAxis({ width: 120, height: DIMS.cssH, clear: () => {}, line: () => {}, text: () => {}, badge: pill } as unknown as TextLayer,
+      g, { col: 5, price });
+    expect(pill.mock.calls[0][2]).toBe(expected);
+  });
+
+  it('a hundreds-of-dollars wing bucket does not round the last trade to an integer', () => {
+    const scale = makeHybrid({ mid: 82414.24, rows: 4096, coreRows: 2048, coreStep: .01, upMult: 11, dnFloor: .01 })!;
+    const bottom = priceToRow(scale, 81750), top = priceToRow(scale, 81950);
+    const g = new GridMap({ ...VIEW, rowOffset: bottom, rowScale: top - bottom }, DIMS, TIME,
+      { p0: scale.coreP0, step: scale.coreStep, tick: .01, scale });
+    const pill = vi.fn();
+    drawPriceAxis({ width: 120, height: DIMS.cssH, clear: () => {}, line: () => {}, text: () => {}, badge: pill } as unknown as TextLayer,
+      g, { col: 5, price: 81812.35 });
+    expect(pill.mock.calls[0][2]).toBe('81812.35');
+  });
   it('places the VWAP polyline on the row-cell centre', () => {
     const g = gm();
     const v = new Vwap();
@@ -189,6 +218,20 @@ describe('piecewise time map consumers (CP2, S2 D1)', () => {
     expect(xs).toHaveLength(2);
     expect(xs[0]).toBeCloseTo(g.clipX(2.5));
     expect(xs[1]).toBeCloseTo(g.clipX(1.0));
+  });
+
+  it('seeks a deep historical window without scanning newer retained prints', () => {
+    const g = new GridMap({ ...VIEW, colOffset: 100, colScale: 4 }, DIMS,
+      { anchorSeq: 0, anchorT0Ns: 0n, dtNs: 1_000_000_000 }, PRICE);
+    const b = new Bubbles();
+    for (let i = 0; i < 120010; i++) b.add(trade(BigInt(i) * 1_000_000_000n, 5));
+    b.add(trade(120009_000_000_000n, 5)); // legitimate repeated timestamp
+    expect(b.length).toBe(120000);
+    const seek = vi.spyOn(g, 'tsToCol');
+    const points = { begin: () => {}, add: vi.fn(), flush: () => {} };
+    b.draw({ gm: g, points, resident: null } as unknown as OverlayFrame);
+    expect(seek.mock.calls.length).toBeLessThan(40);
+    expect(points.add).toHaveBeenCalled();
   });
 
   it('markers land on their candle column', () => {

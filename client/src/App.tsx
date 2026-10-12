@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
-import { floorForTolerance, gammaForContrast } from './gl/heatmap';
+import { gammaForContrast } from './gl/heatmap';
 import { Renderer } from './gl/renderer';
 import type { PriceFollow } from './gl/camera';
 import { applyChartInk, applyOverlayPalette } from './gl/overlays/palette';
@@ -32,6 +32,15 @@ import { isHelpToggle } from './ui/keysheet';
 import { LiveControls } from './ui/LiveControls';
 import { HeatLegend } from './ui/HeatLegend';
 import { MeasureTool, rendererChartMap } from './ui/MeasureTool';
+import { MarketStrip } from './ui/MarketStrip';
+import { DeskToolbar } from './ui/DeskToolbar';
+import { OrderFlowPanel } from './ui/OrderFlowPanel';
+import { PaneResizer } from './ui/PaneResizer';
+import { loadDeskPreferences, saveDeskPreferences, type DeskLayout } from './ui/deskPreferences';
+import { useT } from './i18n/useT';
+import './ui/Desk.css';
+import { ChartStartupGate } from './ui/ChartStartupGate';
+import { loadStartupSymbol, saveStartupSymbol } from './ui/startupSymbol';
 import { OnboardingCard } from './ui/OnboardingCard';
 import { PerfHud } from './ui/PerfHud';
 import { PriceAlerts } from './ui/PriceAlerts';
@@ -166,6 +175,13 @@ function installControlSpy(): void {
 }
 
 export function App() {
+  // Offline DEV harnesses deliberately have no market session or presented
+  // frame; their injected data and pointer interactions must remain reachable.
+  const offlineHarness = import.meta.env.DEV && (() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('test') === 'heatmap' ||
+      ['panels', 'perf', 'normalize', 'overlays'].some(mode => params.get(mode) === '1');
+  })();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const priceAxisRef = useRef<HTMLCanvasElement>(null);
   const timeAxisRef = useRef<HTMLCanvasElement>(null);
@@ -182,6 +198,9 @@ export function App() {
     loadSettings(typeof window !== 'undefined' ? window.localStorage : null),
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [desk, setDesk] = useState(() => loadDeskPreferences(window.localStorage));
+  const t = useT();
+  useEffect(() => saveDeskPreferences(window.localStorage, desk), [desk]);
   const intelDrawerOpen = useIntelligenceStore((s) => s.drawerOpen);
   const setIntelDrawerOpen = useIntelligenceStore((s) => s.setDrawerOpen);
   const toggleIntelDrawer = useIntelligenceStore((s) => s.toggleDrawer);
@@ -252,6 +271,7 @@ export function App() {
     }
 
     const params = new URLSearchParams(window.location.search);
+    const startup = loadStartupSymbol(window.localStorage);
     const perfMode = params.get('perf') === '1';
     const normalizeMode = params.get('normalize') === '1';
     const overlaysMode = params.get('overlays') === '1';
@@ -280,7 +300,7 @@ export function App() {
       if (!perfMode && !normalizeMode && !overlaysMode && !panelsMode) {
         useFlowMapStore
           .getState()
-          .connectAndSubscribe(SIM_MARKET, SIM_SYMBOL, 'live', settingsRef.current.priceBand);
+          .connectAndSubscribe(startup.market, startup.symbol, 'live', settingsRef.current.priceBand);
       }
       return () => {
         useFlowMapStore.getState().disconnect();
@@ -298,7 +318,7 @@ export function App() {
     renderer.setOverlayVisibility(settingsRef.current.overlays);
     renderer.setBubbleMinSize(settingsRef.current.bubbleMinSize);
     renderer.setContrast(gammaForContrast(settingsRef.current.contrast));
-    renderer.setTolerance(floorForTolerance(settingsRef.current.tolerance));
+    renderer.setTolerance(settingsRef.current.tolerance);
     renderer.setColormap(settingsRef.current.colormap);
     // F6 boot: seed the chart ramp from the RESOLVED theme (getTheme(), not the
     // hook value — the mount effect is [] deps and must not trust a closure).
@@ -324,7 +344,7 @@ export function App() {
     if (!perfMode && !normalizeMode && !overlaysMode && !panelsMode) {
       useFlowMapStore
         .getState()
-        .connectAndSubscribe(SIM_MARKET, SIM_SYMBOL, 'live', settingsRef.current.priceBand);
+        .connectAndSubscribe(startup.market, startup.symbol, 'live', settingsRef.current.priceBand);
     }
 
     if (
@@ -361,7 +381,7 @@ export function App() {
       r.setOverlayVisibility(settings.overlays); // idempotent
       r.setBubbleMinSize(settings.bubbleMinSize); // idempotent
       r.setContrast(gammaForContrast(settings.contrast)); // idempotent
-      r.setTolerance(floorForTolerance(settings.tolerance)); // idempotent
+      r.setTolerance(settings.tolerance); // calibrated against visible liquidity
       r.setColormap(settings.colormap); // idempotent
       // F6: same (theme, colormap) source of truth as the boot path; the ref
       // inside makes this a no-op unless the pair actually changed.
@@ -378,23 +398,6 @@ export function App() {
         // the price zoom the user has chosen.
         r.setFollowTime(settings.follow);
       }
-      // The band is a SERVER grid property, so changing it must re-subscribe.
-      // Edge-triggered. The re-subscribe changes `sessionResetKey` (band is part
-      // of it), and the effect below tears the ring down and refetches — which is
-      // the point: `deep` is a 4096-row grid where the default is 2048, so a ring
-      // kept from the old band would be the wrong height for every column that
-      // follows.
-      if (settings.priceBand !== prevSettingsRef.current.priceBand) {
-        const sub = useFlowMapStore.getState().subscription;
-        // QA7 H2 (explicit-only identity): a band change re-grids the ACTIVE
-        // stream. With none there is nothing to re-grid — substituting the demo
-        // default here would be a silent session-identity change.
-        if (sub) {
-          useFlowMapStore
-            .getState()
-            .connectAndSubscribe(sub.market, sub.symbol, sub.mode, settings.priceBand);
-        }
-      }
       if (settings.followPrice !== prevSettingsRef.current.followPrice) {
         const wantOn = settings.followPrice;
         // 'track' keeps the user's zoom (recentre-on-drift); never 'fit', which
@@ -408,6 +411,14 @@ export function App() {
       if (settings.historyDepth !== prevSettingsRef.current.historyDepth && settings.historyDepth !== 'off') {
         const tl = r.timeline();
         if (tl?.timeBase) r.prefetchHistory(historyDepthCols(settings.historyDepth, tl.timeBase.dtNs));
+      }
+    }
+    // Price coverage belongs to the subscription, including the DOM-only GL
+    // fallback. With no active subscription there is no instrument to re-grid.
+    if (settings.priceBand !== prevSettingsRef.current.priceBand) {
+      const sub = useFlowMapStore.getState().subscription;
+      if (sub) {
+        useFlowMapStore.getState().connectAndSubscribe(sub.market, sub.symbol, sub.mode, settings.priceBand);
       }
     }
     prevSettingsRef.current = settings;
@@ -636,6 +647,7 @@ export function App() {
 
   // --- symbol / mode actions ---------------------------------------------------
   const onSelectSymbol = useCallback((market: string, symbol: string) => {
+    saveStartupSymbol(window.localStorage, market, symbol);
     const mode = useFlowMapStore.getState().subscription?.mode ?? 'live';
     // The band MUST ride along: without it a symbol switch silently reverts the
     // server grid to `native` while the drawer keeps showing the chosen preset.
@@ -740,7 +752,10 @@ export function App() {
   }, [onSetPriceFollow]);
 
   const toggleRail = useCallback(
-    () => setSettings((prev) => ({ ...prev, railVisible: !prev.railVisible })),
+    () => {
+      setSettings((prev) => ({ ...prev, railVisible: !prev.railVisible }));
+      setDesk(prev => prev.layout === 'focus' ? { ...prev, layout: 'orderflow' } : prev);
+    },
     [],
   );
 
@@ -795,9 +810,18 @@ export function App() {
   // toolbar label). The store's subscription is the source of truth.
   const activeSymbol = subscription?.symbol ?? SIM_SYMBOL;
   const activeMarket = subscription?.market ?? SIM_MARKET;
+  const selectDesk = (layout: DeskLayout): void => {
+    setDesk(prev => ({ ...prev, layout, domRatio: layout === 'analysis' ? .4 : .55,
+      cvdHeight: layout === 'analysis' ? 160 : 104 }));
+    setSettings(prev => ({ ...prev, railVisible: layout !== 'focus', overlays: {
+      ...prev.overlays, cvd: layout !== 'focus', profile: layout === 'analysis',
+    } }));
+  };
+  const deskStyle = { '--desk-rail-width': `${desk.railWidth}px`, '--desk-dom-ratio': desk.domRatio,
+    '--desk-cvd-height': `${desk.cvdHeight}px` } as CSSProperties;
 
   return (
-    <div className="app">
+    <div className="app" data-desk-root data-desk-layout={desk.layout} style={deskStyle}>
       <TopBar
         ref={searchRef}
         onSelectSymbol={onSelectSymbol}
@@ -811,6 +835,13 @@ export function App() {
         onDismissExportNotice={dismissExportNotice}
         streamClock={streamClock}
       />
+      <MarketStrip rendererRef={rendererRef} />
+      <DeskToolbar rendererRef={rendererRef} settings={settings} layout={desk.layout} onLayout={selectDesk}
+        onChange={applyPatch} onTrack={onTrackPrice} onFit={() => {
+          rendererRef.current?.setTimeWindowMs(null);
+          rendererRef.current?.setPriceFollow('fit');
+          setSettings(prev => ({ ...prev, followPrice: true }));
+        }} />
 
       <div className="workspace">
         <div className={`stage${settings.overlays.cvd ? ' stage--cvd' : ''}`}>
@@ -865,12 +896,18 @@ export function App() {
             <>
               <CvdPane rendererRef={rendererRef} />
               <div className="cvd-corner" aria-hidden="true" />
+              <PaneResizer axis="y" variable="--desk-cvd-height" value={desk.cvdHeight} min={60} max={220}
+                label={t('desk.resizeCvd')} onCommit={cvdHeight => setDesk(prev => ({ ...prev, cvdHeight }))} />
             </>
           )}
           <TimeAxis canvasRef={timeAxisRef} />
           <div className="stage__corner" aria-hidden="true" />
+          <ChartStartupGate rendererRef={rendererRef} disabled={glError !== null || offlineHarness} />
         </div>
         {settings.railVisible && (
+          <>
+          <PaneResizer axis="x" variable="--desk-rail-width" value={desk.railWidth} min={280} max={560}
+            label={t('desk.resizeRail')} onCommit={railWidth => setDesk(prev => ({ ...prev, railWidth }))} />
           <aside className="right-rail" data-testid="right-rail">
             <Watchlist
               activeKey={`${activeMarket}:${activeSymbol}`}
@@ -879,9 +916,15 @@ export function App() {
                 if (i > 0) onSelectSymbol(key.slice(0, i), key.slice(i + 1));
               }}
             />
-            <DomLadder />
-            <Tape bigTradeUsd={settings.bigTradeUsd} />
+            <OrderFlowPanel />
+            <div className="desk-book-panels">
+              <DomLadder />
+              <PaneResizer axis="y" variable="--desk-dom-ratio" value={desk.domRatio} min={.25} max={.75} ratio
+                label={t('desk.resizeBookTape')} onCommit={domRatio => setDesk(prev => ({ ...prev, domRatio }))} />
+              <Tape bigTradeUsd={settings.bigTradeUsd} />
+            </div>
           </aside>
+          </>
         )}
       </div>
 

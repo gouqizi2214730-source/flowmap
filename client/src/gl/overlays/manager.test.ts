@@ -11,6 +11,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { OverlayManager, type OverlayDrawContext } from './manager';
 import { makeFakeGL } from '../mockGL';
 import { PriceLine } from './priceLine';
+import { Profile } from './profile';
+import { ViewWorker } from '../viewWorker';
+import type { ViewResult } from '../viewWorkerEngine';
 import type { BarColumn, BBO, Marker, Trade } from '../../proto/types';
 
 interface Rec2D {
@@ -78,6 +81,7 @@ function drawCtx(): OverlayDrawContext {
 
 type Internals = {
   priceLine: PriceLine;
+  profile: Profile;
   text: { canvas: HTMLCanvasElement };
   cvd: { size: number };
 };
@@ -210,6 +214,15 @@ describe('OverlayManager (fake GL + recording 2D)', () => {
     expect(manager.debug().hasChannelBbo).toBe(false);
   });
 
+  it('derives book quotes only under known native geometry when the display map has advanced', () => {
+    const arrays = { bid: new Float32Array([0, 0, 0, 5, 0]), ask: new Float32Array([0, 0, 0, 0, 7]) };
+    const display = { p0: 110, step: .5 };
+    expect(manager.effectiveBboForTest({ depth: 'L2' }, display, arrays, null)).toBeNull();
+    expect(manager.effectiveBboForTest({ depth: 'L2' }, display, arrays, { p0: 100, step: .5 })).toMatchObject({
+      bidPx: 101.5, bidSz: 5, askPx: 102, askSz: 7, source: 'l2',
+    });
+  });
+
   it('reset() drops every overlay data ring too', () => {
     manager.onTrade({ ts_ns: 1n, price: 100, size: 1, side: 1 } as unknown as Trade);
     manager.onMarker({ ts_ns: 1n, price: 100, kind: 'large_lot' } as unknown as Marker);
@@ -224,6 +237,42 @@ describe('OverlayManager (fake GL + recording 2D)', () => {
     expect(manager.debug().markers).toBe(0);
     expect(manager.debug().vwap).toBe(0);
     expect(internals().cvd.size).toBe(0);
+  });
+
+  it.each([10, 11])('reset removes the previous session profile even at version %s', async (version) => {
+    const profile = (manager as unknown as Internals).profile;
+    profile.setOptions({ maxCols: 2 }); manager.setVisibility({ profile: true });
+    const bid = new Float32Array(8); bid[3] = 9;
+    const old = { ...drawCtx(), view: { colOffset: 0, colScale: 3, rowOffset: 0, rowScale: 8 },
+      resident: { oldest: 0, newest: 2 }, dataVersion: 10,
+      price: { p0: 0, step: 1, scale: { kind: 'linear' as const, rows: 8, p0: 0, step: 1 } },
+      columnArrays: () => ({ bid, ask: null }) };
+    await vi.waitFor(() => { manager.draw(old); expect(profile.last?.max).toBe(27); });
+    manager.reset();
+    const fresh = { ...old, dataVersion: version, columnArrays: () => ({ bid: new Float32Array(8), ask: null }) };
+    manager.draw(fresh);
+    expect(profile.last).toBeNull();
+    await vi.waitFor(() => { manager.draw(fresh); expect(profile.last?.max).toBe(0); });
+    expect(profile.last?.sampled).toBe(false);
+  });
+
+  it('an old session worker completion cannot publish after reset', async () => {
+    const profile = (manager as unknown as Internals).profile;
+    profile.setOptions({ maxCols: 2 }); manager.setVisibility({ profile: true });
+    let finish!: (result: ViewResult) => void;
+    const run = vi.spyOn(ViewWorker.prototype, 'run').mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const ctx = { ...drawCtx(), view: { colOffset: 0, colScale: 3, rowOffset: 0, rowScale: 8 },
+      resident: { oldest: 0, newest: 2 }, dataVersion: 10,
+      price: { p0: 0, step: 1, scale: { kind: 'linear' as const, rows: 8, p0: 0, step: 1 } },
+      columnArrays: () => ({ bid: new Float32Array(8), ask: null }) };
+    manager.draw(ctx); manager.reset();
+    finish({ bins: Float64Array.from([0, 0, 0, 27, 0, 0, 0, 0]), total: 27, columns: 3, missing: 0, sampled: false });
+    await Promise.resolve();
+    expect(profile.last).toBeNull();
+    expect(profile.calculationState).toBe('idle');
+    run.mockRestore();
+    manager.draw(ctx);
+    await vi.waitFor(() => { manager.draw(ctx); expect(profile.last?.max).toBe(0); });
   });
 
   it('prune()/reset() bound the volume-strip columns (F26)', () => {

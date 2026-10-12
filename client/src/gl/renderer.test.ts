@@ -3,8 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Renderer } from './renderer';
 import { makeFake2D, makeFakeGL, type FakeGL } from './mockGL';
 import { clearColorForRamp } from './lut';
-import { MsgType, MODE_L2, type DepthColumn } from '../proto/types';
+import { MsgType, MODE_L2, type DepthColumn, type HistoryOverviewRequest } from '../proto/types';
 import type { StreamMsg } from '../net/connection';
+import { makeHybrid, priceToRow, rowToPrice, type PriceScale } from './priceScale';
+import { accumulateProfile } from './overlays/profile';
+import { THEMES, THEME_IDS } from '../theme';
 
 /**
  * Renderer unit tests over a RECORDING fake GL (see mockGL.ts). Pixels are the
@@ -133,6 +136,506 @@ describe('Renderer (fake GL harness)', () => {
   });
 
   // --- B-1: the normalizer folds FINAL columns exactly once --------------------
+
+  it('releases startup presentation only after a real draw of the current session', () => {
+    const { r, store } = makeRenderer();
+    expect(r.marketFrameReady).toBe(false);
+    store.emit(makeCol(0, true));
+    expect(r.marketFrameReady).toBe(false);
+    pump(16);
+    expect(r.marketFrameReady).toBe(true);
+
+    // A new Hello must not release its screen using the previous session's draw.
+    store.state.sessionId = 'sess-2';
+    expect(r.marketFrameReady).toBe(false);
+    store.emit(makeCol(0, true));
+    expect(r.marketFrameReady).toBe(false);
+    pump(32);
+    expect(r.marketFrameReady).toBe(true);
+    r.resetForSession();
+    expect(r.marketFrameReady).toBe(false);
+    r.dispose();
+  });
+
+  it('a lost GL context cannot advertise a ready market frame', () => {
+    const { r, store, canvas } = makeRenderer();
+    store.emit(makeCol(0, true));
+    pump(16);
+    expect(r.marketFrameReady).toBe(true);
+    canvas.dispatchEvent(new Event('webglcontextlost', { cancelable: true }));
+    expect(r.marketFrameReady).toBe(false);
+    r.dispose();
+  });
+
+  it('stages depth during compilation, ingests bounded batches, and reuses the shader on symbol changes', () => {
+    vi.spyOn(performance, 'now').mockReturnValue(0);
+    const completion = 0x91b1;
+    let ready = false;
+    const extension = gl.getExtension.bind(gl);
+    vi.spyOn(gl, 'getExtension').mockImplementation(name => name === 'KHR_parallel_shader_compile'
+      ? { COMPLETION_STATUS_KHR: completion } : extension(name));
+    vi.spyOn(gl, 'getProgramParameter').mockImplementation((_program, key) => {
+      if (key === completion) return ready;
+      return true; // overlay programs still initialize synchronously
+    });
+    const { r, store } = makeRenderer();
+    for (let seq = 0; seq < 12; seq++) store.emit(makeCol(seq, true));
+    expect(r.newestColSeq).toBe(-1);
+    expect(gl.callsOf('texSubImage3D')).toHaveLength(0);
+    pump(16);
+    expect(r.newestColSeq).toBe(-1);
+    ready = true;
+    pump(32);
+    expect(r.newestColSeq).toBe(7);
+    pump(48);
+    expect(r.newestColSeq).toBe(11);
+    const links = gl.callsOf('linkProgram').length;
+    r.resetForSession();
+    store.state.sessionId = 'sess-2';
+    store.emit(makeCol(0, true));
+    expect(r.newestColSeq).toBe(0);
+    expect(gl.callsOf('linkProgram')).toHaveLength(links);
+    r.dispose();
+  });
+
+  it('discards staged columns from the previous instrument while compilation is pending', () => {
+    const completion = 0x91b1;
+    let ready = false;
+    const extension = gl.getExtension.bind(gl);
+    vi.spyOn(gl, 'getExtension').mockImplementation(name => name === 'KHR_parallel_shader_compile'
+      ? { COMPLETION_STATUS_KHR: completion } : extension(name));
+    vi.spyOn(gl, 'getProgramParameter').mockImplementation((_program, key) => key === completion ? ready : true);
+    const { r, store } = makeRenderer();
+    store.emit(makeCol(999, true));
+    r.resetForSession();
+    // A late old-session column must be rejected at arrival, rather than
+    // reinterpreted using the new Hello after compilation finishes.
+    store.state.epochs = new Map();
+    store.emit(makeCol(888, true));
+    store.state.epochs = new Map([[0, { epoch: 0, tick: 0.5, tick_multiple: 1, dt_ns: DT_NS, p0: 100, rows: ROWS }]]);
+    store.state.sessionId = 'sess-2';
+    store.emit(makeCol(0, true));
+    ready = true;
+    pump(16);
+    expect(r.newestColSeq).toBe(0);
+    r.dispose();
+  });
+
+  it('fits the first nonempty book with a saved price lock, then preserves the manual frame', () => {
+    const { r, store } = makeRenderer();
+    store.state.epochs = new Map([[0, {epoch: 0, tick: 0.001, tick_multiple: 1, dt_ns: DT_NS, p0: 0.65, rows: 256}]]);
+    r.setPriceFollow('off');
+    const empty = makeCol(0, false, 256);
+    empty.bid.fill(0); empty.ask!.fill(0);
+    store.emit(empty);
+    const book = makeCol(0, true, 256);
+    book.bid.fill(0); book.ask!.fill(0);
+    book.bid[100] = 17000; book.ask![101] = 3000;
+    store.emit(book);
+    expect(r.viewSnapshot.rowScale).toBeLessThan(20);
+    expect(r.priceFollow).toBe('off');
+    r.setViewForTest(0, 1, 120, 50);
+    store.emit({...book, col_seq: 1, t0_ns: BigInt(DT_NS)});
+    expect(r.viewSnapshot.rowOffset).toBe(120);
+    expect(r.viewSnapshot.rowScale).toBe(50);
+    r.dispose();
+  });
+
+  it('manual price zoom is free while explicit fit frames the actual historical market', () => {
+    const { r, store } = makeRenderer();
+    const scale = makeHybrid({ mid: 85505, rows: 4096, coreRows: 2048, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+    store.state.epochs = new Map([[0, { epoch: 0, tick: 0.01, tick_multiple: 1, dt_ns: DT_NS, p0: scale.coreP0, rows: 4096,
+      scale_kind: 1, dn_rows: scale.dnRows, core_rows: scale.coreRows, core_p0: scale.coreP0, core_step: scale.coreStep, lo_price: scale.loPrice, hi_price: scale.hiPrice }]]);
+    r.setPriceFollow('off');
+    const prices = [85438, 85504.75, 85500.89, 85594.01];
+    for (let col_seq = 0; col_seq < 40; col_seq++) {
+      const book = makeCol(col_seq, true, 4096);
+      book.bid.fill(0); book.ask!.fill(0);
+      book.bid[scale.dnRows + 1023] = 5; book.ask![scale.dnRows + 1024] = 5;
+      store.emit(book);
+      const c = prices[col_seq % prices.length];
+      r.ingestForTest({ type: MsgType.BAR_COL, epoch: 0, col_seq, t0_ns: BigInt(col_seq) * BigInt(DT_NS), o: c, h: c + 1, l: c - 1, c, v_buy: 1, v_sell: 1, cvd: 0 } as never);
+    }
+    r.zoomTimeForTest(1e9);
+    r.zoomPriceForTest(10);
+    const manual = r.viewSnapshot;
+    expect(rowToPrice(scale, manual.rowOffset + manual.rowScale) - rowToPrice(scale, manual.rowOffset)).toBeGreaterThan(225);
+    r.setTimeWindowMs(null); // explicit Fit, independent of manual zoom extent
+    const view = r.viewSnapshot;
+    expect(view.colOffset).toBe(0);
+    expect(view.colScale).toBe(40);
+    const low = rowToPrice(scale, view.rowOffset), high = rowToPrice(scale, view.rowOffset + view.rowScale);
+    expect(low).toBeLessThan(85437);
+    expect(high).toBeGreaterThan(85595.01);
+    expect(high - low).toBeLessThan(225);
+    expect(r.priceFollow).toBe('off');
+    for (const price of prices) {
+      expect(r.overlayRowCss(priceToRow(scale, price))).toBeCloseTo((high - price) / (high - low), 6);
+    }
+    // Check continuous drawing projection round trips in both storage wings.
+    for (const price of [85450, 85510, 85580]) {
+      const expected = priceToRow(scale, price);
+      const row = r.canvasCssToGrid(0, r.gridToCanvasCss(0, expected).y)?.row;
+      expect(row).toBeCloseTo(expected, 5);
+    }
+    r.dispose();
+  });
+
+  it('hybrid hover reads the centered native bucket independently of time zoom', () => {
+    gl = makeFakeGL({ colorBufferFloat: true });
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    const scale = makeHybrid({ mid: 82414.24, rows: 4096, coreRows: 2048, coreStep: .01, upMult: 11, dnFloor: .01 })!;
+    store.state.epochs = new Map([[0, { epoch: 0, tick: .01, tick_multiple: 1, dt_ns: DT_NS, p0: scale.coreP0, rows: scale.rows,
+      scale_kind: 1, dn_rows: scale.dnRows, core_rows: scale.coreRows, core_p0: scale.coreP0, core_step: scale.coreStep,
+      lo_price: scale.loPrice, hi_price: scale.hiPrice }]]);
+    const row = Math.floor(priceToRow(scale, 81812));
+    const column = makeCol(0, true, scale.rows);
+    column.bid.fill(0); column.ask!.fill(0);
+    column.bid[row] = 2; column.bid[row + 1] = 7;
+    store.emit(column);
+    const low = 81750, high = 81950, price = rowToPrice(scale, row + .75);
+    const bottom = priceToRow(scale, low), top = priceToRow(scale, high);
+    for (const span of [1, 4000]) {
+      r.setViewForTest(0, span, bottom, top - bottom);
+      const probe = r.probeAt(0, 600 * (high - price) / (high - low))!;
+      expect(probe.row).toBe(row + 1);
+      expect(probe.group).toBe(1);
+      expect(probe.bid).toBe(7);
+      expect(probe.priceLo).toBeCloseTo(rowToPrice(scale, row + .5), 5);
+      expect(probe.priceHi).toBeCloseTo(rowToPrice(scale, row + 1.5), 5);
+    }
+    r.dispose();
+  });
+
+  it('hovering an older epoch maps the cursor price into that column native grid', () => {
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    store.state.epochs = new Map([
+      [0, { epoch: 0, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 100, rows: 64 }],
+      [1, { epoch: 1, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 110, rows: 64 }],
+    ]);
+    const old = makeCol(0, true, 64);
+    old.bid.fill(0); old.ask!.fill(0); old.bid[30] = 9;
+    store.emit(old);
+    store.state.gridEpoch = 1;
+    store.emit({ ...makeCol(1, true, 64), epoch: 1 });
+    r.setViewForTest(0, 2, 0, 20);
+    const probe = r.probeAt(250, 300)!; // current row 10 is physical price 115, old row 30.
+    expect(probe.row).toBe(30);
+    expect(probe.price).toBe(115);
+    expect(probe.bid).toBe(9);
+    r.dispose();
+  });
+
+  it('linear epoch hover matches the projected native bucket after the depth step changes', () => {
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    store.state.epochs = new Map([
+      [0, { epoch: 0, tick: 1, tick_multiple: 1, dt_ns: DT_NS, p0: 100, rows: 64 }],
+      [1, { epoch: 1, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 110, rows: 64 }],
+    ]);
+    const old = makeCol(0, true, 64);
+    old.bid.fill(0); old.ask!.fill(0); old.bid[30] = 2; old.bid[31] = 7;
+    store.emit(old);
+    store.state.gridEpoch = 1;
+    store.emit({ ...makeCol(1, true, 64), epoch: 1 });
+    r.setViewForTest(0, 2, 0, 64);
+    // Linear events/cells retain their half-row display convention. At display
+    // row 41.6, the actual shader price is 110 + (41.6-.5)*.5 = 130.55,
+    // which belongs to old native centered row 31, rather than row 30.
+    const probe = r.probeAt(250, 600 * (1 - 41.6 / 64))!;
+    r.dispose();
+    expect(probe.row).toBe(31);
+    expect(probe.bid).toBe(7);
+  });
+
+  it.each([
+    { tick: .25, tickMultiple: 4, p0: 100.25, decimals: 2, label: '103.25' },
+    { tick: 1e-9, tickMultiple: 4, p0: 1e-7, decimals: 9, label: '0.000000112' },
+  ])('hover retains native tick $tick precision with grouped storage', ({ tick, tickMultiple, p0, decimals, label }) => {
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    store.state.epochs = new Map([[0, { epoch: 0, tick, tick_multiple: tickMultiple, dt_ns: DT_NS, p0, rows: ROWS }]]);
+    store.emit(makeCol(0, true));
+    r.setViewForTest(0, 1, 0, ROWS);
+    const probe = r.probeAt(0, 600 * (1 - 3.5 / ROWS))!;
+    r.dispose();
+    expect(probe.row).toBe(3);
+    expect(probe.priceDecimals).toBe(decimals);
+    expect(probe.price?.toFixed(probe.priceDecimals)).toBe(label);
+  });
+
+  it('derived BBO preserves cached native quote prices after a new epoch is announced', () => {
+    const { r, store } = makeRenderer();
+    store.emit(makeCol(0, true));
+    pump(16);
+    const before = r.overlayEffectiveBboForTest()!;
+    (store.state.epochs as Map<number, Record<string, unknown>>).set(1,
+      { epoch: 1, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 110, rows: ROWS });
+    store.state.gridEpoch = 1; // EpochStart can precede the first new depth column.
+    const after = r.overlayEffectiveBboForTest()!;
+    r.dispose();
+    expect(after.bidPx).toBe(before.bidPx);
+    expect(after.askPx).toBe(before.askPx);
+  });
+
+  it('tiny native ticks retain the physical hover footprint instead of an absolute width floor', () => {
+    gl = makeFakeGL({ colorBufferFloat: true });
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    const rows = 4096;
+    store.state.epochs = new Map([[0, { epoch: 0, tick: 1e-10, tick_multiple: 1, dt_ns: DT_NS, p0: 1e-7, rows }]]);
+    const column = makeCol(0, true, rows); column.bid.fill(1); column.ask!.fill(0);
+    store.emit(column);
+    r.setViewForTest(0, 1, 0, rows);
+    const probe = r.probeAt(0, 300)!;
+    r.dispose();
+    // 4096 native rows / 600 CSS px = 6.83 rows: level1, two four-row taps.
+    expect(probe.group).toBe(8);
+    expect(probe.bid).toBe(8);
+    expect(probe.priceDecimals).toBe(10);
+  });
+
+  it('cached probe, BBO and profile geometry survives a same-numbered Hello replacement', () => {
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    store.emit(makeCol(0, true));
+    const native = r.columnCacheForTest.priceAt(0)!;
+    (store.state.epochs as Map<number, Record<string, unknown>>).set(0,
+      { epoch: 0, tick: .25, tick_multiple: 2, dt_ns: DT_NS, p0: 101, rows: ROWS });
+    r.setViewForTest(0, 1, 0, ROWS);
+    const probe = r.probeAt(0, 600 * (1 - 1.5 / ROWS))!; // current row 1 = old row 3.
+    const currentBbo = r.overlayEffectiveBboForTest()!;
+    const internal = r as unknown as { rawColumnScale(col: number): PriceScale | null; overlayPriceMap(): { scale: PriceScale } };
+    const profile = accumulateProfile(0, 0, 0, ROWS - 1, col => r.columnCacheForTest.arrays(col),
+      undefined, undefined, 1, { target: internal.overlayPriceMap().scale, source: internal.rawColumnScale });
+    expect(internal.rawColumnScale(0)).toBe(native.scale);
+    expect(Object.isFrozen(native)).toBe(true);
+    expect(Object.isFrozen(native.scale)).toBe(true);
+    expect(native.p0).toBe(100);
+    expect(native.tick).toBe(.5);
+    expect(probe.row).toBe(3);
+    expect(probe.price).toBe(101.5);
+    expect(probe.priceDecimals).toBe(1); // old native tick, despite the new .25 tick.
+    expect(probe.bid).toBe(5);
+    expect(currentBbo.bidPx).toBe(101.5);
+    expect(currentBbo.askPx).toBe(102);
+    expect(profile.bins[1]).toBe(5);
+    expect(profile.bins[2]).toBe(7);
+    expect(profile.bins.reduce((sum, quantity) => sum + quantity, 0)).toBe(12);
+    r.dispose();
+  });
+
+  it.each([false, true])('fresh Hello reused seq clears active cache/ring/normalization (App reset=%s)', appReset => {
+    const { r, store } = makeRenderer();
+    for (let s = 0; s < 4; s++) store.emit(makeCol(s, true));
+    const oldRing = (r as unknown as { ring: unknown }).ring;
+    (r as unknown as { overlayPriceMap(): unknown }).overlayPriceMap();
+    store.state.sessionId = 'sess-2';
+    (store.state.epochs as Map<number, Record<string, unknown>>).set(0,
+      { epoch: 0, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 300, rows: ROWS });
+    if (appReset) r.resetOverlaysForNewSession('sess-2');
+    const replacement = makeCol(0, true); replacement.bid[3] = 1e6;
+    store.emit(replacement);
+    expect((r as unknown as { ring: unknown }).ring).not.toBe(oldRing);
+    expect(r.residentRange()).toEqual({ oldest: 0, newest: 0, count: 1 });
+    expect(r.columnCacheForTest.size).toBe(1);
+    expect(r.columnCacheForTest.has(1)).toBe(false);
+    expect(r.columnCacheForTest.priceAt(0)?.p0).toBe(300);
+    expect(r.normalizerForTest.totalSamples).toBe(2);
+    const norm = r.normalizerForTest.updateNorm({ oldest: 0, newest: 0 }, { lo: 0, hi: ROWS - 1 }, 0);
+    expect(norm).toBeGreaterThan(1000);
+    expect(r.overlayEffectiveBboForTest()?.bidPx).toBe(301.5);
+    r.dispose();
+  });
+
+  it('a new Hello with advancing recorded columns preserves cached native history and normalizer membership', () => {
+    const { r, store } = makeRenderer();
+    for (let s = 100; s < 104; s++) store.emit(makeCol(s, true));
+    const oldRing = (r as unknown as { ring: unknown }).ring;
+    const oldPrice = r.columnCacheForTest.priceAt(100);
+    store.state.sessionId = 'sess-2';
+    (store.state.epochs as Map<number, Record<string, unknown>>).set(0,
+      { epoch: 0, tick: .25, tick_multiple: 2, dt_ns: DT_NS, p0: 101, rows: ROWS });
+    r.resetOverlaysForNewSession('sess-2');
+    store.emit(makeCol(104, true));
+    expect((r as unknown as { ring: unknown }).ring).toBe(oldRing);
+    expect(r.residentRange()).toEqual({ oldest: 100, newest: 104, count: 5 });
+    expect(r.columnCacheForTest.priceAt(100)).toBe(oldPrice);
+    expect(r.columnCacheForTest.priceAt(100)?.p0).toBe(100);
+    expect(r.columnCacheForTest.priceAt(104)?.p0).toBe(101);
+    expect(r.normalizerForTest.totalSamples).toBe(10);
+    // An overlapping raw history response must use its cached geometry even
+    // though Hello overwrote epoch zero in the global parameter table.
+    (r as unknown as { spliceColumn(column: DepthColumn): void }).spliceColumn(makeCol(100, true));
+    expect(r.columnCacheForTest.priceAt(100)).toBe(oldPrice);
+    expect(r.normalizerForTest.totalSamples).toBe(10);
+    r.dispose();
+  });
+
+  it('a new Hello reused seq with a different timestamp resets the active timeline', () => {
+    const { r, store } = makeRenderer();
+    for (let seq = 0; seq < 4; seq++) store.emit(makeCol(seq, true));
+    const oldRing = (r as unknown as { ring: unknown }).ring;
+    store.state.sessionId = 'sess-2';
+    r.resetOverlaysForNewSession('sess-2');
+    store.emit({ ...makeCol(0, true), t0_ns: 10_000_000_000n });
+    expect((r as unknown as { ring: unknown }).ring).not.toBe(oldRing);
+    expect(r.columnCacheForTest.size).toBe(1);
+    expect(r.normalizerForTest.totalSamples).toBe(2);
+    expect(r.columnCacheForTest.timeAt(0)).toBe(10_000_000_000n);
+    r.dispose();
+  });
+
+  it('price Fit unions old and new epoch book extents at their physical prices', () => {
+    const { r, store } = makeRenderer();
+    store.state.epochs = new Map([
+      [0, { epoch: 0, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 100, rows: 64 }],
+      [1, { epoch: 1, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 110, rows: 64 }],
+    ]);
+    const old = makeCol(0, true, 64);
+    old.bid.fill(0); old.ask!.fill(0); old.bid[30] = 9; old.ask![31] = 7;
+    store.emit(old);
+    store.state.gridEpoch = 1;
+    const current = { ...makeCol(1, true, 64), epoch: 1 };
+    current.bid.fill(0); current.ask!.fill(0); current.bid[10] = 9; current.ask![11] = 7;
+    store.emit(current);
+    r.setViewForTest(0, 2, 0, 64);
+    r.setPriceFollow('fit');
+    const view = r.viewSnapshot;
+    expect(110 + view.rowOffset * .5).toBe(113.5);
+    expect(110 + (view.rowOffset + view.rowScale) * .5).toBe(117.5);
+    r.dispose();
+  });
+
+  it('a linear recorded epoch uses nearest native bins on the projected hybrid screen', () => {
+    gl = makeFakeGL({ colorBufferFloat: true });
+    const { r, canvas, store } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: 1000 });
+    Object.defineProperty(canvas, 'clientHeight', { value: 600 });
+    const scale = makeHybrid({ mid: 81812, rows: 4096, coreRows: 2048, coreStep: .01, upMult: 11, dnFloor: .01 })!;
+    store.state.epochs = new Map([
+      [0, { epoch: 0, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 81000, rows: 4096 }],
+      [1, { epoch: 1, tick: .01, tick_multiple: 1, dt_ns: DT_NS, p0: scale.coreP0, rows: scale.rows,
+        scale_kind: 1, dn_rows: scale.dnRows, core_rows: scale.coreRows, core_p0: scale.coreP0, core_step: scale.coreStep,
+        lo_price: scale.loPrice, hi_price: scale.hiPrice }],
+    ]);
+    const old = makeCol(0, true, 4096);
+    old.bid.fill(0); old.ask!.fill(0); old.bid[1624] = 9;
+    store.emit(old);
+    store.state.gridEpoch = 1;
+    store.emit({ ...makeCol(1, true, 4096), epoch: 1 });
+    const bottom = priceToRow(scale, 81750), top = priceToRow(scale, 81950);
+    r.setViewForTest(0, 4000, bottom, top - bottom);
+    const probe = r.probeAt(0, 600 * (81950 - 81811.875) / 200)!;
+    expect(probe.row).toBe(1624);
+    expect(probe.group).toBe(1);
+    expect(probe.bid).toBe(9);
+    expect(probe.price).toBeCloseTo(81811.875, 5);
+    expect(probe.priceLo).toBe(81811.75);
+    expect(probe.priceHi).toBe(81812.25);
+    r.dispose();
+  });
+
+
+  it('time presets preserve a history position and follow policy, then fit all loaded data', () => {
+    const { r, store } = makeRenderer();
+    for (let i = 0; i < 200; i++) store.emit(makeCol(i, true));
+    r.setFollowTime(false);
+    r.setViewForTest(60, 40, 0, 256);
+    const end = r.viewSnapshot.colOffset + r.viewSnapshot.colScale;
+    expect(r.setTimeWindowMs(250)).toBe(true);
+    expect(r.viewSnapshot.colOffset + r.viewSnapshot.colScale).toBeCloseTo(end);
+    expect(r.following).toBe(false);
+    expect(r.setTimeWindowMs(null)).toBe(true);
+    expect(r.viewSnapshot.colOffset).toBe(0);
+    expect(r.viewSnapshot.colScale).toBe(200);
+    expect(r.following).toBe(false);
+    r.dispose();
+  });
+
+  it('price Fit honors immutable native maps even when both books use epoch zero', () => {
+    const { r, store } = makeRenderer();
+    store.state.epochs = new Map([[0, { epoch: 0, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 100, rows: 64 }]]);
+    const old = makeCol(0, true, 64);
+    old.bid.fill(0); old.ask!.fill(0); old.bid[30] = 9; old.ask![31] = 7;
+    store.emit(old);
+    (store.state.epochs as Map<number, Record<string, unknown>>).set(0,
+      { epoch: 0, tick: .5, tick_multiple: 1, dt_ns: DT_NS, p0: 110, rows: 64 });
+    const current = makeCol(1, true, 64);
+    current.bid.fill(0); current.ask!.fill(0); current.bid[10] = 9; current.ask![11] = 7;
+    store.emit(current);
+    r.setViewForTest(0, 2, 0, 64);
+    r.setPriceFollow('fit');
+    const view = r.viewSnapshot;
+    expect(110 + view.rowOffset * .5).toBe(113.5);
+    expect(110 + (view.rowOffset + view.rowScale) * .5).toBe(117.5);
+    r.dispose();
+  });
+
+  it('linear viewport normalization excludes the adjacent offscreen native row', () => {
+    const { r, store } = makeRenderer();
+    const column = makeCol(0, true);
+    column.bid.fill(0); column.ask!.fill(0); column.bid[0] = .01; column.bid[1] = 1e6;
+    store.emit(column);
+    r.setViewForTest(0, 1, 0, 1);
+    (r as unknown as { updateNormalization(): void }).updateNormalization();
+    expect(r.currentNorm).toBeGreaterThan(.009);
+    expect(r.currentNorm).toBeLessThan(.012);
+    r.dispose();
+  });
+
+  it('frames a deep book before its first bar and clears foreign price limits on a symbol switch', () => {
+    const { r, store } = makeRenderer();
+    const scale = makeHybrid({ mid: 85500, rows: 4096, coreRows: 2048, coreStep: 0.5, upMult: 11, dnFloor: 0.01 })!;
+    store.state.epochs = new Map([[0, { epoch: 0, tick: 0.01, tick_multiple: 50, dt_ns: DT_NS, p0: scale.coreP0, rows: 4096,
+      scale_kind: 1, dn_rows: scale.dnRows, core_rows: scale.coreRows, core_p0: scale.coreP0, core_step: scale.coreStep, lo_price: scale.loPrice, hi_price: scale.hiPrice }]]);
+    r.setPriceFollow('off');
+    const book = makeCol(0, true, 4096);
+    book.bid.fill(0); book.ask!.fill(0);
+    book.bid[scale.dnRows] = 3;
+    book.bid[scale.dnRows + 1023] = 4;
+    book.ask![scale.dnRows + 1024] = 4;
+    book.ask![scale.dnRows + 2047] = 3;
+    store.emit(book);
+    const span = () => rowToPrice(scale, r.viewSnapshot.rowOffset + r.viewSnapshot.rowScale) - rowToPrice(scale, r.viewSnapshot.rowOffset);
+    expect(span()).toBeCloseTo(32);
+    expect(r.setTimeWindowMs(null)).toBe(true);
+    expect(span()).toBeCloseTo(32);
+    const camera = (r as unknown as { camera: { priceZoomBounds: unknown; priceScale: unknown } }).camera;
+    expect(camera.priceZoomBounds).not.toBeNull();
+    r.resetForSession();
+    expect(camera.priceZoomBounds).toBeNull();
+    expect(camera.priceScale).toBeNull();
+    r.dispose();
+  });
+
+  it('lets a cold duration preset fill as data arrives and lets All retain the loaded history', () => {
+    const { r, store } = makeRenderer();
+    for (let i = 0; i < 10; i++) store.emit(makeCol(i, true));
+    expect(r.setTimeWindowMs(1000)).toBe(true);
+    expect(r.following).toBe(true);
+    for (let i = 10; i < 60; i++) store.emit(makeCol(i, true));
+    expect(r.viewSnapshot.colScale).toBeCloseTo(40);
+    expect(r.timeWindowMs).toBe(1000);
+    r.setTimeWindowMs(null);
+    for (let i = 60; i < 80; i++) store.emit(makeCol(i, true));
+    expect(r.viewSnapshot.colScale).toBe(80);
+    r.zoomTimeForTest(0.5);
+    expect(r.timeWindowMs).toBeUndefined();
+    const span = r.viewSnapshot.colScale;
+    r.goLive();
+    store.emit(makeCol(80, true));
+    expect(r.viewSnapshot.colScale).toBe(span);
+    r.dispose();
+  });
 
   it('folds only final columns, and a re-sent column id never double-counts', () => {
     const { r, store } = makeRenderer();
@@ -263,16 +766,46 @@ describe('Renderer (fake GL harness)', () => {
     for (let i = 0; i < 8; i++) await Promise.resolve();
   };
 
+  it('reloads the visible suffix after a large jump even when residency claims it', async () => {
+    const { r, store } = makeRenderer();
+    for (let s = 0; s <= 4; s++) store.emit(makeCol(s, true));
+    store.emit(makeCol(1000, true));
+    const request = vi.fn(async (_before: bigint, _count: number, range?: HistoryOverviewRequest) => ({
+      type: MsgType.HISTORY_RESP, req_id: 1, epoch: 0,
+      oldest_available_t_ns: 0n,
+      depth_cols: [994, 995, 996, 997, 998, 999]
+        .filter(seq => range && seq >= range.start_col && seq <= range.end_col)
+        .map(s => makeCol(s, true)),
+      bar_cols: [], markers: [], big_trades: [],
+    }));
+    store.state.requestHistory = request;
+    r.setFollowTime(false);
+    r.setViewForTest(994, 7, 0, ROWS);
+    pump(16);
+    await flushMicrotasks();
+    expect(request).toHaveBeenCalledTimes(1);
+    const [, count, sourceRange] = request.mock.calls[0];
+    expect(sourceRange).toMatchObject({ end_col: 999, stride: 1 });
+    expect(sourceRange!.start_col).toBeLessThanOrEqual(994);
+    expect(count).toBe(sourceRange!.end_col - sourceRange!.start_col + 1);
+    expect(count).toBeLessThanOrEqual(256);
+    expect(r.validFromSeq).toBe(994);
+    for (let s = 994; s <= 1000; s++) expect(r.columnCacheForTest.has(s)).toBe(true);
+    r.dispose();
+  });
+
   it('refetches a repaired skip band from history and splices the REAL columns', async () => {
     const { r, store } = makeRenderer();
     for (let s = 10; s <= 14; s++) store.emit(makeCol(s, true));
 
-    const calls: Array<{ before_t: bigint; n: number }> = [];
-    store.state.requestHistory = (before_t: bigint, n: number) => {
-      calls.push({ before_t, n });
-      // The server evicted only OUR queue; it still holds the band — plus older
-      // columns, exactly like its exclusive `history(before_t)` page.
-      const depth_cols = [13, 14, 15, 16, 17].map((s) => makeCol(s, true));
+    const calls: Array<{ n: number; range?: HistoryOverviewRequest }> = [];
+    store.state.requestHistory = (_before_t: bigint, n: number, range?: HistoryOverviewRequest) => {
+      calls.push({ n, range });
+      // The server evicted only OUR queue; its exact source page still holds
+      // the missing band. Respect the request so a wrong target stays missing.
+      const depth_cols = [13, 14, 15, 16, 17]
+        .filter(seq => range && seq >= range.start_col && seq <= range.end_col)
+        .map((s) => makeCol(s, true));
       return Promise.resolve({
         type: MsgType.HISTORY_RESP,
         req_id: 1,
@@ -291,7 +824,7 @@ describe('Renderer (fake GL harness)', () => {
 
     await flushMicrotasks();
     expect(calls).toHaveLength(1);
-    expect(calls[0].before_t).toBe(BigInt(18) * BigInt(DT_NS)); // anchored at the post-band column
+    expect(calls[0]).toEqual({ n: 3, range: { start_col: 15, end_col: 17, stride: 1 } });
     // The zeroes were replaced by the real columns: they are cached/resident now.
     for (const s of [15, 16, 17]) expect(r.columnCacheForTest.has(s)).toBe(true);
     expect(r.validFromSeq).toBe(10); // in-place splices never move validity
@@ -433,6 +966,39 @@ describe('Renderer (fake GL harness)', () => {
     expect(channelValues(before)).toEqual([0]); // ...but SYNTH renders sum
   });
 
+  it('keeps synthetic depth in Sum for every themed synthetic ramp', () => {
+    const { r, store } = makeRenderer();
+    store.state.capability = { depth: 'SYNTH' };
+    store.emit(makeCol(0, true));
+    r.setColormap('theme');
+    for (const [index, id] of THEME_IDS.entries()) {
+      r.setChartTheme({ id, density: THEMES[id].chart.density, synth: THEMES[id].chart.synth });
+      r.setDepthChannel('imbalance');
+      const before = gl.callsOf('uniform1i').length;
+      pump((index + 1) * 16);
+      expect(channelValues(before), id).toEqual([0]);
+    }
+    expect(r.getDepthChannel()).toBe('imbalance');
+    r.setChartTheme(null);
+  });
+
+  it('normalization moves the white endpoint and keeps a lower coordinated knee', () => {
+    const { r, store } = makeRenderer();
+    store.emit(makeCol(0, true));
+    const n = r.normalizerForTest;
+    r.setNormPercentile(80);
+    expect(n.whitePercentile).toBe(80);
+    expect(n.percentile).toBeCloseTo(77.3);
+    r.setNormPercentile(100);
+    expect(n.whitePercentile).toBe(100);
+    expect(n.percentile).toBeCloseTo(97.3);
+    r.setNormPercentile(Number.NaN);
+    expect(n.whitePercentile).toBe(99.7);
+    expect(n.percentile).toBeCloseTo(97);
+    r.setNormPercentile(20);
+    expect(n.whitePercentile).toBe(80);
+  });
+
   // --- C3: renderer.stats() ------------------------------------------------------
 
   it('C3: stats() EMA-converges fps, counts uploads/draws, and reports cache bytes', () => {
@@ -528,7 +1094,9 @@ describe('Renderer (fake GL harness)', () => {
 
   it('P1: tickGrouping floors the mip level; n=1 restores the natural selection', () => {
     gl = makeFakeGL({ colorBufferFloat: true }); // mips exist → levels 0/1/2
-    const { r, store } = makeRenderer();
+    const { r, store, canvas } = makeRenderer();
+    Object.defineProperty(canvas, 'clientWidth', { value: gl.drawingBufferWidth });
+    Object.defineProperty(canvas, 'clientHeight', { value: gl.drawingBufferHeight });
     setEpochRows(store, 512);
     store.emit(makeCol(0, true, 512));
     pump(16);
@@ -639,6 +1207,21 @@ describe('Renderer (fake GL harness)', () => {
     expect(r.priceFollow).toBe('track');
   });
 
+  it('restores a wide manually owned frame and calibrated tolerance after GPU context loss', () => {
+    const { r, store } = makeRenderer();
+    store.emit(makeCol(10000, true));
+    pump(16);
+    r.setTimeWindowMs(null);
+    r.setPriceFollow('off');
+    r.setTolerance(50);
+    const view = r.viewSnapshot;
+    (r as unknown as { onContextRestored(): void }).onContextRestored();
+    expect(r.viewSnapshot).toEqual(view);
+    expect(r.priceFollow).toBe('off');
+    expect((r as unknown as { heatmap: { toleranceValue: number } }).heatmap.toleranceValue).toBe(50);
+    r.dispose();
+  });
+
   it('B-5: stats().frameMs measures the FULL frame — the overlay pass included', () => {
     const { r, store } = makeRenderer();
     store.emit(makeCol(0, true));
@@ -741,6 +1324,7 @@ describe('Renderer (fake GL harness)', () => {
     expect(r.liveEdgeVisible).toBe(false); // no column yet
     store.emit(makeCol(0, true));
     expect(r.liveEdgeVisible).toBe(true);
+    store.emit(makeCol(1000, true)); // real earlier history can be inspected
     r.panColumnsForTest(-100000); // scrolled back: edge off-screen, TRACK cannot act
     expect(r.following).toBe(false);
     expect(r.liveEdgeVisible).toBe(false);
@@ -976,12 +1560,25 @@ describe('Renderer (fake GL harness)', () => {
     expect(tm!.slots!.t0[3]).toBe(180_000_000_000);
   });
 
-  it('B2-CP2: the piecewise table is retired when the resident run wraps the ring', () => {
+  it('keeps actual timestamps across a wrapped resident run and caches the linear table', () => {
     const { r, store } = makeRenderer(512);
-    for (let s = 0; s < 520; s++) store.emit(makeCol(s, true));
-    expect((r as unknown as { overlaySlotsFor(): unknown }).overlaySlotsFor()).toBeNull();
-    // …and the affine fallback still answers (honest, if time-warped).
-    expect(r.colToTsForTest(r.newestColSeq)).not.toBeNull();
+    const seam = 500;
+    for (let s = 0; s < 520; s++) {
+      const col = makeCol(s, true);
+      col.t0_ns = BigInt(s) * BigInt(DT_NS) + (s >= seam ? 10_000_000_000n : 0n);
+      store.emit(col);
+    }
+    const p = r as unknown as { overlaySlotsFor(): unknown };
+    const table = p.overlaySlotsFor();
+    expect(table).not.toBeNull();
+    expect(p.overlaySlotsFor()).toBe(table);
+    expect(r.timestampAtColumn(498)).toBe(498n * BigInt(DT_NS));
+    expect(r.columnAtTimestamp(498n * BigInt(DT_NS))).toBe(498);
+    expect(r.timestampAtColumn(501)).toBe(501n * BigInt(DT_NS) + 10_000_000_000n);
+    const update = makeCol(519, false);
+    update.t0_ns += 10_000_000_000n;
+    store.emit(update);
+    expect(p.overlaySlotsFor()).not.toBe(table);
   });
 
   it('R1-M1: a warm attach (first column mid-sequence) still serves the piecewise table', () => {
