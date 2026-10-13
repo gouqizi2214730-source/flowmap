@@ -351,7 +351,7 @@ async def test_silent_peer_aborted_after_liveness_timeout(server, monkeypatch):
 
     port = server
     ws = await connect(f"ws://127.0.0.1:{port}/ws")
-    # Deliberately never read/respond: pings accumulate, liveness trips.
+    # Never subscribe or send bytes: liveness still trips before Hello.
     with pytest.raises(ConnectionClosed) as ei:
         async with asyncio.timeout(5):
             while True:

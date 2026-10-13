@@ -15,7 +15,8 @@ in ``finally`` (no task leaks):
 - **flush loop**: every 16 ms (~60 Hz, for smooth live presentation) drains
   the ClientTx queue up to 256 KiB and sends each drained frame as one
   binary WS message;
-- **ping loop**: ~1 Hz ``Ping{server_send_ns}`` (§6.1 — the only clock/
+- **ping loop**: after the initial Hello is sent, ~1 Hz
+  ``Ping{server_send_ns}`` (§6.1 — the only clock/
   latency mechanism; the steady 1 Hz cadence doubles as the application-
   level keepalive that stops intermediate proxies from idling the socket
   out). ``Pong`` updates the connection's latency estimate, which feeds the
@@ -131,6 +132,7 @@ class _Connection:
         self._client = ClientTx()
         self._session: Session | None = None
         self._send_lock = asyncio.Lock()
+        self._hello_sent = False
         self.latency_ms = 0.0
         # Wall-clock skew of the CLIENT clock vs ours, derived from an
         # optional Subscribe.client_ts_ns (proto; campaign SB item 4).
@@ -191,6 +193,10 @@ class _Connection:
     async def _send(self, data: bytes) -> None:
         async with self._send_lock:
             await asyncio.wait_for(self._ws.send_bytes(data), SEND_TIMEOUT_S)
+            # The protected snapshot starts with Hello. Enable keepalive only
+            # after that first handshake frame has actually reached the peer.
+            if data and data[0] == wire.MSG_HELLO:
+                self._hello_sent = True
 
     async def _flush_loop(self) -> None:
         try:
@@ -214,6 +220,8 @@ class _Connection:
                     logger.warning("ws peer silent for %.0fs: aborting", LIVENESS_TIMEOUT_S)
                     await self._abort()
                     return
+                if not self._hello_sent:
+                    continue
                 ping = events.Ping(server_send_ns=time.monotonic_ns())
                 await self._send(wire.encode(ping))
         except asyncio.CancelledError:

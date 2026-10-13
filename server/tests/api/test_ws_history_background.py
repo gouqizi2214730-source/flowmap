@@ -154,6 +154,14 @@ async def test_live_pongs_prevent_false_timeout_during_a_long_overview(monkeypat
     socket.auto_pong = True
     conn = ws_mod._Connection(socket, Manager({}))
     conn._session = session
+    # This fake starts with an active subscription; complete its handshake
+    # before exercising the steady-state history/keepalive traffic.
+    await conn._send(wire.encode(events.Hello(
+        protocol_version=1, session_id="history-test", grid_epoch=0,
+        epoch_params=events.EpochParams(
+            epoch=0, tick=1.0, tick_multiple=1, dt_ns=250_000_000, p0=0.0, rows=64),
+        capability={}, norm_seed=1.0,
+    )))
     socket.messages.put_nowait({"type": "websocket.receive", "bytes": wire.encode(request())})
     running = asyncio.create_task(conn.run())
     await session.started.wait()

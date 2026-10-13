@@ -42,6 +42,7 @@ Unreleased work sits on top of the newest listed commit.
 
 - History navigation tracks newly received source time. Live price recentering
   preserves the selected historical time window.
+- A slow initial subscription sends its handshake before keepalive pings.
 
 See [release notes](docs/release-notes-1.5.0.md) for the user-facing summary.
 
