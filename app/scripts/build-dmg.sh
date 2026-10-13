@@ -65,7 +65,11 @@ cd "$TAURI_DIR"
 cargo tauri icon ../icons/icon-1024.png >/dev/null
 
 echo "==> [4/7] cargo tauri build --bundles app (release; first run is slow)"
-cargo tauri build --bundles app
+MACOS_MINIMUM_CONFIG="$TAURI_DIR/resources/.cache/tauri-macos-minimum.json"
+"$PYRUNTIME/bin/python3.13" "$REPO_ROOT/app/scripts/macos-runtime-minimum.py" \
+  --runtime "$PYRUNTIME" --config "$TAURI_DIR/tauri.conf.json" \
+  --output "$MACOS_MINIMUM_CONFIG" --report "$TAURI_DIR/resources/.cache/macos-runtime-minimum.json"
+cargo tauri build --bundles app --config "$MACOS_MINIMUM_CONFIG"
 
 [[ -d "$APP_PATH" ]] || { echo "ERROR: $APP_PATH not produced" >&2; exit 1; }
 

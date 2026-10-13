@@ -30,6 +30,10 @@ Unreleased work sits on top of the newest listed commit.
 - Heatmap tolerance and normalization follow visible liquidity; chart overlays,
   grouped DOM levels, and fine quote/tape prices use their respective geometry.
 - Windows sidecar processes are hidden and owned by the desktop shell's job.
+- Intel macOS packages include a self-contained OpenSSL build and do not
+  require Homebrew on the user's Mac.
+- macOS 11 is no longer supported. macOS packages declare the minimum system
+  version required by their bundled native libraries.
 - App, client, and server versions are aligned at 1.5.0. Releases build the
   selected tag, validate package versions, use locked vendored dependencies,
   and publish the release notes after the required platform builds succeed.

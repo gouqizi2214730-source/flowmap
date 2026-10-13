@@ -272,6 +272,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash app/scripts/build-dmg.sh
 
+      - name: Preserve macOS runtime minimum evidence
+        if: always() && matrix.kind == 'macos'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: macos-runtime-minimum-${{ matrix.triple }}
+          path: |
+            app/src-tauri/resources/.cache/macos-runtime-minimum.json
+            app/src-tauri/resources/.cache/tauri-macos-minimum.json
+          if-no-files-found: warn
+
       # --- Windows/Linux: client + pyruntime + `cargo tauri build`. The
       #     pyruntime is embedded by Tauri via bundle.resources declared in
       #     tauri.<platform>.conf.json. ------------------------------------------

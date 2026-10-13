@@ -248,11 +248,29 @@ fi
 # NOTE for the macOS Intel leg: ccxt pins `cryptography==49.0.0` exactly, and
 # that release publishes only a `macosx_11_0_arm64` macOS wheel — no x86_64, no
 # universal2 (48.0.1 was the last with one). So on x86_64-apple-darwin pip
-# BUILDS cryptography from sdist, which needs a Rust toolchain. The release
-# workflow installs Rust before this step for Tauri's sake, so the toolchain is
-# there; expect this leg to take a few minutes longer than the others.
+# builds cryptography from sdist. Link Homebrew's OpenSSL statically so the
+# installed app does not need the build runner's Homebrew libraries. Force a
+# fresh source build: pip must not reuse a previously cached dynamic wheel.
+# Rust is installed by the release/runtime-audit workflows before this step.
+if [[ "$TRIPLE" == "x86_64-apple-darwin" ]]; then
+  echo "==> Configuring self-contained Intel macOS cryptography"
+  command -v brew >/dev/null 2>&1 || { echo "ERROR: Homebrew is required for Intel macOS OpenSSL" >&2; exit 1; }
+  OPENSSL_DIR="$(brew --prefix openssl@3)"
+  for required in include/openssl/ssl.h lib/libcrypto.a lib/libssl.a; do
+    [[ -f "$OPENSSL_DIR/$required" ]] || { echo "ERROR: missing OpenSSL static-build input: $OPENSSL_DIR/$required" >&2; exit 1; }
+  done
+  export OPENSSL_DIR OPENSSL_STATIC=1
+  export OPENSSL_LIB_DIR="$OPENSSL_DIR/lib" OPENSSL_INCLUDE_DIR="$OPENSSL_DIR/include"
+  PIP_INSTALL_ARGS+=(--no-cache-dir --no-binary=cryptography)
+  echo "    OpenSSL prefix: $OPENSSL_DIR (static)"
+fi
 echo "==> Installing dependencies into the runtime (this fetches native wheels)"
 ( cd "$SERVER_DIR" && "$PY" -m pip install "${PIP_INSTALL_ARGS[@]}" -r "$(native_path "$REQS")" )
+
+# Gate the normal release bundle before import checks or installer creation.
+if [[ "$TRIPLE" == "x86_64-apple-darwin" ]]; then
+  "$PY" "$REPO_ROOT/app/scripts/audit-macos-cryptography.py"
+fi
 
 echo "==> Building + installing flowmap-server wheel"
 WHEEL_DIR="$CACHE_DIR/wheel"
@@ -299,6 +317,14 @@ if [[ "$OS_KIND" == "windows" ]]; then
       rm -f "$link"; cp -f "$real" "$link"
     fi
   done < <(find "$PYRUNTIME" -type l 2>/dev/null || true)
+fi
+
+# Inspect the final macOS runtime, including executables and native wheels.
+# The DMG builder refreshes this override again immediately before Tauri builds.
+if [[ "$OS_KIND" == "macos" ]]; then
+  "$PY" "$REPO_ROOT/app/scripts/macos-runtime-minimum.py" \
+    --runtime "$PYRUNTIME" --config "$REPO_ROOT/app/src-tauri/tauri.conf.json" \
+    --output "$CACHE_DIR/tauri-macos-minimum.json" --report "$CACHE_DIR/macos-runtime-minimum.json"
 fi
 
 # --- 5. Verify the bundled runtime boots the server ---------------------------

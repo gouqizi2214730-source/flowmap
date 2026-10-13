@@ -40,7 +40,9 @@ workspace, and integration with supported public L2 sources.
 - **Desktop packaging:** The Windows server process runs without a console
   window and terminates when the app closes. App, client, and server versions
   are aligned at 1.5.0. Packaging uses locked dependencies and the vendored
-  engine.
+  engine. Intel macOS packages include OpenSSL and do not require Homebrew on
+  the user's Mac. macOS 11 is no longer supported. Each macOS package declares
+  the minimum system version required by its bundled native libraries.
 
 The release workflow builds macOS Apple Silicon/Intel DMGs, Windows x64/ARM64
 MSI and NSIS installers, and Linux x64 DEB packages. Linux AppImage is attempted
