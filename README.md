@@ -14,38 +14,6 @@ equity SYNTH depth (Yahoo 1-minute bars, honestly badged, distinct amber ramp) w
 Alpaca/Finnhub L1 upgrades, and a deterministic `sim:SIM-DEMO` feed that needs no network.
 Anything a session shows can be recorded to parquet on disk and replayed with seek/speed/pause.
 
-## Minimum system requirements
-
-These requirements apply to the packaged [FlowMap 1.5.0 desktop release](https://github.com/nazmiefearmutcu/flowmap/releases/tag/v1.5.0).
-RAM and disk budgets below are sizing guidance; a minimum-hardware performance benchmark has
-not been completed.
-
-| Component | Requirement or baseline | Notes |
-|---|---|---|
-| Windows x64 | Windows 10 22H2 or Windows 11, 64-bit | Requires the [Microsoft Edge WebView2 Runtime](https://learn.microsoft.com/en-us/microsoft-edge/webview2/). The installer downloads it if missing, so that step needs internet access. |
-| Windows ARM64 | Windows 11 on ARM | Use the native ARM64 installer. This package omits PyArrow; FlowMap's Polars-based Parquet recording remains available. |
-| macOS | macOS 14.0 Sonoma or later, Apple Silicon or Intel | Both 1.5.0 DMGs require 14.0, derived from the bundled native libraries. Choose the DMG matching your CPU. |
-| Linux | x86_64 desktop; Ubuntu 22.04 LTS is the release build and server-smoke baseline | Requires WebKitGTK 4.1, GTK 3 and Ayatana AppIndicator. The `.deb` declares these dependencies; other distributions need compatible system libraries. AppImage also needs [FUSE 2 or extraction](https://github.com/AppImage/AppImageKit/wiki/FUSE). No Linux ARM64 installer is published for 1.5.0. |
-| CPU | Native 64-bit CPU matching the installer; x64 needs AVX2 and the bundled Polars SIMD instructions | The verified Windows x64 runtime also requires FMA and the features listed below. A minimum core count or clock speed has not been benchmarked. |
-| RAM | 8 GB recommended; 16 GB for long history or several sessions | A verified RAM minimum is not established. Memory use grows with session count and history/grid settings. |
-| Graphics | Working WebGL2 in the platform webview | An integrated GPU can be used if its driver provides WebGL2. `EXT_color_buffer_float` enables GPU SUM-mip aggregation; the renderer has a fallback when this extension is absent. No dedicated-GPU or VRAM minimum has been measured. |
-| App storage | Allow 2 GB for the app, plus installer temporary files and WebView2 where needed | Planning budget, not a measured minimum. The verified Windows x64 executable and Python runtime total about 644 MB before filesystem overhead. |
-| Recording storage | Additional writable space; default recording cap is 20 GB | Configurable with `FLOWMAP_RECORDING_GB_CAP`; disable recording with `FLOWMAP_RECORDING_ENABLED=0`. Allow extra space for caches and temporary writes. An SSD is recommended for history access. |
-| Display | Room for a 900 × 600 logical-pixel content area | The desktop window enforces this minimum; its default content size is 1440 × 900. Display scaling and window borders need additional screen space. |
-| Network | HTTPS/WebSocket access to selected data providers; local loopback connections allowed | Live feeds need internet access. `SIM-DEMO` and replay of existing recordings can run offline after installation. |
-| Python / Node.js | No separate installation required for the desktop packages | Python and server dependencies are bundled. Source-development prerequisites are listed in [Quickstart](#quickstart-from-source). |
-
-The verified Windows x64 Polars runtime requires SSE3, SSSE3, SSE4.1, SSE4.2, POPCNT, CMPXCHG16B,
-AVX, AVX2, FMA, BMI1, BMI2, LZCNT, PCLMULQDQ and MOVBE. Legacy CPUs need a different
-runtime build; see the [Polars CPU compatibility guidance](https://docs.pola.rs/user-guide/installation/#legacy-cpu).
-On Apple Silicon, use the native ARM64 DMG.
-
-The [release workflow](.github/workflows/release.yml) verifies native builds and server
-startup. Clean-machine desktop compatibility is not
-certified by these checks. Dependency details: [WebView2 support](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-supported-operating-systems),
-[Windows runtime installation](https://v2.tauri.app/distribute/windows-installer/#webview2-installation-options)
-and [Linux packaging baseline](https://v2.tauri.app/distribute/appimage/).
-
 ## Features
 
 - **Depth heatmap** — per-column bid/ask density on a fixed price grid; three colormaps
@@ -331,3 +299,20 @@ not a public issue.
 ## License
 
 [Apache-2.0](LICENSE).
+
+## Minimum system requirements
+
+| Component | Minimum |
+|---|---|
+| Windows | Windows 10 22H2 / 11 (x64); Windows 11 (ARM64) |
+| macOS | macOS 14.0, Intel or Apple Silicon |
+| Linux | x64; Ubuntu 22.04 LTS release baseline |
+| Processor | 64-bit; x64 needs [AVX2/FMA and Polars SIMD support](https://github.com/pola-rs/polars/blob/py-1.42.1/.github/workflows/release-python.yml) |
+| Memory | Minimum RAM has not been benchmarked |
+| Graphics | WebGL2-compatible GPU |
+| Storage | 2 GB app-space budget, plus recordings |
+| Display | 900 × 600 logical pixels for app content |
+| Network | Internet connection for live feeds |
+
+Windows requires WebView2; Linux requires WebKitGTK 4.1, GTK 3 and Ayatana AppIndicator.
+Storage is a planning allowance; recordings have a configurable 20 GB default cap.
