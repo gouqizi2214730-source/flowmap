@@ -326,7 +326,8 @@ export function capabilityChips(capability: Record<string, unknown> | null | und
   if (!capability) return [];
   const chips: string[] = [];
   const depth = capability.depth;
-  if (typeof depth === 'string') chips.push(depth.toUpperCase());
+  if (capability.depth_provenance === 'recorded-density') chips.push('RECORDED DENSITY');
+  else if (typeof depth === 'string') chips.push(depth.toUpperCase());
   const tape = capability.tape ?? capability.trades;
   if (typeof tape === 'string') chips.push(`TAPE ${tape.toUpperCase()}`);
   const side = capability.trade_side;
@@ -365,6 +366,7 @@ export function capabilityChips(capability: Record<string, unknown> | null | und
  * an inferred or missing aggressor side is a caution step-down on a bare chip.
  */
 export function capabilityChipClass(chip: string): string {
+  if (chip === 'RECORDED DENSITY') return 'cap cap--depth cap--caution';
   if (chip.startsWith('TAPE')) {
     return chip.includes('POLL') ? 'cap cap--tape cap--caution' : 'cap cap--tape';
   }
@@ -389,6 +391,7 @@ function isNoClaimTier(chip: string): boolean {
 
 /** Hover text spelling out what a lower-fidelity chip actually means, or undefined. */
 export function capabilityChipTitle(chip: string): string | undefined {
+  if (chip === 'RECORDED DENSITY') return 'recorded time-weighted density; reconstructed quotes use row centres, not original raw L2 snapshots';
   if (chip.startsWith('TAPE')) {
     return chip.includes('POLL')
       ? 'polled tape — real venue prints, but re-read on a timer rather than streamed, so bursts arrive coalesced'

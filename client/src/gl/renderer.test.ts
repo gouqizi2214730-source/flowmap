@@ -78,12 +78,12 @@ describe('Renderer (fake GL harness)', () => {
   let asyncThrows: Array<() => void>;
   let restoreGetContext: () => void;
 
-  function makeRenderer(capacityColsTarget = 512): { r: Renderer; canvas: HTMLCanvasElement; store: FakeStore } {
+  function makeRenderer(capacityColsTarget = 512, benchmark = false): { r: Renderer; canvas: HTMLCanvasElement; store: FakeStore } {
     const store = makeStore();
     const canvas = document.createElement('canvas');
     const r = new Renderer(canvas, {
       getState: () => store.state as never,
-    }, { capacityColsTarget });
+    }, { capacityColsTarget, benchmark });
     return { r, canvas, store };
   }
 
@@ -93,6 +93,22 @@ describe('Renderer (fake GL harness)', () => {
     expect(cb, 'render loop scheduled a callback').toBeDefined();
     cb!(ts);
   }
+
+  it('classifies history geometry loss separately from stale session omissions', () => {
+    const { r, store } = makeRenderer(512, true);
+    store.emit(makeCol(1, true));
+    const sink = r as unknown as { spliceColumn(column: DepthColumn): void };
+    sink.spliceColumn(makeCol(0, true, ROWS + 1));
+    sink.spliceColumn(makeCol(0, true));
+    r.resetForSession();
+    sink.spliceColumn(makeCol(0, true));
+    const s = r.benchmarkDrain()!;
+    expect(s.counters.historyReceived).toBe(3);
+    expect(s.counters.historyApplied).toBe(1);
+    expect(s.counters['historyDiscarded:rowMismatch']).toBe(1);
+    expect(s.counters['historyOmitted:staleSession']).toBe(1);
+    r.dispose();
+  });
 
   beforeEach(() => {
     gl = makeFakeGL();
@@ -133,6 +149,36 @@ describe('Renderer (fake GL harness)', () => {
     restoreGetContext();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+
+  it.each([false, true])('removes chart BBO when recorded playback or a paused snapshot has no current quote (quoteFirst=%s)', quoteFirst => {
+    const { r, store } = makeRenderer();
+    store.state.capability = { depth: 'L2', depth_provenance: 'recorded-density' };
+    const column = (seq: number, crossed: boolean): void => {
+      const depth = makeCol(seq, true);
+      if (crossed) { depth.ask!.fill(0); depth.ask![2] = 7; }
+      store.emit(depth);
+      store.emit({ ...depth, type: MsgType.BOOK_UPDATE, final: false });
+    };
+    const quote = (seq: number): void => store.emit({ type: MsgType.BBO, ts_ns: BigInt(seq) * BigInt(DT_NS),
+      bid_px: 101.5, bid_sz: 5, ask_px: 102, ask_sz: 7 });
+    column(0, true);
+    expect(r.overlayEffectiveBboForTest()).toBeNull();
+    if (quoteFirst) quote(1);
+    column(1, false);
+    if (!quoteFirst) quote(1);
+    expect(r.overlayEffectiveBboForTest()?.bidPx).toBe(101.5);
+    column(2, true);
+    expect(r.overlayEffectiveBboForTest()).toBeNull();
+    quote(1); // a delayed quote for the previous column cannot bring it back
+    expect(r.overlayEffectiveBboForTest()).toBeNull();
+    if (quoteFirst) quote(3);
+    column(3, false);
+    if (!quoteFirst) quote(3);
+    expect(r.overlayEffectiveBboForTest()?.askPx).toBe(102);
+    r.resetForSession(); column(0, true);
+    expect(r.overlayEffectiveBboForTest()).toBeNull();
+    r.dispose();
   });
 
   // --- B-1: the normalizer folds FINAL columns exactly once --------------------
@@ -238,6 +284,29 @@ describe('Renderer (fake GL harness)', () => {
     store.emit({...book, col_seq: 1, t0_ns: BigInt(DT_NS)});
     expect(r.viewSnapshot.rowOffset).toBe(120);
     expect(r.viewSnapshot.rowScale).toBe(50);
+    r.dispose();
+  });
+
+  it('clears buffers across five live/replay generations with a panned and price-locked live policy', () => {
+    const { r, store } = makeRenderer();
+    const liveT = 1_791_900_000_000_000_000n, replayT = liveT - 3_600_000_000_000n;
+    for (let cycle = 0; cycle < 5; cycle++) {
+      r.setFollowTime(false); r.setPriceFollow('off'); r.resetForSession();
+      store.state.sessionId = `live-${cycle}`;
+      store.state.epochs = new Map([[0, { epoch: 0, tick: 0.5, tick_multiple: 1, dt_ns: DT_NS, p0: 83998, rows: ROWS }]]);
+      store.emit({ ...makeCol(90, true), t0_ns: liveT });
+      r.setViewForTest(80, 4, 2, 4);
+      expect(r.following).toBe(false); expect(r.priceFollow).toBe('off');
+      r.setFollowTime(true); r.setPriceFollow('fit'); r.resetForSession();
+      expect(r.newestColSeq).toBe(-1);
+      store.state.sessionId = `replay-${cycle}`;
+      store.state.epochs = new Map([[0, { epoch: 0, tick: 0.5, tick_multiple: 1, dt_ns: DT_NS, p0: 83473, rows: ROWS }]]);
+      store.emit({ ...makeCol(7, true), t0_ns: replayT });
+      pump(16 + cycle * 16);
+      expect(r.newestColSeq).toBe(7); expect(r.timestampAtColumn(7)).toBe(replayT);
+      expect(r.timeline()?.newestSeq).toBe(7); expect(r.following).toBe(true);
+      expect(r.viewSnapshot.rowScale).toBeGreaterThan(0);
+    }
     r.dispose();
   });
 

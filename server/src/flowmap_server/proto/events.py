@@ -196,10 +196,12 @@ class DepthColumn(msgspec.Struct):
 
 
 class BookUpdate(DepthColumn):
-    """Instantaneous grouped resting size; never a historical density column.
+    """Current grouped resting size, independent of historical column delivery.
 
     Uses the depth payload layout with its own tag. t0_ns is observation time;
     col_seq is only a live grid position. No time integration or recording.
+    With recorded-density replay provenance, carries the current recorded
+    interval unchanged and t0_ns identifies its reconstructed BBO, if available.
     """
 
 

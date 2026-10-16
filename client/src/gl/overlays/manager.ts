@@ -39,7 +39,7 @@ import { GexOverlay } from './gexLevels';
 import { TextLayer } from '../textLayer';
 import type { HeatmapView } from '../heatmap';
 import { rowToPrice as scaleRowToPrice } from '../priceScale';
-import type { BarColumn, BBO, Marker, Trade, GexLevelUpdate } from '../../proto/types';
+import type { BarColumn, BBO, BookUpdate, Marker, Trade, GexLevelUpdate } from '../../proto/types';
 
 /** Everything one overlay frame needs from the renderer. */
 export interface OverlayDrawContext {
@@ -99,6 +99,10 @@ export class OverlayManager {
   /** A real BBO print from the feed (preferred over the L2-derived fallback). */
   private channelBbo: BboState | null = null;
   private hasChannelBbo = false;
+  private channelBboTs: bigint | null = null;
+  private recordedBookTs: bigint | null = null;
+  private recordedDensity = false;
+  private pendingRecordedBbo: BBO | null = null;
 
   constructor(gl: WebGL2RenderingContext, glCanvas: HTMLCanvasElement) {
     this.solid = new SolidBatch(gl);
@@ -190,7 +194,16 @@ export class OverlayManager {
     this.bubbles.add(t);
   }
 
-  onBbo(b: BBO): void {
+  onBbo(b: BBO, recordedDensity = false): void {
+    this.recordedDensity ||= recordedDensity;
+    const ts = BigInt(b.ts_ns);
+    if (this.recordedDensity && ts !== this.recordedBookTs) {
+      if ((this.recordedBookTs === null || ts > this.recordedBookTs)
+        && (this.pendingRecordedBbo === null || ts >= BigInt(this.pendingRecordedBbo.ts_ns))) {
+        this.pendingRecordedBbo = b;
+      }
+      return;
+    }
     this.channelBbo = {
       bidPx: b.bid_px,
       bidSz: b.bid_sz,
@@ -199,6 +212,23 @@ export class OverlayManager {
       source: 'bbo',
     };
     this.hasChannelBbo = true;
+    this.channelBboTs = ts;
+  }
+
+  /** Quotes reconstructed from density belong only to the current interval. */
+  onRecordedBook(book: BookUpdate): void {
+    const ts = BigInt(book.t0_ns);
+    if (this.recordedBookTs !== null && ts < this.recordedBookTs) return;
+    this.recordedDensity = true;
+    this.recordedBookTs = ts;
+    if (this.channelBboTs !== ts) {
+      this.channelBbo = null;
+      this.hasChannelBbo = false;
+      this.channelBboTs = null;
+    }
+    const pending = this.pendingRecordedBbo;
+    if (pending !== null && BigInt(pending.ts_ns) === ts) this.onBbo(pending, true);
+    if (pending !== null && BigInt(pending.ts_ns) <= ts) this.pendingRecordedBbo = null;
   }
 
   onBar(b: BarColumn): void {
@@ -267,6 +297,10 @@ export class OverlayManager {
     this.priceLine.resetCursor();
     this.channelBbo = null;
     this.hasChannelBbo = false;
+    this.channelBboTs = null;
+    this.recordedBookTs = null;
+    this.recordedDensity = false;
+    this.pendingRecordedBbo = null;
   }
 
   /**
@@ -462,6 +496,9 @@ export class OverlayManager {
   /** Channel BBO if the feed carries it, else the L2-derived inside quote. */
   private effectiveBbo(ctx: OverlayDrawContext): BboState | null {
     if (this.hasChannelBbo) return this.channelBbo;
+    // The server omits BBO for overlapping/one-sided recorded density. Do not
+    // reconstruct a second, potentially crossed quote from heatmap extents.
+    if (ctx.capability?.depth_provenance === 'recorded-density') return null;
     const depth = ctx.capability?.depth;
     if (depth !== 'L2' || ctx.price === null || ctx.newestArrays === null) return null;
     const nativePrice = ctx.newestPrice === undefined ? ctx.price : ctx.newestPrice;

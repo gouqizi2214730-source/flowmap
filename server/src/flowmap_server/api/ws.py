@@ -190,8 +190,12 @@ class _Connection:
 
     # -- sending ---------------------------------------------------------------
 
-    async def _send(self, data: bytes) -> None:
+    async def _send(self, data: bytes, expected_session_id: str | None = None) -> None:
         async with self._send_lock:
+            if expected_session_id is not None and (
+                self._session is None or self._session.session_id != expected_session_id
+            ):
+                return
             await asyncio.wait_for(self._ws.send_bytes(data), SEND_TIMEOUT_S)
             # The protected snapshot starts with Hello. Enable keepalive only
             # after that first handshake frame has actually reached the peer.
@@ -201,8 +205,9 @@ class _Connection:
     async def _flush_loop(self) -> None:
         try:
             while True:
+                session_id = getattr(self._session, "session_id", None)
                 for frame in self._client.drain(FLUSH_MAX_BYTES):
-                    await self._send(frame)
+                    await self._send(frame, session_id)
                 await asyncio.sleep(FLUSH_INTERVAL_S)
         except asyncio.CancelledError:
             raise
@@ -317,7 +322,7 @@ class _Connection:
         work = asyncio.create_task(session.handle_history_async(req), name="ws-history-work")
         self._history_work = work
         self._history_response = asyncio.create_task(
-            self._deliver_history(work, session, generation), name="ws-history-response",
+            self._deliver_history(work, session, generation, getattr(session, "session_id", None)), name="ws-history-response",
         )
         work.add_done_callback(self._history_done)
 
@@ -335,13 +340,15 @@ class _Connection:
         if pending is not None:
             self._start_history(*pending)
 
-    async def _deliver_history(self, work: asyncio.Task[bytes], session: Session, generation: int) -> None:
+    async def _deliver_history(self, work: asyncio.Task[bytes], session: Session, generation: int,
+                               session_id: str | None = None) -> None:
         try:
             frame = await asyncio.shield(work)
             async with self._send_lock:
                 # Check AFTER acquiring the send lock: a new Hello can have
                 # replaced the subscription while this response waited to send.
-                if self._closed or session is not self._session or generation != self._history_generation:
+                if (self._closed or session is not self._session or generation != self._history_generation
+                    or (session_id is not None and session.session_id != session_id)):
                     return
                 await asyncio.wait_for(self._ws.send_bytes(frame), SEND_TIMEOUT_S)
         except asyncio.CancelledError:
@@ -411,6 +418,8 @@ class _Connection:
             if self._session is None:
                 logger.debug("%s before Subscribe: ignored", type(ev).__name__)
             else:
+                if isinstance(ev, events.Seek):
+                    self._invalidate_history()
                 self._session.feed_control(ev)
         return True
 

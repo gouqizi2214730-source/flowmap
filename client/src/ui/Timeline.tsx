@@ -18,10 +18,10 @@
  * "LIVE" in a different sense would make the word meaningless.
  *
  * Right: a minimap of the loaded session extent with the current viewport window
- * marked, and — in replay — a seek scrubber over it. Geometry is polled off the
- * renderer at ≤5 Hz (never per-frame / per-column), so this stays clear of the
- * GL loop and the React high-frequency path; `following` and the behind-readout
- * ride that SAME poll rather than adding a timer.
+ * marked, and — in replay — a seek scrubber over it. The window follows drawn
+ * view notifications through a cheap DOM writer. Extent, playhead, `following`
+ * and the behind-readout share a ≤4 Hz poll, keeping React and time mapping off
+ * the renderer's high-frequency path.
  *
  * **Attach honesty (QA11 H1/H2/M1/M2).** The pill, time readout and controls
  * describe the CURRENT subscription only once it has actually ATTACHED — a
@@ -56,7 +56,7 @@ import {
 import { closeReasonText } from './ReconnectBanner';
 
 /** Minimap poll interval (ms). */
-const POLL_MS = 200;
+const POLL_MS = 250;
 
 interface MinimapGeom {
   leftPct: number;
@@ -118,11 +118,12 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   const status = useFlowMapStore((s) => s.status);
   const sessionId = useFlowMapStore((s) => s.sessionId);
   const lastClose = useFlowMapStore((s) => s.lastClose);
+  const playback = useFlowMapStore((s) => s.replayPlayback);
 
   const [geom, setGeom] = useState<MinimapGeom>(EMPTY_GEOM);
   const [scrub, setScrub] = useState(0); // 0..1000 scrubber position (replay)
   // Camera follow state + how far behind the live edge it sits, from the SAME
-  // ≤5 Hz poll as the minimap (a plain boolean getter and a subtraction).
+  // ≤4 Hz poll as the extent (a plain boolean getter and a subtraction).
   const [following, setFollowing] = useState(true);
   const [behind, setBehind] = useState('');
   const geomRef = useRef<MinimapGeom>(EMPTY_GEOM);
@@ -130,14 +131,16 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   const seekTimerRef = useRef<number | null>(null); // trailing-throttle handle
   const pendingFracRef = useRef(0); // latest scrub fraction awaiting a seek
   const pillRef = useRef<HTMLSpanElement | null>(null);
+  const windowRef = useRef<HTMLDivElement | null>(null);
   const isReplay = mode === 'replay';
 
-  // Timeline geometry refresh: reads the renderer's timeline() snapshot and
-  // updates the minimap window / playhead / behind-label through the guarded
-  // setters (each skips the re-render when its value did not change).
+  // Coarse refresh owns time mapping, playhead and labels. The drawn window's
+  // left/width are owned only by the DOM writer below, never by React styles.
   const refresh = useCallback((): void => {
     const r = rendererRef.current;
     const tl = r?.timeline();
+    const state = useFlowMapStore.getState();
+    const replay = state.subscription?.mode === 'replay' ? state.replayPlayback : null;
     if (r) setFollowing((f) => (f === r.following ? f : r.following));
     if (!tl) {
       if (geomRef.current !== EMPTY_GEOM) {
@@ -158,6 +161,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
         r?.timestampAtColumn?.(col) ?? anchorT0Ns + BigInt(Math.round((col - anchorSeq) * dtNs));
       extent = { startNs: toNs(tl.oldestSeq), endNs: toNs(tl.newestSeq) };
     }
+    if (state.subscription?.mode === 'replay') extent = replay ? { startNs: replay.startNs, endNs: replay.endNs } : null;
     // How far the right edge trails the newest column, as HH:MM:SS. "Behind"
     // is a WHOLE-column concept: while time-follow is armed, the eased draw
     // edge (gl/renderer stepLiveEdgeGlide) trails the logical frame by a
@@ -176,7 +180,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
     // from its fraction of the session extent — unless the user is scrubbing.
     // Also self-corrects a stale thumb across session/symbol switches.
     if (extent && toNs && !draggingRef.current) {
-      const f = fractionOfExtent(toNs(tl.newestSeq), extent);
+      const f = fractionOfExtent(replay?.positionNs ?? toNs(tl.newestSeq), extent);
       const nv = Math.round(f * 1000);
       setScrub((prev) => (prev === nv ? prev : nv));
     }
@@ -190,7 +194,8 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
     if (
       Math.abs(prev.leftPct - next.leftPct) > 0.3 ||
       Math.abs(prev.widthPct - next.widthPct) > 0.3 ||
-      (prev.extent === null) !== (next.extent === null)
+      (prev.extent === null) !== (next.extent === null) ||
+      prev.extent?.startNs !== next.extent?.startNs || prev.extent?.endNs !== next.extent?.endNs
     ) {
       geomRef.current = next;
       setGeom(next);
@@ -200,26 +205,72 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
-  // The poll is only the FALLBACK (renderer absent, replay seeks, quiet view).
-  // While the view moves — the live-edge glide, a drag, price glides — the
-  // renderer's `onViewChanged` seam drives this refresh per changed frame, so
-  // the minimap window and playhead ride the same motion the chart draws
-  // instead of stepping at the poll cadence (the "bölüm bölüm" updates).
+  // Ref assignment does not render React: the existing poll also owns renderer
+  // attachment. Hot notifications only paint scalar drawn-window geometry.
   useEffect(() => {
-    let unsub: (() => void) | null = null;
-    const id = window.setInterval(() => {
-      const r = rendererRef.current;
-      // The renderer is created after this component mounts, so the FIRST tick
-      // is the earliest moment the subscription can attach (idempotent after).
-      // Test fakes may omit the seam entirely — the poll fallback covers them.
-      if (r && typeof r.onViewChanged === 'function' && unsub === null) {
-        unsub = r.onViewChanged(() => refreshRef.current());
+    let boundRenderer: Renderer | null = null;
+    let unsubscribe: (() => void) | null = null;
+    let disposed = false;
+    let attachment = 0;
+    let paintedWindow: HTMLDivElement | null = null;
+    let paintedLeft = NaN;
+    let paintedWidth = NaN;
+
+    const paintWindow = (r: Renderer | null): void => {
+      const node = windowRef.current;
+      if (!node) return;
+      let leftPct = EMPTY_GEOM.leftPct;
+      let widthPct = EMPTY_GEOM.widthPct;
+      const range = r?.residentRange();
+      if (r && range != null) {
+        const newest = Math.max(range.newest, r.newestColSeq);
+        const view = r.viewSnapshot;
+        const right = view.colOffset + view.colScale;
+        if (!Number.isFinite(newest) || !Number.isFinite(view.colOffset) ||
+            !Number.isFinite(view.colScale) || !Number.isFinite(right)) return;
+        // Match timeline(): session oldest=0, newest=max(resident, appended).
+        const span = Math.max(1, newest);
+        leftPct = clamp01(view.colOffset / span) * 100;
+        const rightPct = clamp01(right / span) * 100;
+        widthPct = Math.max(0.6, rightPct - leftPct);
       }
+      if (node === paintedWindow && leftPct === paintedLeft && widthPct === paintedWidth) return;
+      node.style.left = `${leftPct}%`;
+      node.style.width = `${widthPct}%`;
+      paintedWindow = node;
+      paintedLeft = leftPct;
+      paintedWidth = widthPct;
+    };
+
+    const syncAttachment = (): void => {
+      const r = rendererRef.current;
+      if (r === boundRenderer) return;
+      const token = ++attachment;
+      unsubscribe?.();
+      unsubscribe = null;
+      boundRenderer = r;
+      if (r) {
+        unsubscribe = r.onViewChanged(() => {
+          // The token also rejects a stale callback after A→B→A reattachment.
+          if (disposed || token !== attachment || rendererRef.current !== r) return;
+          paintWindow(r);
+        });
+      }
+    };
+
+    syncAttachment();
+    paintWindow(boundRenderer);
+    const id = window.setInterval(() => {
+      syncAttachment();
       refreshRef.current();
+      paintWindow(boundRenderer);
     }, POLL_MS);
     return () => {
+      disposed = true;
       window.clearInterval(id);
-      unsub?.();
+      unsubscribe?.();
+      unsubscribe = null;
+      boundRenderer = null;
     };
   }, [rendererRef]);
 
@@ -241,7 +292,8 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   // Emit a Seek at the given scrubber fraction. Early-return on a null extent so
   // no bogus Seek{0} (1970 epoch) is sent before a session's timebase is known.
   const commitSeek = (fraction: number): void => {
-    const extent = geomRef.current.extent;
+    const p = useFlowMapStore.getState().replayPlayback;
+    const extent = p ? { startNs: p.startNs, endNs: p.endNs } : geomRef.current.extent;
     if (!extent) return;
     seek(seekTargetNs(fraction, extent));
   };
@@ -257,7 +309,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
       seekTimerRef.current = window.setTimeout(() => {
         seekTimerRef.current = null;
         commitSeek(pendingFracRef.current);
-      }, 120);
+      }, 250);
     }
   };
 
@@ -285,10 +337,10 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   const onGoLiveClick = (): void => {
     pillRef.current?.focus();
     onGoLive();
-    setFollowing(true); // optimistic; the poll confirms within 200 ms
+    setFollowing(true); // optimistic; the poll confirms within 250 ms
   };
 
-  const extent = geom.extent;
+  const extent = isReplay ? (playback ? { startNs: playback.startNs, endNs: playback.endNs } : null) : geom.extent;
   // The transport may describe the CURRENT subscription only once it has
   // attached: before that, every value still belongs to the PREVIOUS session
   // whose frame is on screen (QA11 H1/M1 — the frozen `00:02:07` span under a
@@ -298,8 +350,8 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   const waiting =
     display === 'connecting' || display === 'reconnecting' || display === 'refused';
   const durationNs = extent ? extent.endNs - extent.startNs : 0n;
-  const positionNs = extent ? seekTargetNs(scrub / 1000, extent) - extent.startNs : 0n;
-  const playing = attached && isReplay && !paused;
+  const positionNs = extent ? (playback?.positionNs ?? seekTargetNs(scrub / 1000, extent)) - extent.startNs : 0n;
+  const playing = attached && isReplay && !paused && !playback?.ended;
   const phase = transportPhase(isReplay, paused, following);
   // `—` until an attached session has produced real geometry — never the dead
   // session's span, and never an invented `00:00:00.000` for "nothing yet".
@@ -318,7 +370,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
   let pillText: string;
   switch (display) {
     case 'attached':
-      pillText = phaseLabel(phase, speed);
+      pillText = playback?.ended && isReplay ? `REPLAY ${speed}× ENDED` : phaseLabel(phase, speed);
       break;
     case 'refused':
       pillText = 'REPLAY REFUSED';
@@ -366,7 +418,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
                     : 'play'
                   : 'waiting for the replay to attach'
               }
-              disabled={!attached}
+              disabled={!attached || playback?.ended === true}
               onClick={() => (paused ? resume() : pause())}
             >
               {playing ? '❚❚' : '▶'}
@@ -385,7 +437,7 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
             </button>
           </>
         )}
-        {!following && (
+        {!following && !isReplay && (
           <button
             type="button"
             className="go-live"
@@ -446,9 +498,9 @@ export function Timeline({ rendererRef, onGoLive }: TimelineProps): JSX.Element 
         <div className="minimap__track" data-testid="minimap-track">
           <div className="minimap__extent" style={{ left: 0, width: '100%' }} />
           <div
+            ref={windowRef}
             className="minimap__window"
             data-testid="minimap-window"
-            style={{ left: `${geom.leftPct}%`, width: `${geom.widthPct}%` }}
           />
           {isReplay && (
             <input

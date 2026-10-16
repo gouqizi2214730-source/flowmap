@@ -2,7 +2,6 @@
 
 from datetime import UTC, datetime, timedelta
 import math
-import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -136,7 +135,9 @@ def yahoo(monkeypatch, *, price=100.0, calls=None, puts=None, unavailable=False)
         ticker.option_chain = lambda _: (_ for _ in ()).throw(OSError("offline"))
     else:
         ticker.option_chain = lambda _: SimpleNamespace(calls=Frame(calls or []), puts=Frame(puts or []))
-    monkeypatch.setitem(sys.modules, "yfinance", SimpleNamespace(Ticker=lambda _: ticker))
+    import yfinance as yf
+
+    monkeypatch.setattr(yf, "Ticker", lambda _, **kwargs: ticker)
 
 
 @pytest.mark.parametrize("source_price", [None, float("nan"), 0.0])

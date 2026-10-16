@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from flowmap_server import __version__
 from flowmap_server.config import Config
@@ -169,3 +169,31 @@ async def symbols(q: str = "") -> dict[str, list[dict[str, object]]]:
     Returns the FULL bundled universe (kept backward-compatible: the legacy
     sim/crypto/equity shortlist symbols are all still present)."""
     return {"symbols": filter_directory(current_directory(), q=q)}
+
+
+@router.get("/recordings/availability")
+def recording_availability(request: Request, market: str, symbol: str) -> dict:
+    manager = getattr(request.app.state, "manager", None)
+    recorder = getattr(manager, "_recorder", None)
+    result = recorder.availability(market, symbol) if recorder is not None else {
+        "market": market, "symbol": symbol, "hours": [], "latest_column_ns": None,
+        "coverage": "filename-hour-buckets"}
+    return {**result, "max_columns": getattr(getattr(manager, "_cfg", None), "ring_columns", 0)}
+
+
+@router.get("/recordings/window")
+def recording_window(request: Request, market: str, symbol: str, start_ns: int, end_ns: int) -> dict:
+    """Exact selected range, off-loop, using the same bounded replay read.
+
+    Empty/gap/pruned/oversized selections are visible before replacing LIVE.
+    No density payload is returned; authoritative attach bounds are reasserted.
+    """
+    from flowmap_server.core.session import ReplayUnavailableError
+    manager = getattr(request.app.state, "manager", None)
+    if manager is None or getattr(manager, "_recorder", None) is None:
+        raise HTTPException(404, "no recording store")
+    try:
+        feed, _ = manager._replay_feed_blocking(market, symbol, start_ns, end_ns)
+    except (ReplayUnavailableError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return feed.playback()

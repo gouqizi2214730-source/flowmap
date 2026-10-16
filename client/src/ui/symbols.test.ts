@@ -222,6 +222,12 @@ describe('flattenGroups', () => {
 });
 
 describe('capabilityChips', () => {
+  it('discloses recorded aggregates and reconstructed quotes instead of claiming original L2', () => {
+    expect(capabilityChips({ depth: 'L2', tape: 'tick', depth_provenance: 'recorded-density' }))
+      .toEqual(['RECORDED DENSITY', 'TAPE TICK']);
+    expect(capabilityChipClass('RECORDED DENSITY')).toContain('cap--caution');
+    expect(capabilityChipTitle('RECORDED DENSITY')).toContain('row centres');
+  });
   it('derives honest depth + tape (+ side) chips', () => {
     expect(capabilityChips({ depth: 'L2', tape: 'tick' })).toEqual(['L2', 'TAPE TICK']);
     expect(capabilityChips({ depth: 'SYNTH', tape: 'poll', trade_side: 'inferred' })).toEqual([

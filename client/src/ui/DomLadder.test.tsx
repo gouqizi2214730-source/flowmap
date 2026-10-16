@@ -255,6 +255,21 @@ describe('priceDecimals', () => {
 });
 
 describe('buildLadder', () => {
+  it('preserves overlapping positive BTC density without negative spread or invented inside rows', () => {
+    const params = { ...PARAMS, p0: 60_000, rows: 64 };
+    const bid = new Float32Array(64), ask = new Float32Array(64);
+    bid[54] = 2; ask[49] = 3;
+    const snap: BookSnapshot = { version: 1,
+      book: { epoch: 1, mode: MODE_L2, colSeq: 1, t0Ns: 1n, bid, ask }, bbo: null, trades: [] };
+    const model = buildLadder(snap, params, 'book', 21, null);
+    expect(model.spread).toBeNull();
+    expect(model.rows.some(row => row.isBestBid || row.isBestAsk)).toBe(false);
+    expect(model.rows.find(row => row.row === 54)?.bidSz).toBe(2);
+    expect(model.rows.find(row => row.row === 49)?.askSz).toBe(3);
+    expect(model.rows.every(row => row.price > 60_000)).toBe(true);
+    expect(snap.book?.bid).toBe(bid); expect(snap.book?.ask).toBe(ask);
+  });
+
   it('uses the server nearest bucket for quotes inside a grouped price interval', () => {
     const snap = snapWithBook();
     snap.bbo = { tsNs: 1n, bidPx: 100.39, bidSz: 12, askPx: 100.4, askSz: 9 };
@@ -371,6 +386,44 @@ describe('buildLadder', () => {
 });
 
 describe('DomLadder render', () => {
+  it('labels recorded density and removes inside claims at a crossed paused/playback position', () => {
+    useFlowMapStore.setState({ subscription: { market: 'binance', symbol: 'BTCUSDT', mode: 'replay', band: 'native' },
+      capability: { depth: 'L2', depth_provenance: 'recorded-density' },
+      epochs: new Map([[1, PARAMS]]), gridEpoch: 1 });
+    const book = (t: bigint, crossed: boolean): void => {
+      const { bid, ask } = makeBook();
+      if (crossed) { ask.fill(0); ask[99] = 7; }
+      ingestForTest({ type: 0x23, epoch: 1, col_seq: Number(t), t0_ns: t, mode: MODE_L2, final: false, bid, ask } as never);
+      flushForTest();
+    };
+    book(1n, true);
+    const { container } = render(<DomLadder />);
+    const assertUnavailable = (): void => {
+      expect(container.querySelector('[data-testid="ladder-badge"]')?.textContent).toBe('RECORDED DENSITY');
+      expect(container.querySelector('[data-testid="ladder-spread"]')).toBeNull();
+      expect(container.querySelector('.is-bestbid, .is-bestask')).toBeNull();
+      expect(container.querySelector('[data-testid="ladder-mid"]')).toBeNull();
+      expect(container.querySelector('[data-row="100"]')?.getAttribute('data-bid')).toBe('8.0000');
+      expect(container.querySelector('[data-row="99"]')?.getAttribute('data-ask')).toBe('7.0000');
+    };
+    assertUnavailable();
+    act(() => {
+      book(2n, false);
+      ingestForTest({ type: 6, ts_ns: 2n, bid_px: 100, bid_sz: 8, ask_px: 100.5, ask_sz: 7 } as never);
+      flushForTest();
+    });
+    expect(container.querySelector('[data-testid="ladder-spread"]')?.textContent).toContain('0.5');
+    expect(container.querySelector('.is-bestask')).not.toBeNull();
+    act(() => book(3n, true));
+    assertUnavailable();
+    act(() => {
+      book(4n, false);
+      ingestForTest({ type: 6, ts_ns: 4n, bid_px: 100, bid_sz: 8, ask_px: 100.5, ask_sz: 7 } as never);
+      flushForTest();
+    });
+    expect(container.querySelector('[data-testid="ladder-spread"]')?.textContent).toContain('0.5');
+  });
+
   it('renders price rungs with bid/ask sizes, the L2 badge, and best-row highlight', () => {
     useFlowMapStore.setState({
       capability: { depth: 'L2', tape: 'tick' },

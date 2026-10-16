@@ -34,6 +34,8 @@ export const THROTTLE_MS = LIVE_UPDATE_MS;
 
 /** Current book: the newest DepthColumn's density arrays + identity. */
 export interface BookBuffer {
+  /** Interval density from a recording; not an instantaneous raw L2 book. */
+  recordedDensity?: boolean;
   /** Current resting size, instead of the last settled heatmap average. */
   instant?: boolean;
   epoch: number;
@@ -88,6 +90,8 @@ const EMPTY_TRADES: readonly TapeTrade[] = Object.freeze([]);
 
 let book: BookBuffer | null = null;
 let bbo: BboBuffer | null = null;
+/** One future reconstructed quote, awaiting its matching recorded book. */
+let pendingReplayBbo: BboBuffer | null = null;
 /**
  * Fixed-slot trade ring, NEWEST-LAST with a moving head index: a push is ONE
  * slot write (no Array.shift memmove, no growth, no per-trade garbage) and the
@@ -215,6 +219,8 @@ function handle(msg: StreamMsg): void {
       }
       book = {
         instant,
+        recordedDensity: useFlowMapStore.getState().subscription?.mode === 'replay'
+          && useFlowMapStore.getState().capability?.depth_provenance === 'recorded-density',
         epoch: c.epoch,
         mode: c.mode,
         colSeq: c.col_seq,
@@ -222,6 +228,14 @@ function handle(msg: StreamMsg): void {
         bid: quarantineF32(c.bid),
         ask: c.ask === null ? null : quarantineF32(c.ask),
       };
+      // A reconstructed quote belongs to one recorded interval. No BBO for the
+      // new book means unavailable, rather than permission to retain an older
+      // interval's quote (density can legitimately overlap across both sides).
+      if (book.recordedDensity) {
+        if (bbo?.tsNs !== book.t0Ns) bbo = null;
+        if (pendingReplayBbo?.tsNs === book.t0Ns) bbo = pendingReplayBbo;
+        if (pendingReplayBbo && pendingReplayBbo.tsNs <= book.t0Ns) pendingReplayBbo = null;
+      }
       bump();
       return;
     }
@@ -240,7 +254,7 @@ function handle(msg: StreamMsg): void {
       }
       const tsNs = toBigNs(b.ts_ns);
       if (bbo && tsNs < bbo.tsNs) return;
-      bbo = {
+      const quote = {
         tsNs,
         receivedAtMs: performance.now(),
         bidPx: b.bid_px,
@@ -248,6 +262,16 @@ function handle(msg: StreamMsg): void {
         askPx: b.ask_px,
         askSz: b.ask_sz,
       };
+      const state = useFlowMapStore.getState();
+      const recorded = state.subscription?.mode === 'replay'
+        && state.capability?.depth_provenance === 'recorded-density';
+      if (recorded && (!book || tsNs !== book.t0Ns)) {
+        if ((!book || tsNs > book.t0Ns) && (!pendingReplayBbo || tsNs >= pendingReplayBbo.tsNs)) {
+          pendingReplayBbo = quote;
+        }
+        return;
+      }
+      bbo = quote;
       bump();
       return;
     }
@@ -334,6 +358,7 @@ export function resetForSession(): void {
   bufferSessionKey = bookSessionKey();
   book = null;
   bbo = null;
+  pendingReplayBbo = null;
   clearTradeRing();
   bump();
 }
@@ -368,6 +393,7 @@ export function resetForTest(): void {
   bufferSessionKey = undefined;
   book = null;
   bbo = null;
+  pendingReplayBbo = null;
   clearTradeRing();
   version = 0;
   cachedSnapshot = null;

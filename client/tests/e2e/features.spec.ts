@@ -1,4 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
+import { expectEmptyPickerAndCancel, openRecordedReplayPicker, seedReplayLocale } from './replayPicker';
 
 /**
  * Campaign 4 (lane E1) — end-to-end coverage for the features shipped by lane
@@ -272,52 +273,26 @@ test('alerts: typed level fires deterministically, fired state + marker visible'
 });
 
 // ---------------------------------------------------------------------------
-// 3. Replay-mode alert guard (honest fallback when replay is unavailable)
+// 3. Empty recorded-window picker (replay alert-guard coverage limitation)
 // ---------------------------------------------------------------------------
 
-test('replay: unavailable fallback asserted; replay alert-guard marked skipped', async ({
+test('replay: empty picker preserves LIVE; replay alert-guard coverage limitation recorded', async ({
   page,
 }) => {
   test.setTimeout(120_000);
   await seedStorage(page);
+  await seedReplayLocale(page);
   await bootLive(page);
 
-  // Recording is DISABLED in the e2e config (FLOWMAP_RECORDING_ENABLED=0), so
-  // the server is expected to refuse the replay subscribe (close 1003) and the
-  // client must surface the honest badge + fall back to LIVE.
-  await page.locator('[data-testid="mode-replay"]').click();
-  const refused = await page
-    .waitForSelector('[data-testid="replay-unavailable"]', { timeout: 15_000 })
-    .then(() => true)
-    .catch(() => false);
-
-  if (refused) {
-    await expect.poll(async () => (await storeSubscription(page))?.mode, { timeout: 15_000 }).toBe(
-      'live',
-    );
-    await expect(page.locator('[data-testid="replay-unavailable"]')).toBeVisible();
-    // SKIPPED (honest): the P7 guard (alerts not evaluated while mode=replay)
-    // cannot be entered without a replayable recording, which this harness
-    // deliberately disables. The guard itself is pinned by C1's unit tests
-    // (PriceAlerts.test.tsx replay no-fire case).
-    test.info().annotations.push({
-      type: 'skip',
-      description:
-        'P7 replay alert-guard assertion SKIPPED: e2e server runs with FLOWMAP_RECORDING_ENABLED=0; honest replay-unavailable fallback asserted instead.',
-    });
-    return;
-  }
-
-  // A replayable recording exists on this server (not the default config):
-  // entering replay is asserted, but the guard needs a controlled crossing the
-  // live replay feed cannot guarantee — mark that sub-assertion skipped.
-  await expect
-    .poll(async () => (await storeSubscription(page))?.mode, { timeout: 15_000 })
-    .toBe('replay');
+  // FLOWMAP_RECORDING_ENABLED=0 means the real picker offers no window. It
+  // keeps the current LIVE session running and never sends a replay Subscribe.
+  await expectEmptyPickerAndCancel(page, await openRecordedReplayPicker(page));
+  // This passing picker test does not enter replay or prove the P7 no-fire
+  // guard. PriceAlerts.test.tsx covers that guard with a deterministic crossing.
   test.info().annotations.push({
-    type: 'skip',
+    type: 'coverage-limitation',
     description:
-      'P7 replay alert-guard scenario SKIPPED: replay was available but no deterministic crossing can be injected into a real replay feed; honest-mode assertion performed instead.',
+      'P7 replay-only alert no-fire guard is not exercised: browser server uses FLOWMAP_RECORDING_ENABLED=0. Empty-picker/LIVE/cancel contract passed; deterministic guard coverage is in PriceAlerts.test.tsx.',
   });
 });
 

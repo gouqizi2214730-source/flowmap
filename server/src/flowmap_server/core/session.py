@@ -701,6 +701,8 @@ class Session:
         must not leak back into the feed descriptor."""
         cap: dict[str, object] = dict(self._feed.capability)
         cap["replay"] = True
+        if isinstance(self._feed, ReplayFeed):
+            cap["playback"] = self._feed.playback()
         if self._history_reconstructed:
             cap["history"] = "reconstructed"
         if self._recorder_root is not None:
@@ -1089,6 +1091,89 @@ class Session:
         ctrl = getattr(self._feed, "control", None)
         if ctrl is not None:
             ctrl(ev)
+            if isinstance(self._feed, ReplayFeed):
+                if isinstance(ev, events.Seek):
+                    self._reset_replay_at(self._feed._cursor)
+                else:
+                    self._publish_replay_status()
+
+    def _reset_replay_at(self, i: int) -> None:
+        """One synchronous generation boundary, including queued wire frames."""
+        feed = self._feed
+        assert isinstance(feed, ReplayFeed)
+        previous_id = self.session_id
+        self.session_id = f"{feed.market}:{feed.symbol}:replay:{uuid.uuid4().hex[:12]}"
+        if self._stats is not None:
+            self._stats.forget_session(previous_id)
+            self._stats.note_session(self.session_id)
+        self._grid.reset_replay()
+        self._enc_cache.clear()
+        self._overview_cache = OverviewCache()
+        self._last_col_seq = None
+        self._tape.clear()
+        self._markers.clear()
+        self._bbo = self._instant_book = None
+        for client in self._clients:
+            while len(client):
+                client.drain(2**31)
+        # A small recorded context makes a paused seek useful immediately.
+        # These are actual intervals, never an old book integrated through gaps.
+        first = max(0, i - 63)
+        for j in range(first, i + 1):
+            self._on_replay_book(feed.snapshot_at(j), broadcast=False)
+        # Consume the displayed interval exactly once. Its authoritative bar
+        # already includes its trades; tape is populated without integrating it.
+        for j in range(first, i + 1):
+            for ev in feed._by_t0.get(feed._t0s[j], ()):
+                if isinstance(ev, events.Trade):
+                    self._tape.append(ev)
+                elif isinstance(ev, events.Marker):
+                    self._markers.append(ev)
+        feed._cursor = i + 1
+        for client in self._clients:
+            for frame in self._snapshot_frames():
+                client.offer(frame, col_msg=False, protected=True)
+
+    def _publish_replay_status(self) -> None:
+        latency_ms, skew_ms = self._conn_latency_skew()
+        self._broadcast(wire.encode(events.Status(feed_state=self._feed_state,
+                        capability=self._capability(), latency_ms=latency_ms,
+                        clock_skew_ms=skew_ms)), col=False)
+
+    def _on_replay_book(self, ev: BookState, *, broadcast: bool = True) -> None:
+        feed = self._feed
+        assert isinstance(feed, ReplayFeed)
+        if ev.revision != feed.generation:
+            return
+        i = feed.index_at(ev.ts_ns)
+        source = feed._cols[i]
+        ep = feed._epochs[source.epoch]
+        old_epoch = self._grid._epoch
+        col = self._grid.install_replay_column(source, ep, i)
+        feed.acknowledge(i)
+        self._last_col_seq = i
+        self._bbo = None
+        if len(ev.bid_px) and len(ev.ask_px):
+            bi, ai = int(np.argmax(ev.bid_px)), int(np.argmin(ev.ask_px))
+            if ev.ask_px[ai] >= ev.bid_px[bi] > 0:
+                self._bbo = events.BBO(ts_ns=ev.ts_ns, bid_px=float(ev.bid_px[bi]),
+                                      bid_sz=float(ev.bid_sz[bi]), ask_px=float(ev.ask_px[ai]),
+                                      ask_sz=float(ev.ask_sz[ai]))
+        depth = wire.encode(self._grid.to_depth(col))
+        bar = wire.encode(col.bar)
+        self._cache_encoded(i, depth + bar)
+        self._instant_book = wire.encode(msgspec.structs.replace(self._grid.book_update(ev.ts_ns), col_seq=i))
+        if broadcast:
+            if old_epoch != ep.epoch:
+                self._broadcast(wire.encode(events.EpochStart(epoch=ep.epoch, epoch_params=ep)), col=False)
+            self._broadcast(depth, col=True, t0_ns=col.t0_ns)
+            self._broadcast(bar, col=True, t0_ns=col.t0_ns)
+            self._broadcast(self._instant_book, col=False)
+            if self._bbo is not None:
+                self._broadcast(wire.encode(self._bbo), col=False)
+            # Periodic Status publishes playhead at <=4 Hz. End is immediate.
+            if feed.ended:
+                self._publish_replay_status()
 
     async def run(self) -> None:
         """Drain ``feed.events()`` into the grid and broadcast; restart the
@@ -1222,7 +1307,8 @@ class Session:
             if isinstance(ev, BookState):
                 self._on_book(ev)
             elif isinstance(ev, events.Trade):
-                self._grid.on_trade(ev.ts_ns, ev.price, ev.size, ev.side)
+                if not isinstance(self._feed, ReplayFeed):
+                    self._grid.on_trade(ev.ts_ns, ev.price, ev.size, ev.side)
                 self._tape.append(ev)
                 self._record(lambda r, t=ev: r.record_trade(t))
                 self._broadcast(wire.encode(ev), col=False)
@@ -1254,6 +1340,9 @@ class Session:
                 self._flush_recording()
 
     def _on_book(self, ev: BookState) -> None:
+        if isinstance(self._feed, ReplayFeed):
+            self._on_replay_book(ev)
+            return
         # The inside quote comes from raw venue prices, never from a grouped
         # density row. Some connectors deliver depth before their ticker.
         if self._feed.market != "sim" and self._feed.capability.get("depth") in (
@@ -1445,12 +1534,12 @@ class Session:
         clock task, so a quiet source can still expose capture finalization;
         canonical book counters do not fabricate upstream frame counts.
         """
-        if "source_book_events" not in self._feed.capability:
+        if not isinstance(self._feed, ReplayFeed) and "source_book_events" not in self._feed.capability:
             return
         now = self._clock()
         if now < self._next_capability_status_ns:
             return
-        self._next_capability_status_ns = now + CAPABILITY_STATUS_INTERVAL_NS
+        self._next_capability_status_ns = now + (250_000_000 if isinstance(self._feed, ReplayFeed) else CAPABILITY_STATUS_INTERVAL_NS)
         capability = self._capability()
         payload = msgspec.json.encode(capability)
         if payload == self._last_capability_status_payload:
@@ -2244,7 +2333,12 @@ class SessionManager:
             session = Session(
                 f"{sub.market}:{sub.symbol}:{sub.mode}:{uuid.uuid4().hex[:12]}",
                 feed=feed,
-                grid=self._grid_for(feed, band),
+                grid=(Grid(GridCfg(tick=replay_tail.epochs[-1].tick,
+                      tick_multiple=replay_tail.epochs[-1].tick_multiple,
+                      rows=replay_tail.epochs[-1].rows, dt_ns=replay_tail.epochs[-1].dt_ns,
+                      p0=replay_tail.epochs[-1].p0, ring_columns=self._cfg.ring_columns,
+                      mode=events.MODE_L2))
+                      if replay_tail is not None else self._grid_for(feed, band)),
                 clock=self._clock,
                 timer=self._timer,
                 # Live mode only: replay sessions (M3) never self-record.
@@ -2266,6 +2360,9 @@ class SessionManager:
                 # record the window end so the parked-replay freshness check
                 # knows growth past it is expected, not staleness.
                 session.replay_window_end_ns = sub.end_t
+                # First column is visible BEFORE Hello, including a paused or
+                # one-column selection. Same-session reconnect never resets it.
+                session._reset_replay_at(0)
             if self.stats is not None:
                 self.stats.note_session(session.session_id)
             self._sessions[key] = session
@@ -2398,12 +2495,15 @@ class SessionManager:
                 symbol,
                 max_age_ns=max_age_ns,
                 now_ns=now_ns,
-                limit_cols=self._cfg.ring_columns,
+                limit_cols=self._cfg.ring_columns + 1,
                 end_ns=end_t,
             )
         if tail is None or not tail.columns:
             raise ReplayUnavailableError(f"no recording for {market}:{symbol} — replay unavailable")
-        return ReplayFeed(market=market, symbol=symbol, tail=tail), tail
+        if (start_t is not None or end_t is not None) and (tail.truncated or len(tail.columns) > self._cfg.ring_columns):
+            raise ReplayUnavailableError(f"replay window exceeds {self._cfg.ring_columns} columns; choose a shorter interval")
+        return ReplayFeed(market=market, symbol=symbol, tail=tail,
+                          paused=start_t is not None or end_t is not None), tail
 
     async def _recheck_replay_freshness(self, session: Session, sub: events.Subscribe) -> None:
         """Re-validate an existing replay session's recording on re-attach.

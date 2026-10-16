@@ -262,7 +262,10 @@ def _fake_iter(monkeypatch, records: list[OHLCV], seen: list | None = None) -> N
 
     monkeypatch.setattr("crocodile.crypto.client.backfill.iter_backfill", fake)
     # Skip the certifi-hardened aiohttp session: engine defaults, no sockets.
-    monkeypatch.setattr(backfill, "_hardened_backfill", lambda exchange, seg: (None, None))
+    async def hardened(exchange, seg):
+        return None, None
+
+    monkeypatch.setattr(backfill, "_hardened_backfill", hardened)
 
 
 async def test_absent_taker_split_stays_none_not_zero(monkeypatch) -> None:
@@ -339,16 +342,16 @@ async def test_native_candles_falls_back_to_local_ts(monkeypatch) -> None:
 # --- the certifi-hardened Binance session --------------------------------------
 
 
-def test_hardened_backfill_keeps_engine_defaults_off_binance() -> None:
-    assert backfill._hardened_backfill("kraken", "spot") == (None, None)
-    assert backfill._hardened_backfill("okx", "swap") == (None, None)
+async def test_hardened_backfill_keeps_engine_defaults_off_binance() -> None:
+    assert await backfill._hardened_backfill("kraken", "spot") == (None, None)
+    assert await backfill._hardened_backfill("okx", "swap") == (None, None)
 
 
 @pytest.mark.parametrize("seg", ["spot", "usdm", "coinm", "unknown-segment"])
 async def test_hardened_backfill_names_the_right_binance_rest_base(seg: str) -> None:
     """The engine's own wiring points klines at the SPOT base for every segment,
     so a usdm/coinm backfill would silently read spot candles."""
-    bf, session = backfill._hardened_backfill("binance", seg)
+    bf, session = await backfill._hardened_backfill("binance", seg)
     try:
         assert bf is not None and session is not None
         expected = backfill._BINANCE_KLINE_BASE.get(seg, backfill._BINANCE_KLINE_BASE["spot"])

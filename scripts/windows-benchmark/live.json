@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "provenance": "public-live-exchange",
+  "market": "binance-spot",
+  "symbol": "BTCUSDT",
+  "mode": "live",
+  "band": "deep",
+  "seed": 5750,
+  "interaction": { "stepMs": 16.6666666667, "cycleMs": 20000, "description": "continuous bounded pan, wheel zoom and go-live cycles; no performance test mode" },
+  "acceptanceScope": "diagnostic-live-only",
+  "history": { "requiredSeconds": 0, "directory": null, "files": [] },
+  "limitations": ["Public live arrival timing and market activity vary. Raw L2/tape capture replay is not implemented.", "A separately hashed one-hour normalized history fixture is required for the history workload."]
+}

@@ -4,9 +4,9 @@ Serves a symbol's RECORDED session as a paced ``Feed``: every recorded
 column becomes one synthesized :class:`BookState` snapshot at the column's
 ``t0_ns`` (each nonzero density row mapped back to its row price via the
 epoch's scale), with the recorded trades and markers of the same interval.
-The grid then integrates those snapshots exactly like live books, so the
-whole downstream path — ring, mips, snapshots, Hello/EpochStart, recording
-disabled — is the stock live machinery.
+The Session installs the recorded aggregates into the existing Grid ring;
+snapshots supply sparse row-centre quotes without integrating an old book
+through missing intervals. Ring, mips and wire snapshots use the stock path.
 
 Pacing is wall-clock based and controllable mid-stream via :meth:`control`
 (``Seek`` / ``SetSpeed`` / ``Pause`` / ``Resume`` from the WS transport). At
@@ -14,10 +14,9 @@ end-of-recording the feed PARKS instead of ending: a normally-ending feed
 would tear the session down, and a replayed past has no "live" to resume —
 a ``Seek`` backwards rewinds the cursor and iteration continues.
 
-Fidelity note (deliberate): replay resynthesizes BOOK snapshots from
-finalized density columns, so the grid re-integrates them at its own
-cadence. Column-level shape and prices match the recording; within-interval
-microstructure does not. Replay is for study, not tick forensics.
+Fidelity note: density and bars are recorded aggregates, and reconstructed
+quotes use recorded row centres. These are not original raw L2 snapshots;
+within-interval microstructure cannot be recovered from aggregate columns.
 """
 
 from __future__ import annotations
@@ -29,8 +28,7 @@ from collections.abc import AsyncIterator
 
 import numpy as np
 
-from flowmap_server.core.price_scale import scale_of
-from flowmap_server.core.price_scale_np import rows_for_prices
+from flowmap_server.core.price_scale import row_to_price, scale_of
 from flowmap_server.core.record import TailData
 from flowmap_server.feeds.base import BookState, FeedEvent
 from flowmap_server.proto import events
@@ -81,24 +79,32 @@ class ReplayFeed:
     symbol: str
     capability: dict[str, object]
 
-    def __init__(self, *, market: str, symbol: str, tail: TailData, speed: float = 1.0) -> None:
+    def __init__(self, *, market: str, symbol: str, tail: TailData, speed: float = 1.0,
+                 paused: bool = False) -> None:
         self.market = market
         self.symbol = symbol
-        # Honesty: the descriptor states exactly what a replay subscribe
-        # delivers — real recorded depth/tape, synthesized side.
+        # Preserve the legacy depth schema; explicit provenance distinguishes
+        # recorded aggregate density from an original raw L2 book.
         self.capability = {"depth": "L2", "tape": "tick", "trade_side": "exchange", "replay": True}
-        # A replay session's grid is VIRGIN (the recording is re-integrated
-        # through the session grid, never preloaded), so a crypto replay may
-        # adopt the price-adaptive tick at its first synthesized book — a DOGE
-        # replay must not inherit the fixed $0.50 collapse. Sim replays keep
-        # their fixed shape (mid ~100 is exactly what the fallback was built
-        # for); equity replays never reach the crypto grid path.
+        self.capability["depth_provenance"] = "recorded-density"
+        self.capability["quote_provenance"] = "recorded-row-centres"
+        # Legacy Feed consumers retain this hint. Production Session replay
+        # installs immutable recorded epoch geometry directly.
         self.price_adaptive_tick = market != "sim"
 
-        self._cols = sorted(tail.columns, key=lambda c: c.col_seq)
+        self._cols = sorted(tail.columns, key=lambda c: c.t0_ns)
         self._t0s = [c.t0_ns for c in self._cols]
+        self._epochs = {e.epoch: e for e in tail.epochs}
         self._scales = {e.epoch: scale_of(e) for e in tail.epochs}
         self._dts = {e.epoch: e.dt_ns for e in tail.epochs}
+        # Cache only occupied rows, per immutable epoch. No full row geometry
+        # is allocated for every column (BTC recordings contain mostly zeros).
+        self._prices: dict[int, dict[int, float]] = {}
+        self.generation = 0
+        self.position = self._t0s[0]
+        self.ended = False
+        self.start_ns = self._t0s[0]
+        self.end_ns = self._t0s[-1] + self._dts[self._cols[-1].epoch]
 
         # Bucket trades/markers under the column whose interval contains them
         # (greatest t0 <= ts), matching how they were recorded.
@@ -110,12 +116,38 @@ class ReplayFeed:
 
         self._clock = _Clock(self._t0s[0])
         self._clock.set_speed(speed)
+        if paused:
+            self._clock.pause()
+            self._clock.seek(self.start_ns)
         self._cursor = 0
+
+    def playback(self) -> dict[str, object]:
+        # String ns retain precision inside capability JSON (including REST).
+        return {"start_ns": str(self.start_ns), "end_ns": str(self.end_ns),
+                "position_ns": str(self.position), "columns": len(self._cols),
+                "paused": self._clock.paused, "speed": self._clock.speed,
+                "ended": self.ended, "generation": self.generation}
+
+    def index_at(self, t: int) -> int:
+        return min(len(self._cols) - 1, max(0, bisect.bisect_right(self._t0s, t) - 1))
+
+    def snapshot_at(self, i: int) -> BookState:
+        col = self._cols[i]
+        return self._snapshot(col, self._scales[col.epoch])
+
+    def acknowledge(self, i: int) -> None:
+        self.position = self._t0s[i]
+        self.ended = i == len(self._cols) - 1
+        if self.ended:
+            self._clock.pause()
+            self._clock.seek(self.position)
 
     def _bucket(self, ts: int, ev: FeedEvent) -> None:
         i = bisect.bisect_right(self._t0s, ts) - 1
         if i < 0:
             return  # before the first column: nothing to attach it to
+        if ts >= self._t0s[i] + self._dts[self._cols[i].epoch]:
+            return  # in a recording gap / after the terminal interval
         self._by_t0.setdefault(self._t0s[i], []).append(ev)
 
     # -- transport controls ------------------------------------------------------
@@ -123,15 +155,18 @@ class ReplayFeed:
     def control(self, ev: events.Seek | events.SetSpeed | events.Pause | events.Resume) -> None:
         """Apply one replay transport control (called by the session layer)."""
         if isinstance(ev, events.Seek):
-            self._clock.seek(ev.t)
+            self.generation += 1
+            self.ended = False
+            self._clock.seek(self._t0s[self.index_at(ev.t)])
             # Move the cursor to the column whose interval contains t.
-            self._cursor = max(0, bisect.bisect_right(self._t0s, ev.t) - 1)
+            self._cursor = self.index_at(ev.t)
         elif isinstance(ev, events.SetSpeed):
             self._clock.set_speed(ev.x)
         elif isinstance(ev, events.Pause):
             self._clock.pause()
         elif isinstance(ev, events.Resume):
-            self._clock.resume()
+            if not self.ended:
+                self._clock.resume()
 
     # -- stream --------------------------------------------------------------------
 
@@ -149,6 +184,7 @@ class ReplayFeed:
                 await asyncio.sleep(_PARK_POLL_S)
                 continue  # a Seek may have rewound us
             col = self._cols[i]
+            generation = self.generation
             if self._clock.now() < col.t0_ns:
                 # Not due yet (or paused before it): poll — a Pause/Seek may
                 # change the target between ticks.
@@ -160,29 +196,34 @@ class ReplayFeed:
                 yield self._snapshot(col, scale)
 
             for ev in self._by_t0.get(col.t0_ns, ()):
+                if generation != self.generation:
+                    break
                 yield ev
 
             # Advance only if no Seek landed while we were suspended at the
             # yields above: control() owns the cursor then, and blindly
             # writing i+1 would silently swallow a mid-stream seek.
-            if self._cursor == i:
+            if self._cursor == i and generation == self.generation:
                 self._cursor = i + 1
 
     def _snapshot(self, col, scale) -> BookState:
         """Synthesize the column's book snapshot: each nonzero density row is
         one level at that row's price. f16 -> f64 widens losslessly."""
-        bid = np.asarray(col.bid, dtype=np.float64)
-        rows = np.arange(bid.shape[0], dtype=np.float64)
-        px = rows_for_prices(scale, rows)
-        live = np.isfinite(px) & (bid > 0)
-        bid_px = px[live]
-        bid_sz = bid[live]
+        cache = self._prices.setdefault(col.epoch, {})
+        def levels(values):
+            values = np.asarray(values)
+            rows = np.flatnonzero(np.isfinite(values) & (values > 0))
+            for row in rows:
+                key = int(row)
+                if key not in cache:
+                    cache[key] = row_to_price(scale, key)
+            px = np.fromiter((cache[int(r)] for r in rows), dtype=np.float64, count=len(rows))
+            finite = np.isfinite(px)
+            return px[finite], values[rows[finite]].astype(np.float64)
+        bid_px, bid_sz = levels(col.bid)
         ask = col.ask
         if ask is not None:
-            askd = np.asarray(ask, dtype=np.float64)
-            al = np.isfinite(px) & (askd > 0)
-            ask_px = px[al]
-            ask_sz = askd[al]
+            ask_px, ask_sz = levels(ask)
         else:
             ask_px = np.empty(0, dtype=np.float64)
             ask_sz = np.empty(0, dtype=np.float64)
@@ -192,4 +233,6 @@ class ReplayFeed:
             bid_sz=bid_sz,
             ask_px=ask_px,
             ask_sz=ask_sz,
+            revision=self.generation,
+            provenance="recorded-density",
         )

@@ -1,0 +1,15 @@
+.replay-picker__backdrop { position: fixed; inset: 0; z-index: 120; background: #0009; display: grid; place-items: center; padding: 20px; }
+.replay-picker { width: min(520px, 100%); max-height: 90vh; overflow: auto; color: var(--text); background: var(--surface, var(--bg)); border: 1px solid var(--border); border-radius: 8px; padding: 18px; box-shadow: 0 16px 60px #0007; }
+.replay-picker header, .replay-picker footer, .replay-picker__presets { display: flex; align-items: center; gap: 8px; }
+.replay-picker header { justify-content: space-between; }
+.replay-picker h2 { font-size: 15px; margin: 0; }
+.replay-picker p, .replay-picker small { font-size: 12px; line-height: 1.5; color: var(--muted); }
+.replay-picker label { display: grid; gap: 6px; margin-top: 12px; font-size: 12px; }
+.replay-picker input, .replay-picker select, .replay-picker button { padding: 8px; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; }
+.replay-picker select { min-width: 0; width: 100%; }
+.replay-picker__presets { margin-top: 14px; }
+.replay-picker footer { justify-content: flex-end; margin-top: 18px; }
+.replay-picker button { cursor: pointer; }
+.replay-picker button:disabled { opacity: .5; cursor: default; }
+.replay-picker button[aria-pressed=true] { border-color: var(--accent); }
+.replay-picker .replay-picker__error { color: var(--danger, #ff827c); }

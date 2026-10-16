@@ -449,6 +449,56 @@ class Grid:
         self._vwap_num_cum = last.bar.vwap_num_cum
         self._vwap_den_cum = last.bar.vwap_den_cum
 
+    def reset_replay(self) -> None:
+        """Discard replay time and derived state without reallocating the ring."""
+        self._ring_bars[:] = [None] * self._cfg.ring_columns
+        self._count = self._oldest_seq = 0
+        self._cur_idx = self._prev_ts = None
+        self._last_book = None
+        self._acc.fill(0)
+        self._state.fill(0)
+        self._o = self._h = self._l = self._c = self._prev_close = _NAN
+        self._bar_has_trade = False
+        self._vol_buy = self._vol_sell = self._cvd_cum = 0.0
+        self._vwap_num_cum = self._vwap_den_cum = 0.0
+        self._epoch_params.clear()
+
+    def install_replay_column(self, col: FinalizedColumn, ep: EpochParams, seq: int) -> FinalizedColumn:
+        """Install the recorded aggregate directly; it is already finalized.
+
+        Reintegrating a recorded density as raw L2 invents missing intervals,
+        loses the first/terminal column and adds trades twice to recorded CVD.
+        Replay uses its own contiguous local sequence, retaining actual times,
+        recorded epoch geometry and bars. Live ingest is unaffected.
+        """
+        if len(col.bid) != self._cfg.rows or len(col.ask) != self._cfg.rows:
+            raise ValueError("recorded replay row count changed")
+        if self._count == 0:
+            self._oldest_seq = seq
+        self._epoch = ep.epoch
+        self._epoch_params[ep.epoch] = ep
+        self._tick, self._tick_multiple, self._p0 = ep.tick, ep.tick_multiple, ep.p0
+        self._step = ep.tick * ep.tick_multiple
+        self._scale = scale_of(ep)
+        bar = msgspec.structs.replace(col.bar, col_seq=seq)
+        result = FinalizedColumn(epoch=col.epoch, col_seq=seq, t0_ns=col.t0_ns,
+                                 bid=col.bid, ask=col.ask, bar=bar)
+        i = seq % self._cfg.ring_columns
+        packed, scale = self._pack_density(np.stack((col.bid, col.ask)))
+        self._ring[i], self._ring_scale[i] = packed, scale
+        self._ring_epoch[i], self._ring_t0[i], self._ring_seq[i] = col.epoch, col.t0_ns, seq
+        self._ring_bars[i] = bar
+        self._count = seq + 1
+        self._prev_ts = col.t0_ns
+        # No forming interval: the visible right edge is this actual record.
+        self._cur_idx = None
+        self._state[0], self._state[1] = col.bid, col.ask
+        self._o, self._h, self._l, self._c = bar.o, bar.h, bar.l, bar.c
+        self._prev_close = bar.c
+        self._cvd_cum = bar.cvd_cum
+        self._vwap_num_cum, self._vwap_den_cum = bar.vwap_num_cum, bar.vwap_den_cum
+        return result
+
     # -- book / density --------------------------------------------------------
 
     def on_book(

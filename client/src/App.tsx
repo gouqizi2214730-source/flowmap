@@ -51,6 +51,7 @@ import { ShortcutsOverlay } from './ui/ShortcutsOverlay';
 import { Tape } from './ui/Tape';
 import { TimeAxis } from './ui/TimeAxis';
 import { Timeline } from './ui/Timeline';
+import { ReplayPicker } from './ui/ReplayPicker';
 import { Toaster } from './ui/Toaster';
 import { TopBar } from './ui/TopBar';
 import { Watchlist } from './ui/Watchlist';
@@ -198,6 +199,7 @@ export function App() {
     loadSettings(typeof window !== 'undefined' ? window.localStorage : null),
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [replayPicker, setReplayPicker] = useState<{ market: string; symbol: string; band: string } | null>(null);
   const [desk, setDesk] = useState(() => loadDeskPreferences(window.localStorage));
   const t = useT();
   useEffect(() => saveDeskPreferences(window.localStorage, desk), [desk]);
@@ -253,6 +255,41 @@ export function App() {
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
   const prevSettingsRef = useRef(settings);
+  // Keep exact LIVE policies independently of the replay camera. The persisted
+  // price switch is boolean and cannot distinguish fit from track.
+  const liveFollowRef = useRef<{ time: boolean; price: PriceFollow }>({
+    time: settings.follow, price: settings.followPrice ? 'fit' : 'off',
+  });
+
+  useEffect(() => {
+    // Observe generation changes synchronously: Hello and its first snapshot
+    // can share one WS frame, before React effects have a chance to run.
+    return useFlowMapStore.subscribe((state, previous) => {
+      const identityChanged = sessionResetKey(state.subscription) !== sessionResetKey(previous.subscription)
+        || state.sessionRevision !== previous.sessionRevision;
+      const newHello = state.sessionId !== null && state.sessionId !== previous.sessionId;
+      const replayGeneration = newHello && state.subscription?.mode === 'replay';
+      if (identityChanged || replayGeneration) {
+        const r = rendererRef.current;
+        if (identityChanged && previous.subscription?.mode === 'live' && r) {
+          // Canvas keys/gestures can change these just before the picker opens,
+          // before the reconciliation timer. Capture BEFORE replacing them.
+          liveFollowRef.current = { time: r.wantedFollowTime, price: r.priceFollow };
+          const { time, price } = liveFollowRef.current;
+          setSettings(prev => prev.follow === time && prev.followPrice === (price !== 'off')
+            ? prev : { ...prev, follow: time, followPrice: price !== 'off' });
+        }
+        r?.setFollowTime(state.subscription?.mode === 'replay' ? true : liveFollowRef.current.time);
+        r?.setPriceFollow(state.subscription?.mode === 'replay' ? 'fit' : liveFollowRef.current.price);
+        rendererRef.current?.resetForSession();
+        bookStore.resetForSession();
+      } else if (newHello) {
+        bookStore.resetForSession();
+        rendererRef.current?.resetOverlaysForNewSession(state.sessionId ?? undefined);
+      }
+    });
+
+  }, []);
 
   // --- renderer lifecycle (mount once) -----------------------------------------
   useEffect(() => {
@@ -278,6 +315,7 @@ export function App() {
     const panelsMode = params.get('panels') === '1';
     const scrollbackMode = params.get('scrollback') === '1';
     const spyMode = params.get('spy') === '1';
+    const benchmarkMode = (window as unknown as { __FLOWMAP_BENCHMARK__?: boolean }).__FLOWMAP_BENCHMARK__ === true;
     const budgetParam = params.get('budget');
     const rendererOpts = scrollbackMode
       ? { capacityColsTarget: budgetParam ? Number.parseInt(budgetParam, 10) : 512 }
@@ -293,7 +331,7 @@ export function App() {
     // into a silent black screen.
     let renderer: Renderer;
     try {
-      renderer = new Renderer(canvas, useFlowMapStore, rendererOpts);
+      renderer = new Renderer(canvas, useFlowMapStore, { ...rendererOpts, benchmark: benchmarkMode });
       renderer.attachOverlaySurfaces(priceAxisRef.current, timeAxisRef.current);
     } catch (err) {
       setGlError(err instanceof Error ? err.message : String(err));
@@ -354,7 +392,8 @@ export function App() {
       normalizeMode ||
       overlaysMode ||
       panelsMode ||
-      spyMode
+      spyMode ||
+      benchmarkMode
     ) {
       (window as unknown as { __flowmapLive: unknown }).__flowmapLive = {
         renderer,
@@ -393,18 +432,20 @@ export function App() {
       // and each compares against the renderer's LIVE state (a gesture changes
       // the camera without writing settings, so comparing only against the
       // previous settings value would leave the switch showing a stale ON).
-      if (settings.follow !== prevSettingsRef.current.follow && settings.follow !== r.following) {
+      const live = useFlowMapStore.getState().subscription?.mode !== 'replay';
+      if (live && settings.follow !== prevSettingsRef.current.follow && settings.follow !== r.wantedFollowTime) {
         // setFollowTime, not goLive: re-pinning the right edge must not discard
         // the price zoom the user has chosen.
         r.setFollowTime(settings.follow);
       }
-      if (settings.followPrice !== prevSettingsRef.current.followPrice) {
+      if (live && settings.followPrice !== prevSettingsRef.current.followPrice) {
         const wantOn = settings.followPrice;
         // 'track' keeps the user's zoom (recentre-on-drift); never 'fit', which
         // re-frames to the book extent and discards the chosen scale.
         if (wantOn && r.priceFollow === 'off') r.setPriceFollow('track');
         else if (!wantOn && r.priceFollow !== 'off') r.setPriceFollow('off');
       }
+      if (live) liveFollowRef.current = { time: r.wantedFollowTime, price: r.priceFollow };
       // A mid-session history-depth change applies LIVE (every other drawer knob
       // does): pull the newly-chosen span now, bounded to the ring by the prefetch
       // guard. A decrease is a no-op — already-loaded history stays resident.
@@ -418,7 +459,8 @@ export function App() {
     if (settings.priceBand !== prevSettingsRef.current.priceBand) {
       const sub = useFlowMapStore.getState().subscription;
       if (sub) {
-        useFlowMapStore.getState().connectAndSubscribe(sub.market, sub.symbol, sub.mode, settings.priceBand);
+        useFlowMapStore.getState().connectAndSubscribe(sub.market, sub.symbol, sub.mode, settings.priceBand,
+          { startNs: sub.startNs, endNs: sub.endNs });
       }
     }
     prevSettingsRef.current = settings;
@@ -431,20 +473,20 @@ export function App() {
   // re-fits it — all renderer-owned. A ≤4 Hz value-diff reconciliation persists
   // the PRICE axis policy whenever it changes underneath us, so the drawer
   // switch and the next boot can never claim AUTO while the camera is LOCKed
-  // (the reported bug: reload silently re-enabled tracking). It deliberately
-  // does NOT reconcile `follow`: the camera's TIME-follow flag is false both
-  // when the user toggled the policy off AND while merely scrolled back (the
-  // renderer's want* keeps the policy), so only the pill's honest SCROLLED BACK
-  // readout can describe that axis.
+  // (the reported bug: reload silently re-enabled tracking). TIME reconciles
+  // wantedFollowTime, which retains explicit intent while a pan detaches the
+  // camera. Replay navigation never writes these persisted LIVE policies.
   useEffect(() => {
     const id = window.setInterval(() => {
       const r = rendererRef.current;
       if (!r) return;
+      if (useFlowMapStore.getState().subscription?.mode === 'replay') return;
+      liveFollowRef.current = { time: r.wantedFollowTime, price: r.priceFollow };
+      const followPrice = r.priceFollow !== 'off';
+      // Capture before React processes the updater: replay may replace the
+      // renderer policies in the meantime.
+      const follow = r.wantedFollowTime;
       setSettings((prev) => {
-        const followPrice = r.priceFollow !== 'off';
-        // R2-L2: wantedFollowTime is the POLICY (not `following`, which is also
-        // false while merely scrolled back), so canvas F/R now persist too.
-        const follow = r.wantedFollowTime;
         return prev.followPrice === followPrice && prev.follow === follow
           ? prev
           : { ...prev, followPrice, follow };
@@ -453,61 +495,9 @@ export function App() {
     return () => window.clearInterval(id);
   }, []);
 
-  // --- reset the heatmap on an actual grid switch ------------------------------
-  // The DOM ladder + tape read the live book and switch on their own, but the GL
-  // heatmap holds the old symbol's ring + a camera fit to the old price frame, so
-  // on a real switch we tear the renderer's GL state back down to empty (the next
-  // column of the new session rebuilds it, fit to the new price range) and clear
-  // the shared book buffer (so the ladder/tape don't flash the old symbol). Keyed
-  // on `sessionResetKey` (market:symbol:BAND) — NOT sessionId — so a bare
-  // reconnect of the SAME grid (a mode toggle, a transport reconnect) keeps any
-  // scrolled-back history, while a band change, which really does start a new
-  // server session at a possibly different row count, does reset. The FIRST
-  // subscription (the initial mount connect) is skipped: the renderer already
-  // starts empty.
+  // Session generation teardown happens synchronously in the renderer lifecycle.
   const subscription = useFlowMapStore((s) => s.subscription);
   const subKey = sessionResetKey(subscription);
-  // QA7 H1: a refused replay falls back to LIVE on the SAME market:symbol:band,
-  // so `subKey` alone does not change and the reset below would not run — the
-  // renderer would keep the dead session's ring + camera while the replacement
-  // session's columns arrive, leaving the price scale stuck on the epoch's
-  // nominal extent. `sessionRevision` marks that fallback; folding it into the
-  // effect key runs the EXACT teardown + re-arm a symbol switch performs.
-  const sessionRevision = useFlowMapStore((s) => s.sessionRevision);
-  const resetKey = subKey === null ? null : `${subKey}#${sessionRevision}`;
-  const prevSubKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (resetKey === null) return;
-    const prev = prevSubKeyRef.current;
-    prevSubKeyRef.current = resetKey;
-    // Skip the first subscription (nothing to reset) and any no-op re-run.
-    if (prev === null || prev === resetKey) return;
-    rendererRef.current?.resetForSession();
-    bookStore.resetForSession();
-  }, [resetKey]);
-
-  // The reset above fires when we ASK for a new symbol; frames for the old one
-  // are still in flight and land in the freshly-cleared buffers. On a liquid
-  // name the new prints push them out within a second and nobody notices — on a
-  // thin venue (most of the ~104 ccxt venues have quiet pairs) they simply stay,
-  // and the tape shows another instrument's trades at another instrument's
-  // prices indefinitely. `sessionId` changes only when the server's Hello lands
-  // on attach, which IS the moment the stream provably swapped, so clear again
-  // there. Cheap and self-healing: the attach snapshot re-sends the book and the
-  // tape warm-up, so a reconnect refills what this drops.
-  //
-  // CP1/D5: a NEW server session under the SAME reset key (connection drop,
-  // server restart, parked-session expiry) also restarts col_seq at 0 while the
-  // renderer's high-water cursors keep the old value — TRACK/price pill go dead
-  // until a symbol switch. `resetOverlaysForNewSession()` is the cursor-only
-  // rewind (no ring teardown: scrolled-back history survives). Optional-chained
-  // until the renderer lane lands it.
-  const sessionId = useFlowMapStore((s) => s.sessionId);
-  useEffect(() => {
-    if (sessionId === null) return;
-    bookStore.resetForSession();
-    (rendererRef.current as RendererCp1 | null)?.resetOverlaysForNewSession?.(sessionId);
-  }, [sessionId]);
 
   // --- first-launch history prefetch (once per session) ------------------------
   // When the chosen depth is not 'off', wait for the first column (so we know the
@@ -642,6 +632,13 @@ export function App() {
 
   // --- settings patch (merge → state → effect persists + applies) --------------
   const applyPatch = useCallback((patch: Partial<FlowMapSettings>) => {
+    if (useFlowMapStore.getState().subscription?.mode === 'replay') {
+      const { follow, followPrice, ...shared } = patch;
+      if (follow !== undefined) rendererRef.current?.setFollowTime(follow);
+      if (followPrice !== undefined) rendererRef.current?.setPriceFollow(followPrice ? 'track' : 'off');
+      setSettings((prev) => ({ ...prev, ...shared }));
+      return;
+    }
     setSettings((prev) => ({ ...prev, ...patch }));
   }, []);
 
@@ -663,6 +660,10 @@ export function App() {
     // old `?? SIM_MARKET` fallback silently replaced the user's live symbol
     // with sim:SIM-DEMO in any race where the subscription read null.
     if (!sub) return;
+    if (mode === 'replay') {
+      setReplayPicker({ market: sub.market, symbol: sub.symbol, band: sub.band });
+      return;
+    }
     // QA7 H1: a mode toggle is a MODE change on the CURRENT grid, so the band
     // must ride along from the subscription, never from the drawer default. The
     // old `settingsRef.current.priceBand` re-gridded the stream whenever they
@@ -671,6 +672,19 @@ export function App() {
     // QA7 measured right after clicking REPLAY.
     useFlowMapStore.getState().connectAndSubscribe(sub.market, sub.symbol, mode, sub.band);
   }, []);
+
+  const onReplayConfirm = (startNs: bigint, endNs: bigint): void => {
+    if (!replayPicker) return;
+    const state = useFlowMapStore.getState();
+    const sub = state.subscription;
+    if (sub?.mode === 'replay' && sub.market === replayPicker.market && sub.symbol === replayPicker.symbol
+      && sub.startNs === startNs && sub.endNs === endNs) {
+      state.pause(); state.setSpeed(1); state.seek(state.replayPlayback?.startNs ?? startNs);
+    } else {
+      state.connectAndSubscribe(replayPicker.market, replayPicker.symbol, 'replay', replayPicker.band, { startNs, endNs });
+    }
+    setReplayPicker(null);
+  };
 
   // GO LIVE routes through App (not straight to the renderer) so it also re-arms
   // the PERSISTED follow flags. Without that, a user who scrolled back would find
@@ -707,6 +721,7 @@ export function App() {
     r.setPriceFollow('track');
     const repin = r.liveEdgeVisible === false;
     if (repin) r.goLive();
+    if (useFlowMapStore.getState().subscription?.mode === 'replay') return;
     setSettings((prev) => {
       const follow = repin ? true : prev.follow;
       if (prev.followPrice && prev.follow === follow) return prev;
@@ -720,6 +735,7 @@ export function App() {
   // wrote the renderer only: drawer read ON while the camera was LOCKed).
   const onSetPriceFollow = useCallback((mode: PriceFollow) => {
     rendererRef.current?.setPriceFollow(mode);
+    if (useFlowMapStore.getState().subscription?.mode === 'replay') return;
     setSettings((prev) => {
       const followPrice = mode !== 'off';
       return prev.followPrice === followPrice ? prev : { ...prev, followPrice };
@@ -840,7 +856,7 @@ export function App() {
         onChange={applyPatch} onTrack={onTrackPrice} onFit={() => {
           rendererRef.current?.setTimeWindowMs(null);
           rendererRef.current?.setPriceFollow('fit');
-          setSettings(prev => ({ ...prev, followPrice: true }));
+          if (useFlowMapStore.getState().subscription?.mode !== 'replay') setSettings(prev => ({ ...prev, followPrice: true }));
         }} />
 
       <div className="workspace">
@@ -929,10 +945,14 @@ export function App() {
       </div>
 
       <Timeline rendererRef={rendererRef} onGoLive={onGoLive} />
+      {replayPicker && <ReplayPicker market={replayPicker.market} symbol={replayPicker.symbol}
+        onClose={() => setReplayPicker(null)} onConfirm={onReplayConfirm} />}
 
       {settingsOpen && (
         <SettingsDrawer
-          settings={settings}
+          settings={subscription?.mode === 'replay' && rendererRef.current
+            ? { ...settings, follow: rendererRef.current.following, followPrice: rendererRef.current.priceFollow !== 'off' }
+            : settings}
           onChange={applyPatch}
           onClose={() => setSettingsOpen(false)}
         />

@@ -134,6 +134,27 @@ struct ShutdownState(AtomicBool);
 /// Managed so the exit handlers can release the single-instance sentinel.
 struct InstanceState(Mutex<Option<InstanceGuard>>);
 
+const BENCHMARK_IDENTIFIER: &str = "com.nazmiefearmutcu.flowmap.benchmark";
+
+/// An alternate build identity AND an owned absolute profile are required.
+/// Normal builds keep their original app-data, recording and window defaults.
+fn app_data_directory(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if app.config().identifier != BENCHMARK_IDENTIFIER {
+        if std::env::var_os("FLOWMAP_BENCHMARK_PROFILE").is_some() ||
+            std::env::var_os("FLOWMAP_BENCHMARK_OWNER").is_some() {
+            return Err("benchmark environment requires the isolated benchmark build identity".into());
+        }
+        return Ok(app.path().app_data_dir()?);
+    }
+    let path = PathBuf::from(std::env::var("FLOWMAP_BENCHMARK_PROFILE")?);
+    let token = std::env::var("FLOWMAP_BENCHMARK_OWNER")?;
+    if !path.is_absolute() || token.len() < 16 ||
+        std::fs::read_to_string(path.join(".flowmap-benchmark-owner"))? != token {
+        return Err("benchmark requires an absolute owned profile and matching owner token".into());
+    }
+    Ok(path.canonicalize()?)
+}
+
 /// The single-instance guard: an advisory-locked file held open for the whole
 /// process lifetime. The OS drops the lock on exit or crash, so there is no
 /// stale-file takeover logic; on a clean exit `release` also removes the file.
@@ -419,7 +440,7 @@ fn spawn_sidecar(
     let python = resolve_python(app)
         .ok_or("bundled pyruntime not found (expected Contents/Resources/pyruntime)")?;
 
-    let data_dir = app.path().app_data_dir()?;
+    let data_dir = app_data_directory(app)?;
     let recordings = data_dir.join("recordings");
     std::fs::create_dir_all(&recordings)?;
 
@@ -431,6 +452,11 @@ fn spawn_sidecar(
     eprintln!("[flowmap] server log -> {}", log_path.display());
 
     let mut command = Command::new(&python);
+    command.env_remove("FLOWMAP_BENCHMARK_PROVENANCE");
+    if app.config().identifier == BENCHMARK_IDENTIFIER {
+        command.args(["-I", "-B"])
+            .env("FLOWMAP_BENCHMARK_PROVENANCE", data_dir.join("sidecar-provenance.json"));
+    }
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -537,7 +563,7 @@ fn main() {
 
             // Single-instance guard first: two shells would race the recorder's
             // disk-scan part numbering and corrupt each other's recordings.
-            let data_dir = match handle.path().app_data_dir() {
+            let data_dir = match app_data_directory(&handle) {
                 Ok(dir) => dir,
                 Err(err) => fatal_error(
                     "FlowMap failed to start",
@@ -578,17 +604,36 @@ fn main() {
                     &format!("could not launch the bundled FlowMap server: {err}"),
                 ),
             };
+            let benchmark = handle.config().identifier == BENCHMARK_IDENTIFIER;
+            if benchmark {
+                let info = serde_json::json!({
+                    "identifier": BENCHMARK_IDENTIFIER, "rootPid": std::process::id(),
+                    "sidecarPid": child.id(), "profile": data_dir,
+                    "interpreter": resolve_python(&handle),
+                    "webviewCache": data_dir.join("webview-cache"), "serverPort": port,
+                    "recordingEnabled": true,
+                });
+                std::fs::write(data_dir.join("native-info.json"), info.to_string())?;
+            }
             app.manage(SidecarState(Mutex::new(Some(child))));
             app.manage(ShutdownState(AtomicBool::new(false)));
 
             // Inject the absolute server origin before the client JS runs.
-            let init = format!("window.__FLOWMAP_SERVER__ = \"http://127.0.0.1:{port}\";");
-            if let Err(err) = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
+            let init = format!("window.__FLOWMAP_SERVER__ = \"http://127.0.0.1:{port}\"; window.__FLOWMAP_BENCHMARK__ = {benchmark};");
+            let mut window_builder = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                 .title("FlowMap")
                 .inner_size(1440.0, 900.0)
                 .min_inner_size(900.0, 600.0)
-                .initialization_script(&init)
-                .build()
+                .initialization_script(&init);
+            if benchmark {
+                window_builder = window_builder.title("FlowMap Benchmark")
+                    .inner_size(1920.0, 1080.0)
+                    .decorations(false)
+                    .resizable(false)
+                    .shadow(false)
+                    .data_directory(data_dir.join("webview-cache"));
+            }
+            if let Err(err) = window_builder.build()
             {
                 fatal_error(
                     "FlowMap failed to start",

@@ -317,9 +317,9 @@ jobs:
       # The AppImage is a best-effort portable EXTRA. linuxdeploy has to pack the
       # embedded ~500 MB CPython runtime into a squashfs image and fails on it
       # with an opaque "failed to run linuxdeploy" (Tauri swallows its stderr),
-      # while the .deb from the same build is fine. Keeping this non-blocking
-      # means a linuxdeploy problem can never hold back the whole release; the
-      # upload step ships the AppImage only if it was actually produced.
+      # while the .deb from the same build is fine. Keep dry-run builds useful
+      # when this fails; publication still requires all eight installers,
+      # including the AppImage, at the final release-assets gate below.
       #   APPIMAGE_EXTRACT_AND_RUN — linuxdeploy and its plugins ARE AppImages
       #     and mount themselves via FUSE, which the runner cannot provide.
       #   NO_STRIP — linuxdeploy strips every bundled shared object; the CPython
@@ -541,6 +541,17 @@ jobs:
                 ;;
             esac
           done || true
+
+      - name: Require all eight installers before publishing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json assets > release-assets.json
+          python3 scripts/validate_release_assets.py --tag "$TAG" \
+            --checksums SHA256SUMS --assets release-assets.json
 
       - name: Publish the release
         env:

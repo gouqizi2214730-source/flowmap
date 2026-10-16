@@ -66,7 +66,7 @@ async def test_sweep_empty_candidates_is_empty():
 async def test_backfill_session_carries_explicit_total_timeout():
     from flowmap_server.core.backfill import _HTTP_TIMEOUT_S, _hardened_backfill
 
-    bf, session = _hardened_backfill("binance", "usdm")
+    bf, session = await _hardened_backfill("binance", "usdm")
     try:
         assert bf is not None and session is not None
         assert session.timeout.total == _HTTP_TIMEOUT_S

@@ -174,15 +174,21 @@ def calculate_gex(symbol: str, spot: float, contracts: list[OptionContract],
 
 async def fetch_options_and_calculate_gex(symbol: str, spot_price: float | None = None) -> GexResult:
     """Fetch actual Yahoo option inputs; never invent prices, IV or contracts."""
-    loop = asyncio.get_running_loop()
+    def load_runner():
+        from crocodile.equity.providers.yahoo.client import run_yfinance_default_call
 
-    def fetch() -> GexResult:
+        return run_yfinance_default_call
+
+    # Preserve the original worker-side import of pandas/yfinance on a cold call.
+    run_yfinance_default_call = await asyncio.to_thread(load_runner)
+
+    def fetch(session: Any) -> GexResult:
         current_spot = spot_price
         if current_spot is not None and (not _finite(current_spot) or current_spot <= 0):
             return _unavailable(symbol, current_spot, 'invalid supplied spot')
         try:
             import yfinance as yf
-            ticker = yf.Ticker(symbol.upper())
+            ticker = yf.Ticker(symbol.upper(), session=session)
             if current_spot is None:
                 current_spot = float(ticker.fast_info.last_price)
             if not _finite(current_spot) or current_spot <= 0:
@@ -216,4 +222,4 @@ async def fetch_options_and_calculate_gex(symbol: str, spot_price: float | None 
             log.warning('Could not obtain valid option inputs for %s: %s', symbol, exc)
             return _unavailable(symbol, current_spot, 'option source unavailable or invalid')
 
-    return await loop.run_in_executor(None, fetch)
+    return await run_yfinance_default_call(fetch)

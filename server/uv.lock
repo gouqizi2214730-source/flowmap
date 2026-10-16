@@ -363,8 +363,8 @@ wheels = [
 
 [[package]]
 name = "crocodile"
-version = "0.3.1"
-source = { path = "vendor/crocodile-0.3.1-py3-none-any.whl" }
+version = "0.3.2"
+source = { path = "vendor/crocodile-0.3.2-py3-none-any.whl" }
 dependencies = [
     { name = "aiohttp" },
     { name = "beautifulsoup4" },
@@ -383,7 +383,7 @@ dependencies = [
     { name = "yfinance" },
 ]
 wheels = [
-    { filename = "crocodile-0.3.1-py3-none-any.whl", hash = "sha256:e1beefc4c176e54c2a5148880a307141ff8b676c3e183f6ea2a3cae363006aca" },
+    { filename = "crocodile-0.3.2-py3-none-any.whl", hash = "sha256:57c420693a82b1c6ff1c3a75e9025c4820471b3c6c424de3039d0a8968dbfeec" },
 ]
 
 [package.optional-dependencies]
@@ -551,7 +551,7 @@ wheels = [
 
 [[package]]
 name = "flowmap-server"
-version = "1.5.0"
+version = "1.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -578,7 +578,7 @@ dev = [
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "certifi" },
-    { name = "crocodile", extras = ["market"], path = "vendor/crocodile-0.3.1-py3-none-any.whl" },
+    { name = "crocodile", extras = ["market"], path = "vendor/crocodile-0.3.2-py3-none-any.whl" },
     { name = "fastapi", specifier = ">=0.111" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "numpy", specifier = ">=1.26" },

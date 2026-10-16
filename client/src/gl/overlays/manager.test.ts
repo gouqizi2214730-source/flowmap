@@ -14,7 +14,7 @@ import { PriceLine } from './priceLine';
 import { Profile } from './profile';
 import { ViewWorker } from '../viewWorker';
 import type { ViewResult } from '../viewWorkerEngine';
-import type { BarColumn, BBO, Marker, Trade } from '../../proto/types';
+import { MsgType, MODE_L2, type BarColumn, type BBO, type Marker, type Trade } from '../../proto/types';
 
 interface Rec2D {
   ctx: CanvasRenderingContext2D;
@@ -111,6 +111,56 @@ describe('OverlayManager (fake GL + recording 2D)', () => {
     vi.restoreAllMocks();
   });
 
+  it('retires recorded BBO at a new interval and never falls back to crossed density', () => {
+    const cap = { depth: 'L2', depth_provenance: 'recorded-density' };
+    const price = { p0: 60_000, step: .5 };
+    const bid = Float32Array.of(0, 0, 2, 0), crossedAsk = Float32Array.of(0, 3, 0, 0);
+    const book = (t: bigint): void => manager.onRecordedBook({ type: MsgType.BOOK_UPDATE, epoch: 0,
+      col_seq: Number(t), t0_ns: t, mode: MODE_L2, final: false, bid, ask: crossedAsk });
+    const effective = () => manager.effectiveBboForTest(cap, price, { bid, ask: crossedAsk });
+    book(1n); // initially crossed snapshot: no channel, no derived inside
+    expect(effective()).toBeNull();
+    book(2n);
+    manager.onBbo({ type: MsgType.BBO, ts_ns: 2n, bid_px: 60_001, bid_sz: 2, ask_px: 60_001.5, ask_sz: 3 });
+    expect(effective()?.bidPx).toBe(60_001);
+    book(3n);
+    expect(effective()).toBeNull();
+    manager.onBbo({ type: MsgType.BBO, ts_ns: 2n, bid_px: 60_001, bid_sz: 2, ask_px: 60_001.5, ask_sz: 3 });
+    expect(effective()).toBeNull();
+    book(4n);
+    manager.onBbo({ type: MsgType.BBO, ts_ns: 4n, bid_px: 60_002, bid_sz: 2, ask_px: 60_002.5, ask_sz: 3 });
+    expect(effective()?.bidPx).toBe(60_002);
+    manager.reset(); // backward paused seek/new Hello can establish an older interval
+    book(1n);
+    expect(effective()).toBeNull();
+    // Resetting to LIVE removes replay timestamp gating and retains its fallback.
+    manager.reset();
+    expect(manager.effectiveBboForTest({ depth: 'L2' }, price, { bid, ask: Float32Array.of(0, 0, 0, 3) })?.source).toBe('l2');
+  });
+
+  it('keeps BBO-before-book snapshots pending until the current/next recorded timestamp matches', () => {
+    const cap = { depth: 'L2', depth_provenance: 'recorded-density' };
+    const price = { p0: 60_000, step: .5 };
+    const bid = Float32Array.of(0, 2, 0), ask = Float32Array.of(0, 0, 3);
+    const quote = (t: bigint): void => manager.onBbo({ type: MsgType.BBO, ts_ns: t,
+      bid_px: 60_000 + Number(t), bid_sz: 2, ask_px: 60_000.5 + Number(t), ask_sz: 3 }, true);
+    const book = (t: bigint): void => manager.onRecordedBook({ type: MsgType.BOOK_UPDATE,
+      epoch: 0, col_seq: Number(t), t0_ns: t, mode: MODE_L2, final: false, bid, ask });
+    const effective = () => manager.effectiveBboForTest(cap, price, { bid, ask });
+    quote(1n);
+    expect(effective()).toBeNull();
+    book(1n);
+    expect(effective()?.bidPx).toBe(60_001);
+    quote(1n); book(1n);
+    expect(effective()?.bidPx).toBe(60_001);
+    quote(2n);
+    expect(effective()?.bidPx).toBe(60_001);
+    book(2n);
+    expect(effective()?.bidPx).toBe(60_002);
+    book(3n);
+    expect(effective()).toBeNull();
+  });
+
   it('clearInk wipes the text layer and BOTH gutters synchronously (CP3)', () => {
     manager.clearInk();
     expect(harness.rec(textCanvas).clears).toHaveLength(1);
@@ -205,7 +255,7 @@ describe('OverlayManager (fake GL + recording 2D)', () => {
   it('resetCursor() clears the high-water + channel BBO but keeps per-column data', () => {
     const pl = internals().priceLine;
     pl.add(bar(500, 100));
-    manager.onBbo({ bid_px: 1, bid_sz: 1, ask_px: 2, ask_sz: 1 } as unknown as BBO);
+    manager.onBbo({ ts_ns: 1n, bid_px: 1, bid_sz: 1, ask_px: 2, ask_sz: 1 } as unknown as BBO);
     expect(manager.debug().hasChannelBbo).toBe(true);
 
     manager.resetCursor();

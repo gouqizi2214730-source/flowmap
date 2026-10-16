@@ -433,6 +433,30 @@ async def test_replay_engine_streams_recorded_session(port, tmp_path):
             seqs = [c.col_seq for c in finals]
             assert all(b > a for a, b in zip(seqs, seqs[1:]))
 
+            # The terminal aggregate is visible; the server truthfully parks
+            # ended, then a paused backward/forward Seek replaces its generation.
+            async with asyncio.timeout(5):
+                while len(finals) < 12:
+                    await asyncio.sleep(.025)
+            session = next(iter(app.state.manager._sessions.values()))
+            assert session._feed.playback()["ended"]
+            old_id = hellos[-1].session_id
+            for target in (2, 8, 0, 11):
+                hello_count = len(hellos)
+                await ws.send(wire.encode(events.Seek(t=target * DT)))
+                async with asyncio.timeout(5):
+                    while len(hellos) == hello_count:
+                        await asyncio.sleep(.025)
+                hello = hellos[-1]
+                assert hello.session_id != old_id
+                old_id = hello.session_id
+                metadata = hello.capability["playback"]
+                assert metadata["position_ns"] == str(target * DT)
+                assert metadata["paused"] and metadata["speed"] == 10_000
+                assert metadata["ended"] == (target == 11)
+                assert session._grid.history(2**63-1, 1)[0].t0_ns == target * DT
+                assert session._grid.history(2**63-1, 1)[0].bid.sum() > 0
+
             pump_task.cancel()
     finally:
         await _stop_server(app, srv, task)

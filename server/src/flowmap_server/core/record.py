@@ -77,6 +77,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from collections.abc import Iterator
 from datetime import datetime, timezone
@@ -638,6 +639,8 @@ class Recorder:
         # Size/mtime also invalidate replaced legacy/test files safely.
         self._column_time_cache: dict[Path, tuple[int, int, tuple[int, int] | None]] = {}
         self._column_time_lock = threading.Lock()
+        self._availability_cache: dict[tuple[str, str], tuple[float, dict]] = {}
+        self._availability_lock = threading.Lock()
         self.retention_status = {
             "coverage_loss": False,
             "deleted_parts": 0,
@@ -1091,6 +1094,36 @@ class Recorder:
             now_ns=2**62,
             limit_cols=2**31,
         )
+
+    def availability(self, market: str, symbol: str) -> dict[str, object]:
+        """Targeted cached filename buckets, with one exact newest-column probe.
+
+        Called from a worker, on picker open/refresh only. Buckets are evidence
+        of recordings, not continuous minute coverage. Reuses ranged tail IO
+        and its timestamp cache; never decodes depth for the calendar.
+        """
+        key = (market, symbol)
+        with self._availability_lock:
+            cached = self._availability_cache.get(key)
+            if cached is not None and time.monotonic() - cached[0] < 15:
+                return cached[1]
+            directory = self._symbol_dir(market, symbol)
+            paths = list(directory.glob("*-columns-*.parquet")) if self._enabled else []
+            hours = sorted({h for p in paths if _HOUR_KEY_RE.fullmatch(h := _hour_prefix(p))})
+            newest = None
+            # Only the latest readable part's timestamp column is needed for
+            # a useful short default; epoch/depth decoding waits for selection.
+            for path in sorted(paths, key=_by_name, reverse=True):
+                bounds = self._column_time_bounds(path)
+                if bounds is not None:
+                    newest = bounds[1]
+                    break
+            result = {"market": market, "symbol": symbol, "hours": [
+                str(_hour_start_ns(h)) for h in hours], "bucket_ns": "3600000000000",
+                "latest_column_ns": str(newest) if newest is not None else None,
+                "coverage": "filename-hour-buckets", "parts": len(paths)}
+            self._availability_cache[key] = (time.monotonic(), result)
+            return result
 
     def inventory(self) -> list[dict[str, object]]:
         """Read-only recording inventory (backs ``GET /api/recordings``).

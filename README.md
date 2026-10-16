@@ -300,19 +300,18 @@ not a public issue.
 
 [Apache-2.0](LICENSE).
 
-## Minimum system requirements
+## Minimum
+
+Windows minimum remains unverified. CPU/GPU describe measured graphics; the history health end tail is unknown. RAM is estimated from 32 GiB hardware; see [results and limits](docs/windows-minimum-benchmark.md).
 
 | Component | Minimum |
 |---|---|
 | Windows | Windows 10 22H2 / 11 (x64); Windows 11 (ARM64) |
 | macOS | macOS 14.0, Intel or Apple Silicon |
 | Linux | x64; Ubuntu 22.04 LTS release baseline |
-| Processor | 64-bit; x64 needs [AVX2/FMA and Polars SIMD support](https://github.com/pola-rs/polars/blob/py-1.42.1/.github/workflows/release-python.yml) |
-| Memory | Minimum RAM has not been benchmarked |
-| Graphics | WebGL2-compatible GPU |
-| Storage | 2 GB app-space budget, plus recordings |
-| Display | 900 × 600 logical pixels for app content |
+| Processor | 64-bit; x64 AVX2/FMA; measured Ryzen 7 PRO 5750G (2C/4T allocation) |
+| Memory | 8 GiB planning estimate; 32 GiB physically tested |
+| Graphics | WebGL2; measured AMD Oland 1002:6613, 2 GiB DDR3 |
+| Storage | 2 GB app-space allowance, plus recordings (20 GB default cap) |
+| Display | 900 × 600 logical pixels; Windows tested at 1920 × 1080 |
 | Network | Internet connection for live feeds |
-
-Windows requires WebView2; Linux requires WebKitGTK 4.1, GTK 3 and Ayatana AppIndicator.
-Storage is a planning allowance; recordings have a configurable 20 GB default cap.

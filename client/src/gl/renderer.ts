@@ -36,6 +36,7 @@
  */
 
 import { COLS_PER_TILE, TileRing, type ResidentRange } from './tileRing';
+import { BenchmarkMetrics } from './benchmarkMetrics';
 import { densityForScale } from './columnGeometry';
 import { renderProgramsReady, releaseHeatmapProgram } from './heatmapProgram';
 import {
@@ -148,6 +149,8 @@ interface RendererStore {
 }
 
 export interface RendererOptions {
+  /** Raw CPU diagnostics for the isolated Windows benchmark only. */
+  benchmark?: boolean;
   /**
    * Hard-require EXT_color_buffer_float (default false). T5 uses only the
    * array-texture path, which does not need float FBOs; the SUM-mip passes
@@ -305,6 +308,16 @@ export class Renderer {
   private readonly canvas: HTMLCanvasElement;
   private readonly store: RendererStore;
   private readonly opts: Required<RendererOptions>;
+  private readonly benchmark: BenchmarkMetrics | null;
+  private benchmarkInput = (event: Event): void => {
+    if (event instanceof PointerEvent && (event.buttons === 0 || event.type === 'pointerdown')) return;
+    if (event instanceof KeyboardEvent && !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '+', '-', 'f', 'F', 'r', 'R'].includes(event.key)) return;
+    this.benchmark?.input(event.type);
+  };
+  private benchmarkDiscard(col: DepthColumn, reason: string): void {
+    this.benchmark?.count(`${col.final ? 'finalizedDiscarded' : 'partialDiscarded'}:${reason}`);
+  }
+  benchmarkDrain() { return this.benchmark?.drain(this.pendingDepth) ?? null; }
 
   // Rebuilt on `webglcontextrestored`, hence not readonly.
   private ctx: GLContext;
@@ -488,6 +501,8 @@ export class Renderer {
   private priceFitMemo: { lo: number; hi: number; newest: number; rowBottom: number; rowSpan: number } | null =
     null;
   private initialPriceFramed = false;
+  /** Late bars can change hybrid FIT after the last paused snapshot depth. */
+  private barPriceFitPending = false;
   private pendingOverviewFit = false;
   /**
    * The follow policy the USER/settings asked for, re-asserted after every
@@ -590,9 +605,11 @@ export class Renderer {
   private readonly controller: CameraController;
 
   constructor(canvas: HTMLCanvasElement, store: RendererStore, options: RendererOptions = {}) {
+    this.benchmark = options.benchmark ? new BenchmarkMetrics() : null;
     this.canvas = canvas;
     this.store = store;
     this.opts = {
+      benchmark: options.benchmark ?? false,
       requireColorBufferFloat: options.requireColorBufferFloat ?? false,
       capacityColsTarget: options.capacityColsTarget ?? DEFAULT_CAPACITY_COLS,
       columnPx: options.columnPx ?? DEFAULT_COLUMN_PX,
@@ -604,6 +621,9 @@ export class Renderer {
       // Dirty-only render loop: keep the last frame between draws (see file docs).
       preserveDrawingBuffer: true,
     });
+    if (this.benchmark) {
+      for (const kind of ['wheel', 'pointermove', 'keydown']) window.addEventListener(kind, this.benchmarkInput, true);
+    }
     this.lut = createLUTTexture(this.ctx.gl);
 
     // Provisional limits until the first column reveals the row count; follow ON.
@@ -771,6 +791,9 @@ export class Renderer {
   }
 
   dispose(): void {
+    if (this.benchmark) {
+      for (const kind of ['wheel', 'pointermove', 'keydown']) window.removeEventListener(kind, this.benchmarkInput, true);
+    }
     this.normalizer.dispose();
     this.resetOverview();
     this.running = false;
@@ -1190,6 +1213,7 @@ export class Renderer {
   resetForSession(): void {
     this.resetOverview();
     this.presentedSessionId = null;
+    for (const col of this.pendingDepth) this.benchmarkDiscard(col, 'sessionReset');
     this.pendingDepth.length = 0;
     // Close the per-session column gate FIRST, ahead of the lost-context bail:
     // the old session's columns keep arriving whether or not the GL context is
@@ -1229,6 +1253,7 @@ export class Renderer {
     this.priceTarget = null;
     this.priceFitMemo = null;
     this.initialPriceFramed = false;
+    this.barPriceFitPending = false;
     this.camera.priceZoomBounds = null;
     this.camera.priceScale = null;
     // The eased live-edge scroll restarts clean: a new session's first follow
@@ -1319,6 +1344,7 @@ export class Renderer {
     this.priceTarget = null;
     this.priceFitMemo = null;
     this.overlayAnchorSeq = -1;
+    this.barPriceFitPending = false;
     this.overlayAnchorT0Ns = 0n;
     this.overlayAnchorEpoch = 0;
     this.lastPruneOldest = -1;
@@ -1478,6 +1504,11 @@ export class Renderer {
   // --- stream handling ----------------------------------------------------------
 
   private onMessage = (msg: StreamMsg): void => {
+    this.benchmark?.count(`received:${msg.type}`);
+    if (msg.type === MsgType.DEPTH_COL) {
+      this.benchmark?.arrived(msg);
+      this.benchmark?.count(msg.final ? 'finalizedReceived' : 'partialReceived');
+    }
     // The store's fanout invokes every listener with no isolation, so a throw
     // here would break WS dispatch for the whole app. Everything below is
     // guarded: a single malformed message is warned once and dropped while the
@@ -1492,14 +1523,21 @@ export class Renderer {
       // manager only stores into bounded rings/maps here (O(1)); drawing is
       // O(visible) on the next dirty frame.
       switch (msg.type) {
+        case MsgType.BOOK_UPDATE:
+          if (this.store.getState().capability?.depth_provenance !== 'recorded-density') return;
+          this.overlays.onRecordedBook(msg);
+          break;
         case MsgType.TRADE:
           this.overlays.onTrade(msg);
           break;
         case MsgType.BBO:
-          this.overlays.onBbo(msg);
+          this.overlays.onBbo(msg, this.store.getState().capability?.depth_provenance === 'recorded-density');
           break;
         case MsgType.BAR_COL:
           this.overlays.onBar(msg);
+          // Snapshot pairs are depth→bar. Coalesce their price input changes
+          // for the next presentation, including a paused final/only column.
+          if (Number.isFinite(msg.c) && msg.c > 0) this.barPriceFitPending = true;
           break;
         case MsgType.MARKER:
           this.overlays.onMarker(msg);
@@ -1512,6 +1550,7 @@ export class Renderer {
       }
       this.dirty = true;
     } catch (err) {
+      this.benchmark?.count('streamIngestErrors');
       if (!this.streamIngestWarned) {
         this.streamIngestWarned = true;
         console.warn('[flowmap] stream ingest error (suppressed; stream continues):', err);
@@ -1521,7 +1560,10 @@ export class Renderer {
 
   private onDepthColumn(col: DepthColumn): void {
     // A lost context has no valid textures; drop until restore re-fetches.
-    if (this.glLost()) return;
+    if (this.glLost()) {
+      this.benchmarkDiscard(col, 'contextLost');
+      return;
+    }
 
 
     const state = this.store.getState();
@@ -1544,6 +1586,7 @@ export class Renderer {
     });
 
     if (plan.action === 'drop') {
+      this.benchmarkDiscard(col, plan.reason);
       if (plan.reason === 'row-mismatch') {
         console.warn(
           `[flowmap] depth column bid ${col.bid.length} ≠ its epoch's rows ${epochRows}; skipping`,
@@ -1559,11 +1602,14 @@ export class Renderer {
     if (!this.drainingDepth && (!renderProgramsReady(this.ctx.gl, this.ctx.caps.colorBufferFloat) || this.pendingDepth.length > 0)) {
       const last = this.pendingDepth.at(-1);
       if (last && !last.final && last.epoch === col.epoch && last.col_seq === col.col_seq) {
+        this.benchmark?.count('partialReplaced');
         this.pendingDepth[this.pendingDepth.length - 1] = col;
       } else {
         this.pendingDepth.push(col);
         // Bound cold-start staging to the same resident history budget.
-        if (this.pendingDepth.length > this.opts.capacityColsTarget) this.pendingDepth.shift();
+        if (this.pendingDepth.length > this.opts.capacityColsTarget) {
+          this.benchmarkDiscard(this.pendingDepth.shift()!, 'queueOverflow');
+        }
       }
       return;
     }
@@ -1648,6 +1694,7 @@ export class Renderer {
     // column stays on the server and is recoverable on go-live; the resident
     // window keeps tracking the scrolled-back region the loader is filling.
     if (!this.camera.followTime && range !== null && col.col_seq > range.newest + 1) {
+      this.benchmark?.count(col.final ? 'finalizedHistoryOmitted' : 'partialHistoryOmitted');
       return;
     }
 
@@ -1672,6 +1719,7 @@ export class Renderer {
     }
 
     this.writeColumn(col, rows, false, gapZeroed);
+    this.benchmark?.count(col.final ? 'finalizedApplied' : 'partialApplied');
     // The zeroed band's SUM-mip groups must be re-baked or the coarse levels
     // keep summing pre-zero stale members (the append above only baked the
     // post-gap column's own group). Then ask the loader to fetch the dropped
@@ -1711,24 +1759,32 @@ export class Renderer {
    * lands in its true slot and slides the resident window backward.
    */
   private spliceColumn = (col: DepthColumn): void => {
-    if (this.glLost()) return;
+    this.benchmark?.count('historyReceived');
+    if (this.glLost()) { this.benchmark?.count('historyDiscarded:contextLost'); return; }
     // Same session gate as the live path: `resetForSession()` nulls the
     // HistoryLoader, but a request the OLD loader already had in flight still
     // resolves through this bound sink. Never create or rebuild here — a stale
     // history response must not touch the live ring's geometry.
-    if (this.awaitingSession) return;
+    if (this.awaitingSession) { this.benchmark?.count('historyOmitted:staleSession'); return; }
     const ring = this.ring;
-    if (ring === null) return;
+    if (ring === null) { this.benchmark?.count('historyDiscarded:noRing'); return; }
     const params = this.store.getState().epochs.get(col.epoch);
     const rows = params?.rows ?? col.bid.length;
     if (rows !== ring.rows || col.bid.length !== rows) {
+      this.benchmark?.count('historyDiscarded:rowMismatch');
       console.warn(`[flowmap] history column rows ${rows} ≠ ring rows ${ring.rows}; skipping`);
       return;
     }
     // Defer the SUM-mip regen: the loader splices a whole page through this sink
     // synchronously, and one range pass per level per tile layer at page end is
     // ~80× fewer FBO passes than per-column regeneration (survey #6b).
-    this.writeColumn(col, rows, true);
+    try {
+      this.writeColumn(col, rows, true);
+      this.benchmark?.count('historyApplied');
+    } catch (error) {
+      this.benchmark?.count('historyDiscarded:writeError');
+      throw error;
+    }
     this.dirty = true;
   };
 
@@ -2124,12 +2180,17 @@ export class Renderer {
     this.overviewHistory.ensure(this.view, this.newestSeq, ts);
   }
 
-  overviewStats(): { stride: number; capacity: number; buckets: number; inFlight: boolean; requests: number; error: string | null; revision: number; progress: { loaded: number; total: number }; resident: ResidentRange | null } | null {
+  overviewStats(): { stride: number; capacity: number; buckets: number; inFlight: boolean; requests: number; error: string | null; revision: number; progress: { loaded: number; total: number }; resident: ResidentRange | null; timeBounds: { startNs: string; endNs: string } | null } | null {
     const history = this.overviewHistory;
     if (!history || !this.activeOverview()) return null;
+    const slots = this.overviewSurface?.timeMap(this.currentDtNs())?.slots;
+    const timeBounds = slots && slots.t0.length > 0 ? {
+      startNs: BigInt(Math.round(slots.t0[0])).toString(),
+      endNs: (BigInt(Math.round(slots.t0[slots.t0.length - 1])) + BigInt(this.currentDtNs() * history.stride)).toString(),
+    } : null;
     return { stride: history.stride, capacity: this.overviewSurface?.ring.capacityCols ?? 0, buckets: history.cachedBuckets,
       inFlight: history.inFlight, requests: history.requests, error: history.error, revision: this.overviewSurface?.revision ?? 0,
-      progress: history.progress, resident: this.overviewSurface?.ring.residentRange() ?? null };
+      progress: history.progress, resident: this.overviewSurface?.ring.residentRange() ?? null, timeBounds };
   }
 
   /** Current epoch's column interval (ns) for the loader's before_t fallback. */
@@ -2330,6 +2391,20 @@ export class Renderer {
     let rowLo = Infinity;
     let rowHi = -Infinity;
     const scale = this.overlayPriceMap()?.scale;
+    // Hybrid FIT is driven by actual visible bars, with a density-mid fallback.
+    // It does not need a whole density-extent scan, or occupied depth when a
+    // recorded bar already supplies the real price.
+    if (scale !== undefined && scale.kind === 'hybrid') {
+      const prices = this.overlays.priceRange(lo, hi);
+      const mid = this.trackedRowN !== null && isColVisible(this.camera.toView(), this.newestSeq)
+        ? scaleRowToPrice(scale, this.trackedRowN) : null;
+      const visible = prices ?? (mid === null ? null : { low: mid, high: mid });
+      if (visible === null) return false;
+      const bounds = priceOverviewBounds(scale, visible);
+      const low = scalePriceToRow(scale, bounds.low), high = scalePriceToRow(scale, bounds.high);
+      this.camera.setPriceFrame(low, high - low);
+      return true;
+    }
     for (let c = lo; c <= hi; c++) {
       const slot = ((c % cap) + cap) % cap;
       if (this.extentSeq![slot] !== c) continue; // stale slot (see extentSeq)
@@ -2352,20 +2427,6 @@ export class Renderer {
       if (ehi > rowHi) rowHi = ehi;
     }
     if (rowHi < rowLo) return false; // wait for the first real book
-
-    // Deep storage coverage is not a useful trading viewport. Frame the
-    // visible price history and a readable number of depth levels around it.
-    if (scale !== undefined && scale.kind === 'hybrid') {
-      const prices = this.overlays.priceRange(lo, hi);
-      const mid = this.trackedRowN !== null && isColVisible(this.camera.toView(), this.newestSeq)
-        ? scaleRowToPrice(scale, this.trackedRowN) : null;
-      const visible = prices ?? (mid === null ? null : { low: mid, high: mid });
-      if (visible === null) return false;
-      const bounds = priceOverviewBounds(scale, visible);
-      const low = scalePriceToRow(scale, bounds.low), high = scalePriceToRow(scale, bounds.high);
-      this.camera.setPriceFrame(low, high - low);
-      return true;
-    }
 
     const frame = priceFrame(rowLo, rowHi, ring.rows, ROW_PAD_FRACTION, MIN_ROW_PAD, scale);
     this.priceFitMemo = { lo, hi, newest: range.newest, ...frame };
@@ -2435,7 +2496,7 @@ export class Renderer {
     // A scripted perf run owns the camera; never contend with it.
     if (this.perf !== null) return;
     if (this.camera.followPrice !== 'track') return;
-    if (this.trackedRowN === null || this.newestSeq < 0) return;
+    if (this.newestSeq < 0) return;
     // LOGICAL frame (camera), not the eased draw view — the glide's sub-column
     // trail must never read as "scrolled back" and freeze the price glide.
     if (!isColVisible(this.camera.toView(), this.newestSeq)) return;
@@ -2448,6 +2509,7 @@ export class Renderer {
     const liveRow = map !== null && price !== null
       ? priceToPlotRow(mapScale(map), price)
       : this.trackedRowN;
+    if (liveRow === null || !Number.isFinite(liveRow)) return;
     if (map?.scale?.kind === 'hybrid') {
       const scale = map.scale;
       const view = this.camera.toView();
@@ -3110,6 +3172,8 @@ export class Renderer {
 
   private frame = (ts: number): void => {
       if (!this.running) return;
+      const benchmarkStart = this.benchmark ? performance.now() : 0;
+      const benchmarkDraws = this.drawCountN;
       try {
         // A lost context can't draw; wait for `restored` to rebuild GL.
         if (this.glLost()) return;
@@ -3149,6 +3213,19 @@ export class Renderer {
         perf.lastTs = ts;
         this.stepPerf(perf);
         this.dirty = true; // force a redraw every frame while measuring
+      }
+
+      // Consume changed bar prices once, before presenting the frame. Check
+      // the current camera policy here: a lock/pan after arrival owns its frame.
+      // Only the hybrid FIT policy depends on these bar ranges; linear depth
+      // fitting and the time-follow frame stay on their existing paths.
+      if (this.barPriceFitPending && this.ring !== null && !this.awaitingSession) {
+        this.barPriceFitPending = false;
+        if (perf === null && this.camera.followPrice === 'fit'
+          && this.overlayPriceMap()?.scale?.kind === 'hybrid') {
+          this.priceFitMemo = null;
+          if (this.applyPriceFitFrame()) this.initialPriceFramed = true;
+        }
       }
 
       // Price auto-follow glide (O(1): a handful of scalars). No-op unless the
@@ -3237,12 +3314,14 @@ export class Renderer {
       // (re-thrown async so devtools and the e2e "no GL errors" gate still see
       // it) instead of silently disabling the heatmap forever.
       if (!this.frameErrored) {
+        this.benchmark?.count('frameErrors');
         this.frameErrored = true;
         setTimeout(() => {
           throw err;
         }, 0);
       }
     } finally {
+      this.benchmark?.frame(ts, benchmarkStart, performance.now(), this.drawCountN !== benchmarkDraws);
       if (this.running) this.rafId = requestAnimationFrame(this.frame);
     }
   };

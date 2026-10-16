@@ -58,6 +58,8 @@ SPARK_MAX = 64  # cap sparkline points on the wire
 # own, so one hung provider used to hold the whole endpoint. Past the deadline
 # whatever ranked already — partial results, honestly — is served.
 MOVERS_DEADLINE_S = 15.0
+EQUITY_MOVERS_CONCURRENCY = 4
+CRYPTO_MOVERS_CONCURRENCY = 4
 # The movers cache always fetches this many rows (the same clamp /api/movers
 # enforces) and slices per caller: caching the FIRST caller's limit poisoned
 # a later, larger request for a whole TTL (survey-1 #4).
@@ -281,6 +283,8 @@ async def _bounded_quote_sweep(
     fetch: Callable[[str], Awaitable[QuoteData]],
     symbols: Sequence[str],
     deadline_s: float,
+    *,
+    max_in_flight: int | None = None,
 ) -> list[QuoteData | None]:
     """Quote every symbol in *symbols*, bounded by a wall-clock deadline.
 
@@ -289,20 +293,42 @@ async def _bounded_quote_sweep(
     cancelled and ``None`` is reported for them — the movers endpoint serves
     partial, honestly-ranked results instead of hanging. ``_safe_quote``
     already swallows per-fetch errors, so finished tasks carry results.
+    ``max_in_flight`` limits active fetches without scheduling the remaining
+    symbols; absent a limit, callers retain the full original fanout.
     """
     if not symbols:
         return []
-    tasks = [asyncio.ensure_future(_safe_quote(fetch, s)) for s in symbols]
+    if max_in_flight is not None and max_in_flight < 1:
+        raise ValueError("max_in_flight must be positive")
+    results: list[QuoteData | None] = [None] * len(symbols)
+    next_index = 0
+    stopping = False
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + deadline_s
+
+    async def _worker() -> None:
+        nonlocal next_index
+        while not stopping and next_index < len(symbols) and loop.time() < deadline:
+            index = next_index
+            next_index += 1
+            quote = await _safe_quote(fetch, symbols[index])
+            if not stopping and loop.time() < deadline:
+                results[index] = quote
+
+    width = min(len(symbols), max_in_flight or len(symbols))
+    tasks = [asyncio.create_task(_worker()) for _ in range(width)]
     try:
         await asyncio.wait(tasks, timeout=deadline_s)
-    except BaseException:
+    finally:
+        stopping = True
         for t in tasks:
-            t.cancel()
-        raise
-    for t in tasks:
-        if not t.done():
-            t.cancel()
-    return [t.result() if t.done() and not t.cancelled() else None for t in tasks]
+            if not t.done():
+                t.cancel()
+        # Cancellation cannot terminate provider threads. Drain active quotes
+        # so their clients close safely; the deadline stops new work/results,
+        # while already-running blocking I/O may need additional cleanup time.
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return results
 
 
 async def default_movers_fn(market: str, limit: int) -> list[QuoteData]:
@@ -317,11 +343,15 @@ async def default_movers_fn(market: str, limit: int) -> list[QuoteData]:
         candidates = EQUITY_TICKERS[:40]
         fetch = _equity_quote
         mkt = "equity"
+        max_in_flight = EQUITY_MOVERS_CONCURRENCY
     else:
         candidates = CRYPTO_SYMBOLS
         fetch = lambda s: _crypto_quote("binance-spot", s)  # noqa: E731
         mkt = "binance-spot"
-    results = await _bounded_quote_sweep(fetch, candidates, MOVERS_DEADLINE_S)
+        max_in_flight = CRYPTO_MOVERS_CONCURRENCY
+    results = await _bounded_quote_sweep(
+        fetch, candidates, MOVERS_DEADLINE_S, max_in_flight=max_in_flight
+    )
     quotes = [q for q in results if q is not None and q.change_pct is not None]
     quotes.sort(key=lambda q: abs(q.change_pct or 0.0), reverse=True)
     for q in quotes:
@@ -366,10 +396,12 @@ async def _crypto_quote(market: str, symbol: str) -> QuoteData:
 async def _equity_quote(symbol: str) -> QuoteData:
     import datetime
 
-    from crocodile.core.scheduler.calendar import USMarketCalendar
-    from crocodile.equity.providers.yahoo.client import YahooClient
+    from flowmap_server.feeds._yahoo import yahoo_types
 
-    bars = await YahooClient().fetch_intraday_bars(symbol.upper(), "1m")
+    YahooClient, USMarketCalendar = await yahoo_types()
+
+    async with YahooClient() as client:
+        bars = await client.fetch_intraday_bars(symbol.upper(), "1m")
     closes = [float(b.close) for b in bars if b.close is not None]
     now = time.time_ns()
     if not closes:

@@ -27,7 +27,7 @@ import {
   type StreamMsg,
   type SubscribeWindow,
 } from '../net/connection';
-import type { EpochParams, FeedState, HistoryResponse, StreamMode } from '../proto/types';
+import { playbackFromCapability, type ReplayPlayback, type EpochParams, type FeedState, type HistoryResponse, type StreamMode } from '../proto/types';
 
 export interface Subscription {
   market: string;
@@ -67,7 +67,7 @@ export interface Subscription {
  */
 export function sessionResetKey(sub: Subscription | null): string | null {
   if (sub === null) return null;
-  const base = `${sub.market}:${sub.symbol}:${sub.band}`;
+  const base = `${sub.market}:${sub.symbol}:${sub.band}:${sub.mode}`;
   if (sub.startNs == null && sub.endNs == null) return base;
   return `${base}:${sub.startNs ?? ''}-${sub.endNs ?? ''}`;
 }
@@ -103,17 +103,8 @@ export interface FlowMapState {
    * handshake clears it.
    */
   replayUnavailable: boolean;
-  /**
-   * Bumped each time a refused replay subscription causes an AUTOMATIC live
-   * re-subscribe (see `onReplayRefused`). That fallback begins a new server
-   * session but keeps the SAME `market:symbol:band` identity — `sessionResetKey`
-   * deliberately ignores `mode` so a user's live⇄replay toggle keeps
-   * scrolled-back history — so without this counter the App would not run its
-   * symbol-switch reset (GL ring teardown + camera price-fit re-arm) and the
-   * view would stay frozen on the dead session's scale (QA7 H1: the whole book
-   * pancaked onto the epoch's nominal extent). The App composes it into the
-   * reset effect's key; user-initiated toggles never touch it.
-   */
+  /** Legacy revision surface; mode/window identity and replay Hello now reset
+   * buffers directly, including refused-replay fallback. */
   sessionRevision: number;
   /**
    * TERMINAL: the server refused this subscription with a pre-close Status
@@ -131,6 +122,7 @@ export interface FlowMapState {
   /** Replay transport (low-frequency UI state; ignored in live mode). */
   speed: number;
   paused: boolean;
+  replayPlayback: ReplayPlayback | null;
 
   // --- actions ---
   connectAndSubscribe: (
@@ -157,6 +149,7 @@ export interface FlowMapState {
 // --- module-scoped transport (never in React state) ----------------------------
 
 let conn: Connection | null = null;
+let replayEntryPending = false;
 const streamListeners = new Set<(msg: StreamMsg) => void>();
 
 /**
@@ -210,6 +203,7 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
   reconnectAttempts: 0,
   speed: 1,
   paused: false,
+  replayPlayback: null,
 
   connectAndSubscribe(market, symbol, mode = 'live', band = 'native', window) {
     const startNs = window?.startNs ?? null;
@@ -224,7 +218,9 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
           // Hello is a RECONNECT (the first handshake has no drop behind it).
           const wasReconnect =
             get().lastClose !== null || get().reconnectAttempts > 0;
-          const epochs = new Map(get().epochs);
+          const playback = playbackFromCapability(hello.capability);
+          const changed = get().sessionId !== hello.session_id;
+          const epochs = changed ? new Map<number, EpochParams>() : new Map(get().epochs);
           epochs.set(hello.epoch_params.epoch, hello.epoch_params);
           set({
             sessionId: hello.session_id,
@@ -233,6 +229,8 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
             normSeed: hello.norm_seed,
             gridEpoch: hello.grid_epoch,
             epochs,
+            replayPlayback: playback,
+            ...(playback ? { speed: playback.speed, paused: playback.paused } : {}),
             // The handshake completed: whatever drop the banner was counting
             // is over, and its close info is stale.
             reconnectAttempts: 0,
@@ -243,14 +241,16 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
             // instant it is shown. It retires on a NEW replay attempt or a
             // different stream instead (see connectAndSubscribe).
           });
-          // Replay transport state on a RECONNECT: the server reuses the
-          // parked ReplayFeed (GRACE_S=60), whose clock still runs at the
-          // previous speed/pause — a blind reset to "1× playing" would make
-          // the pill describe a transport that doesn't exist. Re-assert the
-          // store's state instead: a reused session confirms it (an echo), a
-          // fresh session gets it re-applied server-side. The socket is up
-          // (Hello arrived), so these commit. A FIRST Hello stays silent.
-          if (wasReconnect && get().subscription?.mode === 'replay') {
+          // User entry resets a reused parked selection to paused beginning.
+          // Network reconnect accepts authoritative state without rewinding;
+          // older servers lacking playback metadata retain the legacy echo.
+          const freshEntry = replayEntryPending;
+          replayEntryPending = false;
+          if (freshEntry && playback && get().subscription?.startNs != null) {
+            get().pause();
+            get().setSpeed(1);
+            get().seek(playback.startNs);
+          } else if (!playback && wasReconnect && get().subscription?.mode === 'replay') {
             get().setSpeed(get().speed);
             if (get().paused) get().pause();
             else get().resume();
@@ -275,6 +275,7 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
           set({ epochs, gridEpoch });
         },
         onStatus: (status) => {
+          const playback = playbackFromCapability(status.capability);
           set({
             feedState: status.feed_state,
             // Only a closed Status carries a next open; a live/degraded Status
@@ -283,6 +284,8 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
             capability: status.capability,
             latencyMs: status.latency_ms,
             clockSkewMs: status.clock_skew_ms,
+            replayPlayback: playback,
+            ...(playback ? { speed: playback.speed, paused: playback.paused } : {}),
           });
         },
         onConnStatus: (status) => set({ status }),
@@ -308,12 +311,8 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
           set({ replayUnavailable: true });
           const sub = get().subscription;
           if (sub && sub.mode === 'replay') {
-            // The fallback re-subscribes the SAME instrument, so the reset key
-            // (market:symbol:band) would not change; bump the revision the App
-            // composes into that key so its symbol-switch reset — the GL ring
-            // teardown + price-fit re-arm — actually runs for this new server
-            // session (QA7 H1).
-            set({ sessionRevision: get().sessionRevision + 1 });
+            // Mode belongs to the reset identity, so LIVE fallback clears the
+            // replay ring and restores the user's live camera policy.
             get().connectAndSubscribe(sub.market, sub.symbol, 'live', sub.band);
           }
         },
@@ -348,6 +347,7 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
       }
       set({
         subscription,
+        replayPlayback: null,
         speed: 1,
         paused: false,
         feedState: null,
@@ -371,6 +371,7 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
         lastClose: null,
         reconnectAttempts: 0,
       });
+      replayEntryPending = mode === 'replay';
       // `replayUnavailable` is deliberately NOT in the reset block: the live
       // fallback below (a mode change) passes through here, and wiping the flag
       // the same instant it is set would hide the refusal from the TopBar. It
@@ -422,6 +423,7 @@ export const useFlowMapStore = create<FlowMapState>((set, get) => ({
   disconnect() {
     conn?.close();
     conn = null;
+    replayEntryPending = false;
     set({ status: 'closed', subscription: null });
   },
 

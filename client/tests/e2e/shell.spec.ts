@@ -3,6 +3,10 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { expect, test, type Page } from '@playwright/test';
+import {
+  controls, expectEmptyPickerAndCancel, expectLiveUnchanged,
+  openRecordedReplayPicker, seedReplayLocale, sessionSnapshot,
+} from './replayPicker';
 
 /**
  * T12 verification — the UI shell (§9) over the real server (playwright.config's
@@ -29,21 +33,35 @@ const SET_SPEED = 0x43;
 const PAUSE = 0x44;
 const RESUME = 0x45;
 
-interface Ctrl {
-  type: number;
-  market?: string;
-  symbol?: string;
-  mode?: string;
-  x?: number;
-  t?: string;
-}
-
-/** The decoded control-frame log the spy tap captured. */
-const controls = (page: Page): Promise<Ctrl[]> =>
-  page.evaluate(() => (window as unknown as { __flowmapControls?: Ctrl[] }).__flowmapControls ?? []);
-
 const storeState = (page: Page): Promise<any> =>
   page.evaluate(() => (window as unknown as { __flowmapLive: any }).__flowmapLive.store.getState());
+
+interface ReplayStoreState {
+  status: string;
+  sessionId: string | null;
+  subscription: { mode: string } | null;
+  paused: boolean;
+  speed: number;
+  replayPlayback: {
+    startNs: bigint; endNs: bigint; columns: number; paused: boolean;
+    speed: number; ended: boolean; generation: number;
+  } | null;
+}
+
+/** Narrow replay metadata only; bigint bounds cross the browser boundary as strings. */
+const replayState = (page: Page) => page.evaluate(() => {
+  const state = (window as unknown as { __flowmapLive: { store: {
+    getState(): ReplayStoreState;
+  } } }).__flowmapLive.store.getState();
+  const p = state.replayPlayback;
+  return {
+    status: state.status, sessionId: state.sessionId, paused: state.paused, speed: state.speed,
+    playback: p && {
+      startNs: p.startNs.toString(), endNs: p.endNs.toString(), columns: p.columns,
+      paused: p.paused, speed: p.speed, ended: p.ended,
+    },
+  };
+});
 
 async function bootLive(page: Page): Promise<string[]> {
   const consoleErrors: string[] = [];
@@ -123,75 +141,151 @@ test('symbol search queries /api/symbols and switching re-subscribes', async ({ 
   expect(log.some((c) => c.type === UNSUBSCRIBE)).toBe(true);
 });
 
-test('replay refused with no recording: honest badge + automatic LIVE fallback', async ({
+test('replay picker with no recordings keeps LIVE running and cancels without subscribing', async ({
   page,
 }) => {
+  await seedReplayLocale(page);
   await bootLive(page);
-
-  // A freshly booted sim session has (at most) seconds of recording — not a
-  // replayable archive — so the server honestly REFUSES the replay subscribe
-  // with the unsupported close (1003, ReplayUnavailableError → _refuse).
-  await page.locator('[data-testid="mode-replay"]').click();
-  // The Subscribe(mode=replay) still goes out.
-  await expect
-    .poll(async () => {
-      const log = await controls(page);
-      return log.some((c) => c.type === SUBSCRIBE && c.mode === 'replay');
-    })
-    .toBe(true);
-
-  // The client must NOT sit in a reconnect loop replaying the same refusal:
-  // it surfaces WHY and falls back to LIVE by itself.
-  await expect
-    .poll(async () => (await storeState(page)).subscription?.mode, {
-      timeout: 15_000,
-    })
-    .toBe('live');
-  await expect(page.locator('[data-testid="replay-unavailable"]')).toBeVisible();
-  await expect(page.locator('[data-testid="replay-unavailable"]')).toContainText(
-    'replay unavailable',
-  );
-  // Back in LIVE: the mode toggle agrees (Live pressed, not Replay).
-  await expect(page.locator('[data-testid="mode-live"]')).toHaveAttribute(
-    'aria-pressed',
-    'true',
-  );
+  await expectEmptyPickerAndCancel(page, await openRecordedReplayPicker(page));
 });
 
 test('replay transport controls (pause/resume/speed/seek) send the correct control messages', async ({
   page,
 }) => {
   test.setTimeout(120_000);
+  await seedReplayLocale(page);
   await bootLive(page);
-
-  // Transport steering needs a REAL replay feed. Boot the session into LIVE and
-  // let the recorder accumulate a replayable window first (recording-enabled
-  // server; FLOWMAP_RECORDING_ENABLED=1), then enter replay.
-  await page.waitForTimeout(20_000);
-  await page.locator('[data-testid="mode-replay"]').click();
-
-  // If the recording still isn't replayable, the honest fallback fires (badge +
-  // live) — skip rather than false-fail; the refusal path is covered above.
-  const refused = await page
-    .waitForSelector('[data-testid="replay-unavailable"]', { timeout: 8_000 })
-    .then(() => true)
-    .catch(() => false);
-  test.skip(refused, 'recording not yet replayable on this fresh session');
-  await expect.poll(async () => (await storeState(page)).subscription?.mode).toBe('replay');
-
-  // F12 contract (2026-09-14): transport controls describe the clock ONLY when
-  // the replay feed is ATTACHED; a disabled control means this stack gave no
-  // replayable recording — skip honestly instead of clicking an inert button.
-  const playBtn = page.locator('[data-testid="transport-play"]');
-  if (!(await playBtn.isEnabled())) {
-    test.skip(true, 'replay transport not attached (no replayable recording on this stack)');
+  const opened = await openRecordedReplayPicker(page);
+  const { picker, availability, before } = opened;
+  if (availability.hours.length === 0) {
+    await expectEmptyPickerAndCancel(page, opened);
+    // The existing transport limitation is explicit only AFTER the real empty
+    // picker/LIVE/cancel contract passes. Failed requests or attachment never skip.
+    test.skip(true, 'positive replay transport requires a recording; default Playwright webServer sets FLOWMAP_RECORDING_ENABLED=0 (empty picker/LIVE contract passed)');
+    return;
   }
 
-  // Pause → Resume via the play button (replay starts playing).
-  await playBtn.click(); // pause
-  await expect.poll(async () => (await storeState(page)).paused).toBe(true);
-  await playBtn.click(); // resume
-  await expect.poll(async () => (await storeState(page)).paused).toBe(false);
+  const hours = picker.getByRole('combobox', { name: 'Recorded dates / hours', exact: true });
+  await expect(hours).toBeVisible();
+  expect(await hours.locator('option').evaluateAll((options) =>
+    options.map((option) => (option as HTMLOptionElement).value).filter(Boolean),
+  )).toEqual(availability.hours);
+  expect(availability.latest_column_ns).toMatch(/^\d+$/);
+  // Keep the picker's latest-anchored defaults; hour boundaries can contain gaps.
+  const start = await picker.getByLabel('Start date and time (UTC)', { exact: true }).inputValue();
+  const end = await picker.getByLabel('End date and time (exclusive) (UTC)', { exact: true }).inputValue();
+  expect(Number.isFinite(new Date(start + 'Z').getTime())).toBe(true);
+  expect(new Date(end + 'Z').getTime()).toBeGreaterThan(new Date(start + 'Z').getTime());
+  const check = picker.getByRole('button', { name: 'Check interval', exact: true });
+  await expect(check).toBeEnabled();
+  const previewResponse = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === '/api/recordings/window'
+      && url.searchParams.get('market') === before.subscription!.market
+      && url.searchParams.get('symbol') === before.subscription!.symbol;
+  });
+  await check.click();
+  const response = await previewResponse;
+  expect(response.ok(), `recording window HTTP ${response.status()}`).toBe(true);
+  const requested = new URL(response.request().url()).searchParams;
+  const requestedStart = requested.get('start_ns');
+  const requestedEnd = requested.get('end_ns');
+  expect(requestedStart).toMatch(/^\d+$/);
+  expect(requestedEnd).toMatch(/^\d+$/);
+  expect(BigInt(requestedEnd!)).toBeGreaterThan(BigInt(requestedStart!));
+  const preview = await response.json() as { start_ns: string; end_ns: string; columns: number };
+  expect(preview.columns).toBeGreaterThan(0);
+  expect(BigInt(preview.end_ns)).toBeGreaterThan(BigInt(preview.start_ns));
+  const actualRange = picker.getByRole('status').filter({ hasText: 'Actual recorded range (UTC):' });
+  await expect(actualRange).toBeVisible();
+  await expect(actualRange).toContainText('Recorded density and bars; quotes use recorded row centres. Missing intervals are not reconstructed.');
+  const confirm = picker.getByRole('button', { name: 'Open paused', exact: true });
+  await expect(confirm).toBeEnabled();
+  await expectLiveUnchanged(page, opened);
+  // Subscribe BEFORE confirmation so even a fast opening Hello/Seek pair is
+  // observed. Outbound startup Seek alone does not prove its new Hello arrived.
+  const startupSessions = await page.evaluateHandle(() => {
+    const store = (window as unknown as { __flowmapLive: { store: {
+      subscribe(listener: (state: ReplayStoreState) => void): () => void;
+    } } }).__flowmapLive.store;
+    const observation: {
+      firstSessionId: string | null; firstGeneration: number | null;
+      completedSessionId: string | null; unsubscribe: () => void;
+    } = {
+      firstSessionId: null, firstGeneration: null, completedSessionId: null,
+      unsubscribe: () => {},
+    };
+    observation.unsubscribe = store.subscribe((state) => {
+      const playback = state.replayPlayback;
+      if (state.subscription?.mode !== 'replay' || !state.sessionId || !playback) return;
+      if (observation.firstSessionId === null) {
+        observation.firstSessionId = state.sessionId;
+        observation.firstGeneration = playback.generation;
+      } else if (state.sessionId !== observation.firstSessionId
+        && playback.generation > observation.firstGeneration!) {
+        observation.completedSessionId = state.sessionId;
+      }
+    });
+    return observation;
+  });
+  await confirm.click();
+  await expect(picker).toHaveCount(0);
+  await expect.poll(() => sessionSnapshot(page)).toMatchObject({
+    status: 'live', subscription: {
+      ...before.subscription, mode: 'replay', startNs: requestedStart, endNs: requestedEnd,
+    },
+  });
+  await expect.poll(async () => (await controls(page)).slice(opened.controlIndex)
+    .filter((c) => c.type === SUBSCRIBE)).toEqual([expect.objectContaining({
+    type: SUBSCRIBE, market: before.subscription!.market, symbol: before.subscription!.symbol,
+    mode: 'replay', band: before.subscription!.band, start_t: requestedStart, end_t: requestedEnd,
+  })]);
+  await expect.poll(() => replayState(page)).toMatchObject({
+    status: 'live', paused: true, speed: 1,
+    playback: {
+      startNs: preview.start_ns, endNs: preview.end_ns, columns: preview.columns,
+      paused: true, speed: 1, ended: false,
+    },
+  });
+  const attached = await replayState(page);
+  expect(attached.sessionId).not.toBeNull();
+  expect(attached.sessionId).not.toBe(before.sessionId);
+  const playBtn = page.getByTestId('transport-play');
+  await expect(playBtn).toBeEnabled();
+  await expect(playBtn).toHaveAttribute('aria-label', 'play');
+  await expect(playBtn).toHaveAttribute('aria-pressed', 'false');
+  await expect(page.getByTestId('transport-state')).toHaveText('REPLAY 1× PAUSED');
+  await expect(page.getByTestId('transport-state')).toHaveAttribute('data-transport', 'attached');
+
+  // First Hello automatically pauses, sets 1× and seeks to the effective start.
+  // Await it before isolating the USER controls, so startup cannot satisfy them.
+  await expect.poll(async () => (await controls(page)).slice(opened.controlIndex)
+    .filter((c) => [PAUSE, SET_SPEED, SEEK].includes(c.type))).toEqual([
+    { type: PAUSE }, { type: SET_SPEED, x: 1 }, { type: SEEK, t: preview.start_ns },
+  ]);
+  await expect.poll(() => startupSessions.evaluate((observation) =>
+    observation.completedSessionId)).not.toBeNull();
+  const startupSessionId = await startupSessions.evaluate((observation) => {
+    observation.unsubscribe();
+    return observation.completedSessionId;
+  });
+  await startupSessions.dispose();
+  await expect.poll(() => replayState(page)).toMatchObject({
+    sessionId: startupSessionId, status: 'live', paused: true, speed: 1,
+    playback: { paused: true, speed: 1, ended: false },
+  });
+  const userControlIndex = (await controls(page)).length;
+  await playBtn.click(); // A recorded window opens paused: the first click resumes.
+  await expect.poll(async () => (await replayState(page)).paused).toBe(false);
+  await expect(playBtn).toHaveAttribute('aria-label', 'pause');
+  await expect(playBtn).toHaveAttribute('aria-pressed', 'true');
+  await playBtn.click();
+  await expect.poll(async () => (await replayState(page)).paused).toBe(true);
+  await expect(playBtn).toHaveAttribute('aria-label', 'play');
+  await expect(playBtn).toHaveAttribute('aria-pressed', 'false');
+  await expect.poll(async () => (await controls(page)).slice(userControlIndex)
+    .filter((c) => c.type === RESUME || c.type === PAUSE).map((c) => c.type))
+    .toEqual([RESUME, PAUSE]);
 
   // Speed: ONE cycling button now exposes the whole 1–100× ladder. Step twice
   // (1→2→5) and assert the intermediate rung, so a handler that ignored the
@@ -199,16 +293,22 @@ test('replay transport controls (pause/resume/speed/seek) send the correct contr
   const speedBtn = page.locator('[data-testid="speed-cycle"]');
   await speedBtn.click();
   await expect(speedBtn).toHaveAttribute('data-speed', '2');
-  await expect.poll(async () => (await storeState(page)).speed).toBe(2);
+  await expect.poll(async () => (await replayState(page)).speed).toBe(2);
   await speedBtn.click();
   await expect(speedBtn).toHaveAttribute('data-speed', '5');
-  await expect.poll(async () => (await storeState(page)).speed).toBe(5);
+  await expect.poll(async () => (await replayState(page)).speed).toBe(5);
   // ...and the control frames send exactly that sequence.
   await expect
-    .poll(async () => (await controls(page)).filter((c) => c.type === SET_SPEED).map((c) => c.x))
+    .poll(async () => (await controls(page)).slice(userControlIndex)
+      .filter((c) => c.type === SET_SPEED).map((c) => c.x))
     .toEqual([2, 5]);
+  await expect.poll(async () => (await replayState(page)).paused).toBe(true);
 
   // Seek: set the scrubber and dispatch a native input so React's onChange fires.
+  const seekControlIndex = (await controls(page)).length;
+  await expect(page.getByTestId('seek-scrubber')).toBeEnabled();
+  const beforeSeekSessionId = (await replayState(page)).sessionId;
+  expect(beforeSeekSessionId).not.toBeNull();
   await page.locator('[data-testid="seek-scrubber"]').evaluate((el) => {
     const input = el as HTMLInputElement;
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
@@ -216,22 +316,26 @@ test('replay transport controls (pause/resume/speed/seek) send the correct contr
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
 
-  // The scrub → Seek path is trailing-throttled (~120 ms), so poll until the
-  // Seek control lands instead of reading the log synchronously.
+  // The scrub → Seek path is trailing-throttled (250 ms). Only a new Seek can
+  // satisfy this assertion; the automatic opening Seek is outside the slice.
   await expect
-    .poll(async () => (await controls(page)).map((c) => c.type))
+    .poll(async () => (await controls(page)).slice(seekControlIndex).map((c) => c.type))
     .toContain(SEEK);
-
-  const log = await controls(page);
-  const types = log.map((c) => c.type);
-  expect(types).toContain(PAUSE);
-  expect(types).toContain(RESUME);
-  // The cycling control emits one SetSpeed per click, so assert the LAST one.
-  const speeds = log.filter((c) => c.type === SET_SPEED);
-  expect(speeds.at(-1)?.x).toBe(5);
-  // The Seek carries a bigint ns (serialized to a string by the tap).
-  const seek = log.find((c) => c.type === SEEK);
+  const seek = (await controls(page)).slice(seekControlIndex).find((c) => c.type === SEEK);
   expect(typeof seek?.t).toBe('string');
+  const midpoint = BigInt(preview.start_ns)
+    + (BigInt(preview.end_ns) - BigInt(preview.start_ns)) / 2n;
+  expect(seek?.t).toBe(midpoint.toString());
+  await expect.poll(async () => {
+    const state = await replayState(page);
+    return {
+      ...state,
+      seekGenerationAttached: state.sessionId !== null && state.sessionId !== beforeSeekSessionId,
+    };
+  }).toMatchObject({
+    seekGenerationAttached: true, status: 'live', paused: true, speed: 5,
+    playback: { paused: true, speed: 5, ended: false },
+  });
 });
 
 test('Space toggles follow and `/` focuses the symbol search', async ({ page }) => {

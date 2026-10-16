@@ -429,7 +429,7 @@ export class Connection {
   // the server never received. No-ops (false) when the socket is not open — the
   // UI guards on mode/status, and a closed socket has nothing to steer.
 
-  /** Seek the replay clock to absolute ns `t` (server bumps epoch + resnapshots). */
+  /** Seek to absolute ns `t`; the server starts a new session generation and snapshot. */
   seek(t: bigint): boolean {
     return this.sendControl(encodeSeek(t));
   }
@@ -662,6 +662,10 @@ export class Connection {
   }
 
   private route(msg: Msg): void {
+    // A requested replacement has no stream identity until its Hello arrives.
+    // Old in-flight epochs/books/tape must not repopulate the cleared buffers.
+    if (this.desiredSub !== null && this.sessionId === null &&
+      msg.type !== MsgType.HELLO && msg.type !== MsgType.STATUS && msg.type !== MsgType.PING) return;
     switch (msg.type) {
       case MsgType.HELLO:
         this.handleHello(msg);

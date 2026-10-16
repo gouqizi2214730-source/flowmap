@@ -83,6 +83,63 @@ afterEach(() => {
 });
 
 describe('bookStore buffer', () => {
+  it('promotes a recorded BBO delivered before its current/next BOOK_UPDATE without exposing a future quote', () => {
+    useFlowMapStore.setState({ subscription: { market: 'binance', symbol: 'BTCUSDT', mode: 'replay', band: 'native' },
+      capability: { depth: 'L2', depth_provenance: 'recorded-density' } });
+    const quote = (seq: number): void => ingestForTest({ ...bbo(60_000 + seq, 2, 60_000.5 + seq, 3), ts_ns: BigInt(seq) * 1_000_000n });
+    const book = (seq: number): void => ingestForTest({ ...depthCol(0, seq, [0, 2, 0], [0, 0, 3]), type: MsgType.BOOK_UPDATE });
+    quote(1);
+    expect(getSnapshot().bbo).toBeNull();
+    book(1);
+    expect(getSnapshot().bbo?.tsNs).toBe(1_000_000n);
+    quote(1); book(1); // same-time reconnect delivery remains valid while paused
+    expect(getSnapshot().bbo?.tsNs).toBe(1_000_000n);
+    quote(2);
+    expect(getSnapshot().bbo?.tsNs).toBe(1_000_000n);
+    book(2);
+    expect(getSnapshot().bbo?.tsNs).toBe(2_000_000n);
+    book(3);
+    expect(getSnapshot().bbo).toBeNull();
+  });
+
+  it.each([MsgType.DEPTH_COL, MsgType.BOOK_UPDATE])('retires replay quotes at each recorded column (%i) without changing density', type => {
+    useFlowMapStore.setState({ subscription: { market: 'binance', symbol: 'BTCUSDT', mode: 'replay', band: 'native' },
+      capability: { depth: 'L2', depth_provenance: 'recorded-density' } });
+    const column = (seq: number, crossed: boolean): void => {
+      const c = { ...depthCol(0, seq, [0, 0, 2, 0], crossed ? [0, 3, 0, 0] : [0, 0, 0, 3]), type,
+        final: type === MsgType.DEPTH_COL } as DepthColumn;
+      ingestForTest(c);
+      expect(getSnapshot().book?.recordedDensity).toBe(true);
+      expect(getSnapshot().book?.bid).toBe(c.bid);
+      expect(getSnapshot().book?.ask).toBe(c.ask);
+      expect(Array.from(c.bid)).toEqual([0, 0, 2, 0]);
+      expect(Array.from(c.ask!)).toEqual(crossed ? [0, 3, 0, 0] : [0, 0, 0, 3]);
+    };
+    column(0, true); // initially crossed paused snapshot
+    expect(getSnapshot().bbo).toBeNull();
+    column(1, false);
+    ingestForTest({ ...bbo(60_001, 2, 60_001.5, 3), ts_ns: 1_000_000n });
+    expect(getSnapshot().bbo?.tsNs).toBe(1_000_000n);
+    column(2, true); // advancing to a crossed interval clears the old quote
+    expect(getSnapshot().bbo).toBeNull();
+    ingestForTest({ ...bbo(60_001, 2, 60_001.5, 3), ts_ns: 1_000_000n });
+    expect(getSnapshot().bbo).toBeNull(); // delayed previous quote stays retired
+    column(3, false);
+    ingestForTest({ ...bbo(60_002, 4, 60_002.5, 5), ts_ns: 3_000_000n });
+    expect(getSnapshot().bbo?.tsNs).toBe(3_000_000n);
+    expect(getSnapshot().bbo?.bidPx).toBe(60_002);
+  });
+
+  it('keeps the existing live last-good BBO and quarantine policy when its book advances', () => {
+    useFlowMapStore.setState({ subscription: { market: 'binance', symbol: 'BTCUSDT', mode: 'live', band: 'native' },
+      capability: { depth: 'L2' } });
+    ingestForTest(bbo(60_001, 2, 60_001.5, 3));
+    ingestForTest({ ...depthCol(0, 2, [0, 2], [3, 0]), type: MsgType.BOOK_UPDATE });
+    ingestForTest(bbo(Number.NaN, 2, 60_002, 3));
+    expect(getSnapshot().bbo?.bidPx).toBe(60_001);
+    expect(getSnapshot().book?.recordedDensity).toBe(false);
+  });
+
   it('preserves the immutable trades reference for book/BBO-only updates', () => {
     ingestForTest(trade(1, 100, 2, SIDE_BUY));
     const prints = getSnapshot().trades;
@@ -401,6 +458,7 @@ describe('bookStore stream wiring', () => {
 
     useFlowMapStore.getState().connectAndSubscribe('crypto', 'BTCUSDT');
     sockets[0].open();
+    sockets[0].deliver(goldenU8('cold_hello'));
     // A real DEPTH_COL frame through socket → connection → fan-out → bookStore.
     sockets[0].deliver(goldenU8('hot_depth_col_l2'));
 

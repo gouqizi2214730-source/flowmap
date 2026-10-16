@@ -77,6 +77,34 @@ export type MarkerKind =
 export type FeedState = 'live' | 'degraded' | 'closed' | 'reconnecting';
 export type StreamMode = 'live' | 'replay';
 
+/** Authoritative replay metadata on Hello/Status capability.playback.
+ * Timestamp fields are decimal ns strings on the wire, bigint in the UI. */
+export interface ReplayPlayback {
+  startNs: bigint;
+  endNs: bigint;
+  positionNs: bigint;
+  columns: number;
+  paused: boolean;
+  speed: number;
+  ended: boolean;
+  generation: number;
+}
+
+export function playbackFromCapability(capability: Record<string, unknown>): ReplayPlayback | null {
+  const p = capability.playback as Record<string, unknown> | undefined;
+  if (!p || typeof p.start_ns !== 'string' || typeof p.end_ns !== 'string' ||
+      typeof p.position_ns !== 'string' || typeof p.paused !== 'boolean' ||
+      typeof p.ended !== 'boolean' || typeof p.speed !== 'number' || !Number.isFinite(p.speed) || p.speed <= 0 ||
+      typeof p.columns !== 'number' || !Number.isInteger(p.columns) || p.columns < 1 ||
+      typeof p.generation !== 'number' || !Number.isInteger(p.generation) || p.generation < 0) return null;
+  try {
+    const startNs = BigInt(p.start_ns), endNs = BigInt(p.end_ns), positionNs = BigInt(p.position_ns);
+    if (endNs <= startNs || positionNs < startNs || positionNs >= endNs) return null;
+    return { startNs, endNs, positionNs, columns: p.columns, paused: p.paused,
+      speed: p.speed, ended: p.ended, generation: p.generation };
+  } catch { return null; }
+}
+
 /**
  * Shared epoch geometry; nested inside Hello / EpochStart (never framed alone).
  *
@@ -122,7 +150,9 @@ export interface DepthColumn {
   coarse_ranges?: readonly (readonly [low: number, high: number, width: number])[];
 }
 
-/** Current book, kept independent of time-weighted historical heatmap columns. */
+/** Current book, kept independent of historical heatmap columns. For sessions
+ * with recorded-density provenance it is the current recorded interval instead
+ * of raw instantaneous L2; reconstructed BBO has the same t0_ns timestamp. */
 export interface BookUpdate extends Omit<DepthColumn, 'type'> {
   type: MsgType.BOOK_UPDATE;
 }

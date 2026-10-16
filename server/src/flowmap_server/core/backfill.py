@@ -60,8 +60,11 @@ default ``native`` band (the first-launch default) is always eligible.
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import os
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 
 import msgspec
@@ -123,6 +126,60 @@ _NAN = float("nan")
 # endpoint must cost seconds, not aiohttp's 5-minute default.
 _HTTP_TIMEOUT_S = 15.0
 _HTTP_TIMEOUT_MS = int(_HTTP_TIMEOUT_S * 1000)
+
+# Cache only the configured trust context, never loop-owned sessions or tasks.
+# Separate pools keep slow metadata jobs from delaying first CA construction.
+_CA_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="backfill-ca")
+_CA_CONTEXT_FUTURES: dict[str, concurrent.futures.Future] = {}
+_CCXT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="backfill-ccxt")
+
+
+async def _await_owned(future: asyncio.Future, *, cancel: Callable[[], None] | None = None):
+    """Drain owned work before propagating cancellation, including repeated cancels."""
+    try:
+        return await asyncio.shield(future)
+    except asyncio.CancelledError:
+        if cancel is not None:
+            cancel()
+        while not future.done():
+            try:
+                await asyncio.shield(future)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # noqa: BLE001 — cancellation remains the caller's outcome
+                break
+        if not future.cancelled():
+            error = future.exception()
+            if error is not None and not isinstance(error, asyncio.CancelledError):
+                logger.debug("provider cleanup failed during cancellation", exc_info=error)
+        raise
+
+
+def _initialize_ca_context(cafile: str, result: concurrent.futures.Future) -> None:
+    try:
+        import ssl
+
+        result.set_result(ssl.create_default_context(cafile=cafile))
+    except BaseException as error:
+        # Concurrent initial callers share the failure; a later request can retry.
+        if _CA_CONTEXT_FUTURES.get(cafile) is result:
+            _CA_CONTEXT_FUTURES.pop(cafile, None)
+        result.set_exception(error)
+
+
+async def _certifi_context(cafile: str):
+    candidate = concurrent.futures.Future()
+    # CPython's atomic setdefault publishes one shared, thread-safe Future even
+    # to callers on different loops. No thread lock is waited on by those loops.
+    result = _CA_CONTEXT_FUTURES.setdefault(cafile, candidate)
+    if result is candidate:
+        try:
+            _CA_EXECUTOR.submit(_initialize_ca_context, cafile, result)
+        except BaseException as error:
+            _CA_CONTEXT_FUTURES.pop(cafile, None)
+            result.set_exception(error)
+    # A caller cannot cancel shared initialization out from under other callers.
+    return await _await_owned(asyncio.wrap_future(result))
 
 
 class Candle(msgspec.Struct):
@@ -457,7 +514,7 @@ async def _native_candles(
     span = _INTERVAL_NS.get(interval, 60 * 10**9)
     start = now_ns - max_bars * span
     out: list[Candle] = []
-    backfill_obj, session = _hardened_backfill(exchange, seg)
+    backfill_obj, session = await _hardened_backfill(exchange, seg)
     try:
         async for rec in iter_backfill(
             exchange,
@@ -491,7 +548,7 @@ async def _native_candles(
                 break
     finally:
         if session is not None:
-            await session.close()
+            await _await_owned(asyncio.ensure_future(session.close()))
     return out
 
 
@@ -506,7 +563,7 @@ _BINANCE_KLINE_BASE = {
 }
 
 
-def _hardened_backfill(exchange: str, seg: str) -> tuple[object | None, object | None]:
+async def _hardened_backfill(exchange: str, seg: str) -> tuple[object | None, object | None]:
     """A backfill object whose REST session trusts the certifi CA bundle.
 
     Same problem `_harden_rest_ssl` solves for the live feed: on a stock macOS
@@ -519,8 +576,6 @@ def _hardened_backfill(exchange: str, seg: str) -> tuple[object | None, object |
         return None, None
     try:
         import functools
-        import ssl
-
         import aiohttp
         import certifi
 
@@ -530,7 +585,7 @@ def _hardened_backfill(exchange: str, seg: str) -> tuple[object | None, object |
         )
     except Exception:  # noqa: BLE001 — keep engine defaults if anything is absent
         return None, None
-    ctx = ssl.create_default_context(cafile=certifi.where())
+    ctx = await _certifi_context(certifi.where())
     session = aiohttp.ClientSession(
         connector=aiohttp.TCPConnector(ssl=ctx),
         timeout=aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_S),
@@ -544,13 +599,64 @@ def _hardened_backfill(exchange: str, seg: str) -> tuple[object | None, object |
             fetch_open_interest_hist=None,
         )
     except Exception:  # noqa: BLE001 — never leak the session we just opened
-        session._connector.close()  # sync close; we are not in an await context
+        await _await_owned(asyncio.ensure_future(session.close()))
         raise
     return bf, session
 
 
+class _CCXTJob:
+    """One exchange lifecycle, created through close on one worker-owned loop."""
+
+    def __init__(self, fetch: Callable[[threading.Event], Awaitable[list[Candle]]]) -> None:
+        self.fetch = fetch
+        self.cancelled = threading.Event()
+        self.owner: tuple[asyncio.AbstractEventLoop, asyncio.Task] | None = None
+
+    def cancel(self) -> None:
+        self.cancelled.set()
+        owner = self.owner
+        if owner is not None:
+            loop, task = owner
+            try:
+                loop.call_soon_threadsafe(task.cancel)
+            except RuntimeError:
+                pass  # The owned loop finished between reading owner and dispatch.
+
+    def run(self) -> list[Candle]:
+        if self.cancelled.is_set():
+            raise asyncio.CancelledError
+        return asyncio.run(self._run())
+
+    async def _run(self) -> list[Candle]:
+        self.owner = asyncio.get_running_loop(), asyncio.current_task()
+        try:
+            if self.cancelled.is_set():
+                raise asyncio.CancelledError
+            return await self.fetch(self.cancelled)
+        finally:
+            self.owner = None
+
+
 async def _ccxt_candles(
     exchange: str, symbol: str, seg: str, *, interval: str, max_bars: int, now_ns: int
+) -> list[Candle]:
+    job = _CCXTJob(lambda cancelled: _ccxt_candles_owned(
+        exchange, symbol, seg, interval=interval, max_bars=max_bars,
+        now_ns=now_ns, cancelled=cancelled,
+    ))
+    result = _CCXT_EXECUTOR.submit(job.run)
+
+    def cancel() -> None:
+        # Remove queued jobs; if a worker won the race, signal and drain it.
+        if not result.cancel():
+            job.cancel()
+
+    return await _await_owned(asyncio.wrap_future(result), cancel=cancel)
+
+
+async def _ccxt_candles_owned(
+    exchange: str, symbol: str, seg: str, *, interval: str, max_bars: int,
+    now_ns: int, cancelled: threading.Event,
 ) -> list[Candle]:
     """1-minute klines for any ccxt venue, via ``fetchOHLCV``.
 
@@ -574,6 +680,8 @@ async def _ccxt_candles(
     import ccxt.async_support as ccxt_async
 
     default_type = "swap" if seg in _SWAP_SEGMENTS else "spot"
+    if cancelled.is_set():
+        raise asyncio.CancelledError
     # Explicit total timeout (A2-5) instead of relying on ccxt's per-request
     # default — the backfill runs under the session's boot lock.
     ex = getattr(ccxt_async, exchange)(
@@ -584,18 +692,24 @@ async def _ccxt_candles(
         }
     )
     try:
+        if cancelled.is_set():
+            raise asyncio.CancelledError
         if not ex.has.get("fetchOHLCV"):
             return []
         markets = await ex.load_markets()
+        if cancelled.is_set():
+            raise asyncio.CancelledError
         unified = CCXTConnector._resolve_symbol(symbol, markets, ex.markets_by_id)
         if unified is None:
             logger.warning("ccxt backfill: %s does not list %r", exchange, symbol)
             return []
         span = _INTERVAL_NS.get(interval, 60 * 10**9)
         since_ms = (now_ns - max_bars * span) // 10**6
+        if cancelled.is_set():
+            raise asyncio.CancelledError
         rows = await ex.fetch_ohlcv(unified, interval, since=int(since_ms), limit=max_bars)
     finally:
-        await ex.close()
+        await _await_owned(asyncio.ensure_future(ex.close()))
     out: list[Candle] = []
     for ts_ms, o, h, l, c, vol in rows[-max_bars:]:
         if None in (ts_ms, o, h, l, c):
@@ -614,7 +728,9 @@ async def _ccxt_candles(
 
 
 async def _equity_candles(symbol: str, *, max_cols: int) -> list[Candle]:
-    from crocodile.equity.providers.yahoo.client import YahooClient
+    from flowmap_server.feeds._yahoo import yahoo_types
+
+    YahooClient, _ = await yahoo_types()
 
     bars = await YahooClient().fetch_intraday_bars(symbol.upper(), "1m")
     out: list[Candle] = []

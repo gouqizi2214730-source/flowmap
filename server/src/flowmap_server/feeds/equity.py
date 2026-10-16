@@ -707,7 +707,9 @@ class EquityFeed:
         return await self._default_fetch_bars()
 
     async def _default_fetch_bars(self) -> Sequence[EqBar]:
-        from crocodile.equity.providers.yahoo.client import YahooClient
+        from flowmap_server.feeds._yahoo import yahoo_types
+
+        YahooClient, _ = await yahoo_types()
 
         client = YahooClient()
         return await client.fetch_intraday_bars(self.symbol, "1m")

@@ -1,4 +1,4 @@
-__version__ = "1.5.0"
+__version__ = "1.5.1"
 
 # Windows lacks time.clock_gettime_ns; rebind crocodile's now_ns before any
 # submodule (or test) binds it. Must stay the first import of this package.

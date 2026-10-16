@@ -166,17 +166,14 @@ async def test_open_ended_start_t_loads_from_start(tmp_path):
 
 
 async def test_window_is_capped_at_the_ring(tmp_path):
-    """A window can never serve more than ring_columns (the newest of the
-    window win)."""
+    """Oversized explicit windows refuse instead of silently playing their tail."""
     root = Recorder(tmp_path / "rec", 20.0)
     _record(root, t0_idx=0, n=N0, start_seq=0)
     mgr, timer = _manager(root, ring=8)
 
-    sess = await mgr.subscribe(_sub(start_t=0, end_t=20 * DT), ClientTx())
-    t0s = list(sess._feed._t0s)
-    assert len(t0s) == 8
-    assert t0s[-1] == 19 * DT  # the NEWEST columns of the window survive
-    await _retire(mgr, timer, sess)
+    with pytest.raises(ReplayUnavailableError, match="exceeds 8 columns"):
+        await mgr.subscribe(_sub(start_t=0, end_t=20 * DT), ClientTx())
+    assert not mgr._sessions
 
 
 async def test_trades_clamped_to_window(tmp_path):

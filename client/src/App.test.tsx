@@ -258,8 +258,7 @@ describe('App — refused-replay fallback + explicit session identity (QA7 H1/H2
     const sock = sockets[sockets.length - 1];
     act(() => sock.open());
     // The market switch above legitimately reset; the FALLBACK is what we pin:
-    // it re-subscribes the SAME instrument, so only the store's sessionRevision
-    // can tell the App a new server session began under the unchanged key.
+    // it re-subscribes the SAME instrument; the changed mode resets the ring.
     spy.mockClear();
     act(() => sock.drop(1003));
     expect(useFlowMapStore.getState().subscription?.mode).toBe('live');
@@ -267,7 +266,7 @@ describe('App — refused-replay fallback + explicit session identity (QA7 H1/H2
     spy.mockRestore();
   });
 
-  it('mode toggle keeps the CURRENT band — it must not drag the drawer band (QA7 H1)', () => {
+  it('REPLAY opens the current instrument picker and cancel preserves the stream and band', () => {
     const { container } = mountApp();
     // A session on 'native' while the persisted drawer default is 'deep' (the
     // QA7 harness shape). The replay button renders only when the server says
@@ -279,14 +278,16 @@ describe('App — refused-replay fallback + explicit session identity (QA7 H1/H2
       });
     });
     click(container.querySelector('[data-testid="mode-replay"]')!);
-    // The mode changed; the GRID did not. Dragging settings.priceBand ('deep')
-    // along re-subscribed a different grid — the pancaked-scale repro.
+    // The picker keeps the current LIVE stream and its grid until confirmation.
     expect(useFlowMapStore.getState().subscription).toEqual({
       market: 'crypto',
       symbol: 'BTCUSDT',
-      mode: 'replay',
+      mode: 'live',
       band: 'native',
     });
+    expect(document.querySelector('[role="dialog"][aria-labelledby="replay-picker-title"]')).not.toBeNull();
+    fireKey('Escape');
+    expect(document.querySelector('[aria-labelledby="replay-picker-title"]')).toBeNull();
   });
 
   it('mode toggle with no subscription is a no-op — never substitutes the demo stream (QA7 H2)', () => {

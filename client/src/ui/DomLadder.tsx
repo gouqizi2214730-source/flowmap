@@ -49,7 +49,7 @@ const DEFAULT_LADDER_ROWS = 21;
 /** Density below this is treated as an empty book level (f16 residue floor). */
 const DENSITY_EPS = 1e-6;
 
-export type DepthTier = 'L2' | 'L1' | 'SYNTH';
+export type DepthTier = 'L2' | 'L1' | 'SYNTH' | 'RECORDED DENSITY';
 
 export interface LadderRowVM {
   row: number;
@@ -81,6 +81,7 @@ export function depthTier(
   capability: Record<string, unknown> | null,
   bookMode: number | null,
 ): DepthTier | null {
+  if (capability?.depth_provenance === 'recorded-density') return 'RECORDED DENSITY';
   const d = capability?.depth;
   if (typeof d === 'string') {
     if (d === 'L2') return 'L2';
@@ -160,12 +161,13 @@ function deriveQuotes(
   const scale = scaleFromEpoch(params);
   const rows = params.rows;
   const bbo = snap.bbo;
-  if (bbo && shape !== 'profile') {
-    const bestBidRow = clampRow(depthBucket(priceToRow(scale, bbo.bidPx)), rows);
-    const bestAskRow = clampRow(depthBucket(priceToRow(scale, bbo.askPx)), rows);
-    const midRow = priceToRow(scale, (bbo.bidPx + bbo.askPx) / 2);
+  const currentBbo = bbo && (!snap.book?.recordedDensity || bbo.tsNs === snap.book.t0Ns) ? bbo : null;
+  if (currentBbo && shape !== 'profile') {
+    const bestBidRow = clampRow(depthBucket(priceToRow(scale, currentBbo.bidPx)), rows);
+    const bestAskRow = clampRow(depthBucket(priceToRow(scale, currentBbo.askPx)), rows);
+    const midRow = priceToRow(scale, (currentBbo.bidPx + currentBbo.askPx) / 2);
     // Both sides of a BBO are real — honest spread from the quoted prices.
-    return { bestBidRow, bestAskRow, midRow, spread: bbo.askPx - bbo.bidPx };
+    return { bestBidRow, bestAskRow, midRow, spread: currentBbo.askPx - currentBbo.bidPx };
   }
   const book = snap.book;
   if (book === null) return { bestBidRow: -1, bestAskRow: -1, midRow: null, spread: null };
@@ -208,6 +210,14 @@ function deriveQuotes(
     bestBidRow >= 0 && bestAskRow >= 0
       ? rowToPrice(scale, bestAskRow) - rowToPrice(scale, bestBidRow)
       : null;
+  if (book.recordedDensity || (spread !== null && spread < 0)) {
+    // Keep the occupied density centered and visible, without presenting its
+    // overlapping extents as inside quotes or inventing an empty ask rung.
+    const occupied = [bestBidRow, bestAskRow].filter(row => row >= 0);
+    return { bestBidRow: -1, bestAskRow: -1,
+      midRow: occupied.length ? occupied.reduce((sum, row) => sum + row, 0) / occupied.length : null,
+      spread: null };
+  }
   if (bestBidRow < 0 && bestAskRow < 0) {
     return { bestBidRow: -1, bestAskRow: -1, midRow: null, spread: null };
   }
@@ -397,7 +407,7 @@ export function DomLadder(): JSX.Element {
   const badge = tier ?? 'N/A';
   // Class-safe token: `tier.toLowerCase()` yields 'l2'/'l1'/'synth' (and 'na'
   // for the no-data case) — never 'n/a', whose slash breaks the CSS selector.
-  const badgeClass = tier ? tier.toLowerCase() : 'na';
+  const badgeClass = tier === 'RECORDED DENSITY' ? 'recorded-density' : tier ? tier.toLowerCase() : 'na';
 
   const spreadTicks =
     model.spread !== null && params && params.tick > 0
@@ -438,6 +448,7 @@ export function DomLadder(): JSX.Element {
         <span
           className={`panel__badge panel__badge--${badgeClass}`}
           data-testid="ladder-badge"
+          title={tier === 'RECORDED DENSITY' ? 'Recorded interval density; inside quotes, when available, are reconstructed from row centres.' : undefined}
         >
           {badge}
         </span>
@@ -479,7 +490,8 @@ export function DomLadder(): JSX.Element {
             title="Sum of sizes on the displayed grouped rungs only; not the full book">
             <span>Visible Σ</span><span className="ladder__total-bid">B {fmtSz(totals.bid) || '0'}</span>
             <span className="ladder__total-ask">A {fmtSz(totals.ask) || '0'}</span>
-            <span className="ladder__browse">{locked ? 'wheel to browse' : 'following mid'}</span>
+            <span className="ladder__browse">{locked ? 'wheel to browse'
+              : tier === 'RECORDED DENSITY' && model.spread === null ? 'following density' : 'following mid'}</span>
           </div>
         )}
         <div className="ladder__body" ref={bodyRef} data-testid="ladder-body">
@@ -487,7 +499,8 @@ export function DomLadder(): JSX.Element {
             <div className="panel__empty">{emptyMsg}</div>
           ) : (
             <>
-              {(shape === 'book' || shape === 'l1') && midOffsetPx !== null && (
+              {(shape === 'book' || shape === 'l1') && midOffsetPx !== null
+                && (tier !== 'RECORDED DENSITY' || model.spread !== null) && (
                 <div
                   className="ladder__mid"
                   aria-hidden="true"

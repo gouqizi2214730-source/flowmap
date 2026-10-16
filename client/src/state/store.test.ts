@@ -133,6 +133,7 @@ describe('FlowMap store', () => {
 
     store.getState().connectAndSubscribe('crypto', 'BTCUSDT');
     sockets[0].open();
+    sockets[0].deliver(goldenU8('cold_hello'));
     stateChanges.mockClear(); // ignore connect/subscribe transitions
 
     sockets[0].deliver(goldenU8('hot_depth_col_l2'));
@@ -465,8 +466,8 @@ describe('sessionResetKey', () => {
     expect(sessionResetKey({ ...sub, band: 'wide' })).not.toBe(sessionResetKey(sub));
   });
 
-  it('does NOT change on a mode toggle — same grid, keep the scroll-back', () => {
-    expect(sessionResetKey({ ...sub, mode: 'replay' })).toBe(sessionResetKey(sub));
+  it('changes on a mode toggle — live and replay have independent timelines', () => {
+    expect(sessionResetKey({ ...sub, mode: 'replay' })).not.toBe(sessionResetKey(sub));
   });
 
   it('is stable for an identical subscription', () => {
@@ -475,7 +476,7 @@ describe('sessionResetKey', () => {
 
   it('changes on a replay WINDOW (P6) but not when no window is set', () => {
     // An unbounded replay subscription is the SAME grid as today: key unchanged.
-    expect(sessionResetKey({ ...sub, mode: 'replay' })).toBe(sessionResetKey(sub));
+    expect(sessionResetKey({ ...sub, mode: 'replay' })).not.toBe(sessionResetKey(sub));
     const start = 1_752_710_400_000_000_000n;
     // A window is a different recording slice (col_seq restarts) → new key.
     expect(sessionResetKey({ ...sub, mode: 'replay', startNs: start })).not.toBe(sessionResetKey(sub));
@@ -510,7 +511,7 @@ describe('FlowMap store — replay refusal fallback (close 1003)', () => {
     expect((sent as Extract<Msg, { type: MsgType.SUBSCRIBE }>).mode).toBe('live');
   });
 
-  it('bumps sessionRevision on the refused-replay fallback so the App re-arms the view (QA7 H1)', () => {
+  it('mode identity resets the refused-replay fallback without an extra revision', () => {
     installFakeTransport();
     const store = useFlowMapStore;
     store.getState().connectAndSubscribe('crypto', 'BTCUSDT', 'replay');
@@ -526,7 +527,7 @@ describe('FlowMap store — replay refusal fallback (close 1003)', () => {
     // (market:symbol:band — `mode` is deliberately excluded so a user toggle
     // keeps scroll-back), so this counter is the only signal the App's
     // symbol-switch reset (GL teardown + price-fit re-arm) has to key on.
-    expect(s.sessionRevision).toBe(before + 1);
+    expect(s.sessionRevision).toBe(before);
     // ...and the identity stays EXPLICIT: the fallback keeps the user's
     // instrument; it never substitutes the demo stream (QA7 H2).
     expect(s.subscription).toEqual({ market: 'crypto', symbol: 'BTCUSDT', mode: 'live', band: 'native' });
@@ -679,6 +680,38 @@ describe('FlowMap store — reconnect banner inputs (close info + attempts + ret
 });
 
 describe('FlowMap store — replay state is the server’s (C: honest transport pill)', () => {
+  const start = 1_791_900_000_123_456_789n;
+  function replayHello(position = start, speed = 7, paused = true): Uint8Array {
+    return coldFrameBytes(MsgType.HELLO, { protocol_version: 1, session_id: 'parked-replay', grid_epoch: 0,
+      epoch_params: { epoch: 0, tick: 0.5, tick_multiple: 1, dt_ns: 250_000_000, p0: 83443, rows: 128 },
+      norm_seed: 1, capability: { replay: true, playback: { start_ns: start.toString(),
+        end_ns: (start + 60_000_000_000n).toString(), position_ns: position.toString(),
+        columns: 240, speed, paused, ended: false, generation: 2 } } });
+  }
+  it('five user re-entries reset a parked 7x paused replay, while reconnect preserves authoritative position/state', () => {
+    installFakeTransport(NO_TIMERS); const store = useFlowMapStore;
+    const position = start + 17_123_456_789n;
+    for (let cycle = 0; cycle < 5; cycle++) {
+      store.getState().connectAndSubscribe('binance-spot', 'BTCUSDT', 'live');
+      if (cycle === 0) sockets[0].open();
+      sockets[0].deliver(goldenU8('cold_hello'));
+      store.getState().connectAndSubscribe('binance-spot', 'BTCUSDT', 'replay', 'native', { startNs: start, endNs: start + 60_000_000_000n });
+      const before = sockets[0].sent.length; sockets[0].deliver(replayHello(position));
+      const reset = sockets[0].sent.slice(before).map(sentMsg);
+      expect(reset.map((m) => m.type)).toEqual([MsgType.PAUSE, MsgType.SET_SPEED, MsgType.SEEK]);
+      expect((reset[1] as Extract<Msg, { type: MsgType.SET_SPEED }>).x).toBe(1);
+      expect((reset[2] as Extract<Msg, { type: MsgType.SEEK }>).t).toBe(start);
+      expect(store.getState().replayPlayback?.positionNs).toBe(position);
+      sockets[0].deliver(replayHello(start, 1));
+    }
+    sockets[0].deliver(replayHello(position, 7));
+    sockets[0].drop(1001); store.getState().retryNow(); sockets[1].open();
+    const before = sockets[1].sent.length; sockets[1].deliver(replayHello(position, 7));
+    expect(sockets[1].sent.length).toBe(before);
+    expect(store.getState().replayPlayback?.positionNs).toBe(position);
+    expect(store.getState().speed).toBe(7); expect(store.getState().paused).toBe(true);
+  });
+
   it('a reconnecting Hello re-asserts speed/paused instead of blind-resetting (R2 M-1: the parked session keeps its clock)', () => {
     installFakeTransport(NO_TIMERS);
     const store = useFlowMapStore;

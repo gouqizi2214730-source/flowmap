@@ -33,6 +33,7 @@ import { SETTINGS_KEY } from './ui/settings';
 const H = vi.hoisted(() => ({
   state: {
     following: true,
+    wantedFollowTime: true,
     priceFollow: 'fit' as 'fit' | 'track' | 'off',
     liveEdgeVisible: true,
     toggleFollowCalls: 0,
@@ -60,6 +61,12 @@ vi.mock('./gl/renderer', () => {
     get following(): boolean {
       return H.state.following;
     }
+    get wantedFollowTime(): boolean {
+      return H.state.wantedFollowTime;
+    }
+    setFollowTime(on: boolean): void {
+      H.state.following = H.state.wantedFollowTime = on;
+    }
     get priceFollow(): 'fit' | 'track' | 'off' {
       return H.state.priceFollow;
     }
@@ -72,10 +79,12 @@ vi.mock('./gl/renderer', () => {
     }
     toggleFollow(): void {
       H.state.following = !H.state.following;
+      H.state.wantedFollowTime = H.state.following;
       H.state.toggleFollowCalls += 1;
     }
     goLive(): void {
       H.state.following = true;
+      H.state.wantedFollowTime = true;
       H.state.goLiveCalls += 1;
     }
     resetForSession(): void {
@@ -179,6 +188,7 @@ function saved(): { followPrice: boolean; follow: boolean } {
 
 function resetFake(): void {
   H.state.following = true;
+  H.state.wantedFollowTime = true;
   H.state.priceFollow = 'fit';
   H.state.liveEdgeVisible = true;
   H.state.toggleFollowCalls = 0;

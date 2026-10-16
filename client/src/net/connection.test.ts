@@ -293,6 +293,7 @@ describe('Connection — subscription lifecycle', () => {
 
     conn.subscribe('crypto', 'BTCUSDT', 'replay', 'native', { startNs: T0 });
     sockets[0].open();
+    sockets[0].deliver(buildHello('window-A', 0));
     sockets[0].deliver(buildEpochStart(0));
     expect(conn.epochs.size).toBe(1);
 
@@ -333,6 +334,7 @@ describe('Connection — subscription lifecycle', () => {
 
     conn.subscribe('crypto', 'BTCUSDT', 'live');
     sockets[0].open();
+    sockets[0].deliver(buildHello('stream-A', 0));
     sockets[0].deliver(buildEpochStart(0));
     sockets[0].deliver(buildDepthCol(0, 900, true)); // deep into the old session
     expect(onStream).toHaveBeenCalledTimes(1);
@@ -343,6 +345,7 @@ describe('Connection — subscription lifecycle', () => {
     // as "already finalized" and only the forming right edge would render.
     conn.subscribe('equity', 'AAPL', 'live');
     expect(conn.epochs.size).toBe(0); // the old grid geometry is gone too
+    sockets[0].deliver(buildHello('stream-B', 0));
     sockets[0].deliver(buildDepthCol(0, 1, true));
     sockets[0].deliver(buildDepthCol(0, 2, true));
     expect(onStream).toHaveBeenCalledTimes(3);
@@ -355,6 +358,7 @@ describe('Connection — subscription lifecycle', () => {
 
     conn.subscribe('crypto', 'BTCUSDT', 'live');
     sockets[0].open();
+    sockets[0].deliver(buildHello('reconnect-A', 3));
     sockets[0].deliver(buildDepthCol(3, 42, true));
     expect(onStream).toHaveBeenCalledTimes(1);
 

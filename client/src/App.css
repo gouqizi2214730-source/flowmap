@@ -1616,6 +1616,8 @@ body,
 /* the current viewport window box */
 .minimap__window {
   position: absolute;
+  left: 0;
+  width: 100%;
   top: -1px;
   bottom: -1px;
   min-width: 3px;

@@ -5,6 +5,32 @@ All notable changes to FlowMap are documented here. The format follows
 the work campaign that produced them (dates and commit ranges from git history).
 Unreleased work sits on top of the newest listed commit.
 
+## [1.5.1] — 2026-10-16
+
+### Added
+
+- Replay picker with UTC date/time editing, local readouts, recorded hours, presets and exact range preview. Selections open paused.
+
+### Fixed
+
+- Replay prices, stored bars, paused seeking and first/final column display; stale frames are discarded after seeking.
+- LIVE follow preferences survive replay, including changes made immediately before entry.
+- Recorded density remains visible while unavailable quote and spread readouts are cleared.
+- The timeline thumb follows chart movement between readout updates, including at the live edge.
+- Replay selections preserve the chosen instant through repeated local hours, including exact recorded/default/preset bounds.
+- Benchmark finalization obtains an actual final health response; assessment requires its end bracket.
+
+### Changed
+
+- Replay identifies recorded density and reconstructed quotes. Missing intervals stay empty; empty or oversized selections show an error.
+- Yahoo resets and intraday conversion run in workers. Equity preloading admits at most four quote workers; its cutoff stops new work and rejects late results. Cleanup can wait for blocking Yahoo work.
+- Crypto certificate loading and fallback market setup run in workers. Crypto quote preloading admits at most four workers and rejects results after its cutoff.
+- Server log output and first Yahoo provider imports run in workers. A bounded log buffer reports dropped diagnostic records after output recovers.
+
+- [Windows benchmark](docs/windows-minimum-benchmark.md): history retains its original 30-minute PASS, with a separate retrospective INCOMPLETE assessment for its unknown health end tail. Graphics/input/resource measurements remain usable; LIVE graphics passes but source debt fails. Overall NOTQUALIFIED; RAM is estimated from 32 GiB hardware.
+- Measured private build08 predates the picker and final-health corrections. Corrected release source is unmeasured; original traces and hashes are preserved.
+- Stable publication waits for all eight platform installers and their checksum manifest.
+
 ## [1.5.0] — 2026-10-12
 
 ### Added
