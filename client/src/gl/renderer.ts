@@ -69,7 +69,6 @@ import {
   KILL_TIME,
   KILL_PRICE,
   limitsFor,
-  maxColSpanFor,
   priceFrame,
   screenToGrid,
   type PriceFollow,
@@ -1111,6 +1110,7 @@ export class Renderer {
   setTimeWindowMs(durationMs: number | null): boolean {
     const range = this.residentRange();
     if (!range || (durationMs !== null && (!Number.isFinite(durationMs) || durationMs <= 0))) return false;
+    this.pendingOverviewFit = false;
     if (durationMs === null) {
       this.requestedTimeWindow = null;
       this.userTimeZoomed = true;
@@ -1379,19 +1379,19 @@ export class Renderer {
         // (colCenter decreases); down → higher rows (rowCenter increases).
         const dCols = -(dx / cssW()) * this.view.colScale;
         const dRows = (dy / cssH()) * this.view.rowScale;
-        if (panFollowKill(drag.peakDx, drag.peakDy).killPrice) this.pendingOverviewFit = false;
+        this.pendingOverviewFit = false;
         // Per-axis release from PEAK displacement, so a deliberately horizontal
         // drag keeps price tracking (gl/follow.ts panFollowKill).
         this.camera.pan(dCols, dRows, panFollowKill(drag.peakDx, drag.peakDy));
         this.onCameraChanged();
       },
       zoomTimeAtFraction: (factor, fracX) => {
+        this.pendingOverviewFit = false;
         this.requestedTimeWindow = undefined;
         const anchorCol = this.view.colOffset + this.view.colScale * fracX;
         this.camera.zoomTime(factor, anchorCol);
         this.userTimeZoomed = true; // user-owned span: follow must preserve it
         this.onCameraChanged();
-        if (factor > 1 && this.camera.state.colSpan >= maxColSpanFor(this.camera.limits) * 0.999) this.fitPriceOverview(true);
       },
       zoomPriceAtFraction: (factor, fracFromTop) => {
         this.pendingOverviewFit = false;
@@ -1409,6 +1409,7 @@ export class Renderer {
         this.onCameraChanged();
       },
       panTimeSteps: (dir) => {
+        this.pendingOverviewFit = false;
         this.camera.pan(dir * this.view.colScale * KEY_PAN_FRAC, 0, KILL_TIME);
         this.onCameraChanged();
       },
@@ -1418,11 +1419,11 @@ export class Renderer {
         this.onCameraChanged();
       },
       zoomTimeCentered: (factor) => {
+        this.pendingOverviewFit = false;
         this.requestedTimeWindow = undefined;
         this.camera.zoomTime(factor, this.camera.state.colCenter);
         this.userTimeZoomed = true; // user-owned span: follow must preserve it
         this.onCameraChanged();
-        if (factor > 1 && this.camera.state.colSpan >= maxColSpanFor(this.camera.limits) * 0.999) this.fitPriceOverview(true);
       },
       toggleFollow: () => {
         this.setFollowTime(!this.camera.followTime);
@@ -2455,16 +2456,7 @@ export class Renderer {
     this.camera.priceZoomBounds = priceOverviewBounds(scale, prices);
   }
 
-  private fitPriceOverview(includeTime = false): void {
-    if (includeTime && this.overlayPriceMap()?.scale?.kind === 'hybrid') {
-      const range = this.residentRange();
-      if (range !== null) {
-        // At the overview limit, show the entire loaded history without an
-        // empty future half or a cursor anchor that hides the older prices.
-        this.camera.state = { ...this.camera.state, colCenter: (this.newestSeq + 1) / 2, colSpan: this.newestSeq + 1 };
-        this.onCameraChanged();
-      }
-    }
+  private fitPriceOverview(): void {
     if (this.ring !== null && this.view.colScale > this.ring.capacityCols && !this.overviewHistory?.complete) this.pendingOverviewFit = true;
     this.preparePriceOverview();
     const bounds = this.camera.priceZoomBounds;
@@ -3373,13 +3365,9 @@ export class Renderer {
     this.onCameraChanged();
   }
 
-  /** Deterministic time zoom (factor>1 = zoom out; clamps at the ring width).
-   *  e2e only. Used to reach the whole-ring zoom-out state. */
+  /** Deterministic time zoom through the same path as a centered user gesture. */
   zoomTimeForTest(factor: number): void {
-    this.requestedTimeWindow = undefined;
-    this.camera.zoomTime(factor, this.camera.state.colCenter);
-    this.onCameraChanged();
-    if (factor > 1 && this.camera.state.colSpan >= maxColSpanFor(this.camera.limits) * 0.999) this.fitPriceOverview(true);
+    this.makeController().zoomTimeCentered(factor);
   }
 
   /**

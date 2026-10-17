@@ -186,6 +186,59 @@ test('§9 price gutter scales price like TradingView, and never touches time', a
   expect(consoleErrors, `console/page errors: ${consoleErrors.join(' | ')}`).toEqual([]);
 });
 
+test('maximum time zoom stays wide while price gutter and keyboard gestures keep their own axes', async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = await bootLive(page);
+  const gutter = (await page.locator(GUTTER).boundingBox())!;
+  const canvas = (await page.locator('canvas#gl').boundingBox())!;
+  await page.mouse.move(gutter.x + gutter.width / 2, gutter.y + gutter.height / 2);
+  const initial = await view(page);
+  await page.mouse.wheel(0, -240);
+  await expect.poll(async () => (await view(page)).rowScale).toBeLessThan(initial.rowScale);
+  await page.evaluate(() => window.__flowmapLive!.renderer.setPriceFollow('off'));
+  const manualPrice = await view(page);
+
+  await page.mouse.move(canvas.x + canvas.width * 0.6, canvas.y + canvas.height * 0.4);
+  let previousSpan = 0;
+  for (let step = 0; step < 8; step++) {
+    await page.mouse.wheel(0, 2400);
+    await expect.poll(async () => (await view(page)).colScale).toBeGreaterThanOrEqual(previousSpan);
+    const current = await view(page);
+    expect(current.rowOffset).toBe(manualPrice.rowOffset);
+    expect(current.rowScale).toBe(manualPrice.rowScale);
+    expect((await follow(page)).following).toBe(false);
+    previousSpan = current.colScale;
+  }
+  const extentRatio = await page.evaluate(() => {
+    const r = window.__flowmapLive!.renderer;
+    return r.viewSnapshot.colScale / (r.newestColSeq + 1);
+  });
+  expect(extentRatio, 'repeated wheel events actually reach the full-history zoom ceiling').toBeGreaterThan(1.95);
+  const time = await view(page);
+  await page.mouse.move(gutter.x + gutter.width / 2, gutter.y + gutter.height / 2);
+  await page.mouse.wheel(0, -120);
+  await expect.poll(async () => (await view(page)).rowScale).toBeLessThan(time.rowScale);
+  expect((await view(page)).colOffset).toBe(time.colOffset);
+  expect((await view(page)).colScale).toBe(time.colScale);
+  await page.mouse.down();
+  await page.mouse.move(gutter.x + gutter.width / 2, gutter.y + gutter.height / 2 + 70, { steps: 5 });
+  await page.mouse.up();
+  expect((await view(page)).colOffset).toBe(time.colOffset);
+  expect((await view(page)).colScale).toBe(time.colScale);
+
+  await page.locator('canvas#gl').focus();
+  const price = await view(page);
+  await page.keyboard.press('-');
+  await expect.poll(async () => (await view(page)).colScale).toBeGreaterThanOrEqual(time.colScale);
+  expect((await view(page)).rowOffset).toBe(price.rowOffset);
+  expect((await view(page)).rowScale).toBe(price.rowScale);
+  const span = (await view(page)).colScale;
+  await page.evaluate(() => window.__flowmapLive!.renderer.setFollowTime(true));
+  await expect.poll(async () => (await follow(page)).following).toBe(true);
+  expect((await view(page)).colScale).toBe(span);
+  expect(errors).toEqual([]);
+});
+
 test('§9 a horizontal canvas drag detaches TIME but keeps price tracking', async ({ page }) => {
   test.setTimeout(120_000);
   await bootLive(page);

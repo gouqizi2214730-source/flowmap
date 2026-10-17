@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Renderer } from './renderer';
+import type { CameraController } from '../input/gestures';
 import { makeFake2D, makeFakeGL, type FakeGL } from './mockGL';
 import { clearColorForRamp } from './lut';
-import { MsgType, MODE_L2, type DepthColumn, type HistoryOverviewRequest } from '../proto/types';
+import { MsgType, MODE_L2, type DepthColumn, type HistoryOverviewRequest, type HistoryResponse } from '../proto/types';
 import type { StreamMsg } from '../net/connection';
 import { makeHybrid, priceToRow, rowToPrice, type PriceScale } from './priceScale';
 import { accumulateProfile } from './overlays/profile';
@@ -325,6 +326,7 @@ describe('Renderer (fake GL harness)', () => {
       const c = prices[col_seq % prices.length];
       r.ingestForTest({ type: MsgType.BAR_COL, epoch: 0, col_seq, t0_ns: BigInt(col_seq) * BigInt(DT_NS), o: c, h: c + 1, l: c - 1, c, v_buy: 1, v_sell: 1, cvd: 0 } as never);
     }
+    r.setTimeWindowMs(null); // establish the historical frame with an explicit fit
     r.zoomTimeForTest(1e9);
     r.zoomPriceForTest(10);
     const manual = r.viewSnapshot;
@@ -347,6 +349,76 @@ describe('Renderer (fake GL harness)', () => {
       const row = r.canvasCssToGrid(0, r.gridToCanvasCss(0, expected).y)?.row;
       expect(row).toBeCloseTo(expected, 5);
     }
+    r.dispose();
+  });
+
+  it.each(['wheel', 'keyboard', 'test hook'] as const)('maximum time zoom preserves a manual price frame (%s)', input => {
+    const { r, store } = makeRenderer();
+    const scale = makeHybrid({ mid: 85505, rows: 4096, coreRows: 2048, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+    store.state.epochs = new Map([[0, { epoch: 0, tick: 0.01, tick_multiple: 1, dt_ns: DT_NS, p0: scale.coreP0, rows: 4096,
+      scale_kind: 1, dn_rows: scale.dnRows, core_rows: scale.coreRows, core_p0: scale.coreP0, core_step: scale.coreStep,
+      lo_price: scale.loPrice, hi_price: scale.hiPrice }]]);
+    for (let seq = 0; seq < 40; seq++) {
+      const book = makeCol(seq, true, scale.rows);
+      book.bid.fill(0); book.ask!.fill(0);
+      book.bid[scale.dnRows + 1023] = 5; book.ask![scale.dnRows + 1024] = 5;
+      store.emit(book);
+    }
+    r.setPriceFollow('off');
+    r.zoomPriceForTest(5);
+    const price = r.viewSnapshot;
+    const ctrl = (r as unknown as { makeController(): CameraController }).makeController();
+    for (let step = 0; step < 3; step++) {
+      if (input === 'wheel') ctrl.zoomTimeAtFraction(1e6, 0.75);
+      else if (input === 'keyboard') ctrl.zoomTimeCentered(1e6);
+      else r.zoomTimeForTest(1e6);
+      const current = r.viewSnapshot;
+      expect(current.colScale).toBe(80); // full history plus one history-width of context
+      expect(current.colOffset).toBe(-20);
+      expect(current.rowOffset).toBe(price.rowOffset);
+      expect(current.rowScale).toBe(price.rowScale);
+      expect(r.priceFollow).toBe('off');
+      expect(r.following).toBe(false);
+    }
+    const time = r.viewSnapshot;
+    ctrl.zoomPriceAtFraction(0.8, 0.3);
+    ctrl.scalePriceCentered(1.2);
+    expect(r.viewSnapshot.colOffset).toBe(time.colOffset);
+    expect(r.viewSnapshot.colScale).toBe(time.colScale);
+    ctrl.goLive();
+    expect(r.following).toBe(true);
+    expect(r.viewSnapshot.colScale).toBe(time.colScale);
+    r.dispose();
+  });
+
+  it.each(['wheel', 'keyboard', 'pan'] as const)('late overview completion preserves the frame after manual time %s', async input => {
+    const { r, store } = makeRenderer();
+    const scale = makeHybrid({ mid: 100, rows: 256, coreRows: 128, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+    store.state.epochs = new Map([[0, { epoch: 0, tick: 0.01, tick_multiple: 1, dt_ns: DT_NS, p0: scale.coreP0, rows: scale.rows,
+      scale_kind: 1, dn_rows: scale.dnRows, core_rows: scale.coreRows, core_p0: scale.coreP0, core_step: scale.coreStep,
+      lo_price: scale.loPrice, hi_price: scale.hiPrice }]]);
+    let finish!: (response: HistoryResponse) => void;
+    const response = new Promise<HistoryResponse>(resolve => { finish = resolve; });
+    store.state.requestHistory = (...args: unknown[]) => args[2] ? response : new Promise(() => undefined);
+    for (let seq = 0; seq < 1024; seq++) store.emit(makeCol(seq, true, scale.rows));
+    r.setPriceFollow('off');
+    r.setTimeWindowMs(null);
+    pump(16);
+    expect(r.overviewStats()?.inFlight).toBe(true);
+    const ctrl = (r as unknown as { makeController(): CameraController }).makeController();
+    if (input === 'wheel') ctrl.zoomTimeAtFraction(1.05, 0.5);
+    else if (input === 'keyboard') ctrl.zoomTimeCentered(1.05);
+    else ctrl.panTimeSteps(-1);
+    const before = r.viewSnapshot;
+    finish({ type: MsgType.HISTORY_RESP, req_id: 1, epoch: 0, oldest_available_t_ns: 0n, depth_cols: [],
+      bar_cols: [{ type: MsgType.BAR_COL, epoch: 0, col_seq: 0, t0_ns: 0n, o: 100, h: 110, l: 90, c: 100,
+        vol_buy: 1, vol_sell: 1, cvd_cum: 0, vwap_num_cum: 200, vwap_den_cum: 2 }], markers: [], big_trades: [] });
+    await response;
+    await Promise.resolve();
+    expect(r.overviewStats()?.inFlight).toBe(false);
+    expect(r.overviewStats()?.progress.loaded).toBe(r.overviewStats()?.progress.total);
+    expect(r.viewSnapshot).toEqual(before);
+    expect(r.priceFollow).toBe('off');
     r.dispose();
   });
 

@@ -5,6 +5,14 @@ All notable changes to FlowMap are documented here. The format follows
 the work campaign that produced them (dates and commit ranges from git history).
 Unreleased work sits on top of the newest listed commit.
 
+## [Unreleased]
+
+### Fixed
+
+- Maximum time zoom no longer resets the time window or the manual price scale.
+- Price-axis gestures leave the time window unchanged. Late history loads respect manual navigation.
+- Time zoom-out now allows twice the available history span, without increasing the history cache.
+
 ## [1.5.1] — 2026-10-16
 
 ### Added

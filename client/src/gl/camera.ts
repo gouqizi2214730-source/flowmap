@@ -202,8 +202,8 @@ export const MIN_ROW_SPAN = 1;
 export const MAX_COL_SPAN = Number.MAX_SAFE_INTEGER;
 /** Numeric price-row ceiling; independent of texture height. */
 export const MAX_ROW_SPAN = 1_048_576;
-/** Full available history plus a small end margin at maximum manual zoom. */
-export const HISTORY_VIEW_PADDING = 0.1;
+/** At maximum manual zoom, retain one history-width of surrounding context. */
+export const HISTORY_VIEW_PADDING = 1;
 /** Normal positive float32 prices accepted by the price-projection uniforms.
  * Leave headroom for shader additions/subtractions at the upper boundary. */
 const PRICE_DOMAIN_MIN = 2 ** -126;
@@ -255,7 +255,7 @@ export function rowCenterBounds(rowSpan: number, limits: CameraLimits): { lo: nu
  * The EFFECTIVE user time zoom-out cap for these limits. Without a known
  * {@link TimeWindow} this is {@link CameraLimits.maxColSpanZoom}. Once the
  * complete logical history bounds are known, the maximum shows all available
- * history with 10% context. Cache eviction/backfill cannot alter the bound.
+ * history with one history-width of context. Cache eviction/backfill cannot alter the bound.
  */
 export function maxColSpanFor(limits: CameraLimits): number {
   const window = limits.timeWindow;
@@ -315,11 +315,21 @@ export function colCenterBounds(
  * through all of history is the legacy point, and it stays O(1).
  */
 export function clampCamera(s: CameraState, limits: CameraLimits): CameraState {
+  return clampPriceCamera(clampTimeCamera(s, limits), limits);
+}
+
+/** A price operation must not re-clamp a time frame retained during loading. */
+function clampPriceCamera(s: CameraState, limits: CameraLimits): CameraState {
   // USER zoom-out bound, not the framing bound: a state produced by fit/reset/
   // setPriceFrame is already ≤ rows ≤ maxRowSpanZoom, so this never shrinks a
   // framed span. (The colSpan branch below is the same decoupling for time.)
   const rowSpan = clamp(s.rowSpan, limits.minRowSpan ?? MIN_ROW_SPAN, limits.maxRowSpanZoom);
   const bounds = rowCenterBounds(rowSpan, limits);
+  return { ...s, rowCenter: clamp(s.rowCenter, bounds.lo, bounds.hi), rowSpan };
+}
+
+/** Time navigation likewise leaves the user's price frame alone. */
+function clampTimeCamera(s: CameraState, limits: CameraLimits): CameraState {
   // Zoom-out bound, not the framing bound: a state produced by fit/reset is
   // already ≤ maxColSpan ≤ maxColSpanFor, so this never shrinks a framed span.
   const colSpan = clamp(s.colSpan, limits.minColSpan, maxColSpanFor(limits));
@@ -327,12 +337,9 @@ export function clampCamera(s: CameraState, limits: CameraLimits): CameraState {
   const colCenter =
     cb !== null && Number.isFinite(s.colCenter) ? clamp(s.colCenter, cb.lo, cb.hi) : s.colCenter;
   return {
+    ...s,
     colCenter,
     colSpan,
-    rowCenter: clamp(s.rowCenter, bounds.lo, bounds.hi),
-    rowSpan,
-    followTime: s.followTime,
-    followPrice: s.followPrice,
   };
 }
 
@@ -384,10 +391,10 @@ export function pan(
   // camera permanently — NaN survives every clamp because both clamp branches
   // compare false. Ignore the whole gesture instead.
   if (!Number.isFinite(dCols) || !Number.isFinite(dRows)) return s;
-  return clampCamera(
-    applyKill({ ...s, colCenter: s.colCenter + dCols, rowCenter: s.rowCenter + dRows }, kill),
-    limits,
-  );
+  const moved = applyKill({ ...s, colCenter: s.colCenter + dCols, rowCenter: s.rowCenter + dRows }, kill);
+  if (dCols === 0) return clampPriceCamera(moved, limits);
+  if (dRows === 0) return clampTimeCamera(moved, limits);
+  return clampCamera(moved, limits);
 }
 
 /**
@@ -418,7 +425,7 @@ export function zoomTime(
   const newSpan = clamp(s.colSpan * factor, limits.minColSpan, maxColSpanFor(limits));
   const eff = newSpan / s.colSpan;
   const colCenter = anchorCol + eff * (s.colCenter - anchorCol);
-  return clampCamera(applyKill({ ...s, colSpan: newSpan, colCenter }, KILL_TIME), limits);
+  return clampTimeCamera(applyKill({ ...s, colSpan: newSpan, colCenter }, KILL_TIME), limits);
 }
 
 /**
@@ -440,7 +447,7 @@ export function zoomPrice(
   const newSpan = clamp(s.rowSpan * factor, limits.minRowSpan ?? MIN_ROW_SPAN, limits.maxRowSpanZoom);
   const eff = newSpan / s.rowSpan;
   const rowCenter = anchorRow + eff * (s.rowCenter - anchorRow);
-  return clampCamera(adoptPriceSpan({ ...s, rowSpan: newSpan, rowCenter }), limits);
+  return clampPriceCamera(adoptPriceSpan({ ...s, rowSpan: newSpan, rowCenter }), limits);
 }
 
 /**
@@ -685,7 +692,7 @@ export class Camera {
       bottomPrice = clamp(bottomPrice, domain.low, domain.high - span);
       const bottom = priceToRow(scale, bottomPrice);
       const top = priceToRow(scale, bottomPrice + span);
-      this.state = clampCamera(adoptPriceSpan({ ...this.state, rowCenter: (bottom + top) / 2, rowSpan: top - bottom }), this.limits);
+      this.state = clampPriceCamera(adoptPriceSpan({ ...this.state, rowCenter: (bottom + top) / 2, rowSpan: top - bottom }), this.limits);
       return;
     }
     this.state = zoomPrice(this.state, this.limits, factor, anchorRow);
@@ -705,7 +712,7 @@ export class Camera {
 
   /** Time half of the auto-follow frame: left column + span. Keeps follow ON. */
   setTimeFrame(colLeft: number, colSpan: number): void {
-    this.state = clampCamera(
+    this.state = clampTimeCamera(
       { ...this.state, colCenter: colLeft + colSpan / 2, colSpan, followTime: true },
       this.limits,
     );
@@ -718,7 +725,7 @@ export class Camera {
    *  (fit/reset share the same rows lock). */
   setPriceFrame(rowBottom: number, rowSpan: number): void {
     const span = clamp(rowSpan, this.limits.minRowSpan ?? MIN_ROW_SPAN, this.limits.rows);
-    this.state = clampCamera(
+    this.state = clampPriceCamera(
       { ...this.state, rowCenter: rowBottom + span / 2, rowSpan: span },
       this.limits,
     );
@@ -726,12 +733,12 @@ export class Camera {
 
   /** Recentre price without touching the span (the 'track' glide). */
   setRowCenter(rowCenter: number): void {
-    this.state = clampCamera({ ...this.state, rowCenter }, this.limits);
+    this.state = clampPriceCamera({ ...this.state, rowCenter }, this.limits);
   }
 
   /** Re-express the price axis in a new epoch's row coordinates (p0 moved). */
   remapPrice(rowCenter: number, rowSpan: number): void {
-    this.state = clampCamera({ ...this.state, rowCenter, rowSpan }, this.limits);
+    this.state = clampPriceCamera({ ...this.state, rowCenter, rowSpan }, this.limits);
   }
 
   /** Turn TIME follow on/off. Off routes through {@link applyKill}, so a 'fit'

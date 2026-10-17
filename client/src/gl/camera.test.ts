@@ -457,6 +457,40 @@ describe('clampCamera', () => {
  *   - zoom → the full known history can be shown despite a small GPU cache.
  * The window is OPT-IN: bare limits keep the legacy free camera.
  */
+describe('axis ownership when history bounds change', () => {
+  it.each(['linear', 'hybrid'] as const)('price operations preserve an existing time frame (%s)', kind => {
+    const operations: Array<(camera: Camera) => void> = [
+      camera => camera.zoomPrice(1.2, camera.state.rowCenter),
+      camera => camera.pan(0, 2, KILL_PRICE),
+      camera => camera.setPriceFrame(200, 50),
+      camera => camera.setRowCenter(300),
+      camera => camera.remapPrice(300, 70),
+    ];
+    for (const operation of operations) {
+      const camera = new Camera(LIMITS, { ...baseState(), colCenter: 5000, colSpan: 10000 });
+      if (kind === 'hybrid') camera.priceScale = makeHybrid({ mid: 100, rows: ROWS, coreRows: 256, coreStep: 0.01, upMult: 11, dnFloor: 0.01 })!;
+      // An existing frame is retained while the logical window is refreshed.
+      camera.setTimeWindow({ newest: 99, resident: range(0, 99) });
+      operation(camera);
+      expect(camera.state.colCenter).toBe(5000);
+      expect(camera.state.colSpan).toBe(10000);
+    }
+  });
+
+  it('time-only operations preserve an existing price frame', () => {
+    for (const operation of [
+      (camera: Camera) => camera.zoomTime(2, 1000),
+      (camera: Camera) => camera.pan(10, 0, KILL_TIME),
+      (camera: Camera) => camera.setTimeFrame(0, 100),
+    ]) {
+      const camera = new Camera(LIMITS, { ...baseState(), rowCenter: 10000, rowSpan: 100 });
+      operation(camera);
+      expect(camera.state.rowCenter).toBe(10000);
+      expect(camera.state.rowSpan).toBe(100);
+    }
+  });
+});
+
 describe('time data window — pan + zoom bounds (F3)', () => {
   /** LIMITS + a known window whose full-res resident span equals the extent. */
   function winLimits(oldest: number, newest: number): CameraLimits {
