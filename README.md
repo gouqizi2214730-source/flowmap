@@ -311,6 +311,6 @@ Estimated minimum requirements. See [benchmark notes](docs/windows-minimum-bench
 | Linux | Ubuntu 22.04 LTS (64-bit) |
 | Processor | Intel Core i3-10100 / AMD Ryzen 3 3100 |
 | Memory | 8 GB RAM |
-| Graphics | 2 GB graphics memory |
+| Graphics | NVIDIA GeForce GT 1030 (2 GB) / AMD Radeon RX 550 (2 GB) |
 | Storage | 2 GB free space, plus recordings |
 | Display | 900 × 600 |
