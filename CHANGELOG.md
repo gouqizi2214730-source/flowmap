@@ -20,6 +20,10 @@ Unreleased work sits on top of the newest listed commit.
 - Replay selections preserve the chosen instant through repeated local hours, including exact recorded/default/preset bounds.
 - Benchmark finalization obtains an actual final health response; assessment requires its end bracket.
 
+### Testing
+
+- Saved-drawing checks explicitly frame persisted anchors. Full-ring history checks allow 150 seconds on software-rendered CI, with the 360-second outer test and complete correctness and pixel checks retained. This increases the functional wait allowance; it does not indicate faster loading. CI retains test results and traces.
+
 ### Changed
 
 - Replay identifies recorded density and reconstructed quotes. Missing intervals stay empty; empty or oversized selections show an error.

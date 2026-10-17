@@ -246,4 +246,18 @@ jobs:
         working-directory: client
         env:
           CI: "1"
-        run: npx playwright test
+          PLAYWRIGHT_JSON_OUTPUT_NAME: test-results/results.json
+        run: npx playwright test --reporter=line,json,./tests/reporters/ciFailureReporter.ts
+
+      - name: Retain browser test evidence
+        if: always()
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: browser-test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            client/test-results/
+            client/tests/e2e/__artifacts__/
+          include-hidden-files: true
+          retention-days: 7
+          if-no-files-found: warn

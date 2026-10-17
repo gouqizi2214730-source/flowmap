@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
+import type { Renderer } from '../../src/gl/renderer';
+import type { useFlowMapStore } from '../../src/state/store';
 import { expectEmptyPickerAndCancel, openRecordedReplayPicker, seedReplayLocale } from './replayPicker';
 
 /**
@@ -84,18 +86,134 @@ async function waitColumns(page: Page): Promise<void> {
   );
 }
 
-/** Non-transparent pixel count of the drawings 2D overlay canvas. */
+type SavedDrawingPoint = { tNs: string; price: number };
+type DrawingsLive = { renderer: Renderer; store: typeof useFlowMapStore };
+
+/** Own the camera, while the real feed keeps running beneath the drawings. */
+async function frameDrawingsViewport(page: Page, points?: SavedDrawingPoint[]): Promise<void> {
+  try {
+    await page.waitForFunction(
+      () => {
+        const r = (window as unknown as { __flowmapLive?: DrawingsLive }).__flowmapLive?.renderer;
+        return r?.marketFrameReady && (r.residentRange()?.count ?? 0) >= 64 && r.timeline()?.timeBase &&
+          !document.querySelector('[data-testid="chart-startup-gate"]');
+      },
+      undefined,
+      { timeout: 45_000 },
+    );
+    const framed = await page.evaluate(async (saved) => {
+      // @ts-expect-error Vite serves the existing runtime price mapping module.
+      const { priceToRow, rowToPrice, scaleFromEpoch } = await import('/src/gl/priceScale.ts');
+      const { renderer: r, store } = (window as unknown as { __flowmapLive: DrawingsLive }).__flowmapLive;
+      r.setFollowTime(false);
+      r.setPriceFollow('off');
+      const state = store.getState();
+      const params = state.gridEpoch === null ? null : state.epochs.get(state.gridEpoch);
+      const range = r.residentRange();
+      const base = r.timeline()?.timeBase;
+      if (!params || !range || !base || !(base.dtNs > 0)) throw new Error('drawings mapping is unavailable');
+      const scale = scaleFromEpoch(params);
+      const view = r.viewSnapshot;
+      let colScale = Math.min(512, range.count);
+      let colOffset = range.newest + 1 - colScale;
+      // Preserve the actual presented price frame as absolute prices, never rows
+      // from an earlier epoch. Reload framing instead uses the saved prices.
+      let low = rowToPrice(scale, view.rowOffset);
+      let high = rowToPrice(scale, view.rowOffset + view.rowScale);
+      if (saved) {
+        const cols = saved.map(p => base.anchorSeq + Number(BigInt(p.tNs) - base.anchorT0Ns) / base.dtNs);
+        const first = Math.min(...cols);
+        const last = Math.max(...cols);
+        colScale = Math.max(32, (last - first) * 2);
+        colOffset = (first + last - colScale) / 2;
+        const prices = saved.map(p => p.price);
+        const padding = Math.max((Math.max(...prices) - Math.min(...prices)) / 2,
+          Math.abs(high - low) / 20);
+        low = Math.min(...prices) - padding;
+        high = Math.max(...prices) + padding;
+      }
+      const rowOffset = priceToRow(scale, low);
+      const rowScale = priceToRow(scale, high) - rowOffset;
+      if (![colOffset, colScale, rowOffset, rowScale].every(Number.isFinite) || rowScale <= 0) {
+        throw new Error('drawings viewport has no finite time/price frame');
+      }
+      r.setViewForTest(colOffset, colScale, rowOffset, rowScale);
+      const drawBefore = r.stats().draws;
+      if (!Number.isSafeInteger(drawBefore) || drawBefore < 0) throw new Error('drawings frame counter is unavailable');
+      return { drawBefore, epoch: state.gridEpoch,
+        view: r.viewSnapshot, prices: { low, high }, session: state.sessionId };
+    }, points);
+    let presentation: unknown;
+    await expect.poll(async () => {
+      presentation = await page.evaluate(
+      async ({ framed, points }) => {
+        // @ts-expect-error Vite serves the existing runtime price mapping module.
+        const { priceToRow, scaleFromEpoch } = await import('/src/gl/priceScale.ts');
+        const { renderer: r, store } = (window as unknown as { __flowmapLive: DrawingsLive }).__flowmapLive;
+        const state = store.getState();
+        const c = document.querySelector('.draw-layer__canvas') as HTMLCanvasElement | null;
+        const drawCount = r.stats().draws;
+        if (!c?.width || !c.height || !r.marketFrameReady ||
+          !Number.isSafeInteger(drawCount) || drawCount < 0 ||
+          !Number.isSafeInteger(framed.drawBefore) || framed.drawBefore < 0 || drawCount <= framed.drawBefore ||
+          r.following || r.priceFollow !== 'off' || state.sessionId !== framed.session ||
+          state.gridEpoch !== framed.epoch) return false;
+        const view = r.viewSnapshot;
+        if (!Object.entries(framed.view).every(([key, value]) =>
+          Math.abs(view[key as keyof typeof view] - value) < 0.001)) return false;
+        const params = state.gridEpoch === null ? null : state.epochs.get(state.gridEpoch);
+        const base = r.timeline()?.timeBase;
+        if (!params || !base || !(base.dtNs > 0)) return false;
+        const scale = scaleFromEpoch(params);
+        const projected = points ? points.map(p => {
+          const col = base.anchorSeq + Number(BigInt(p.tNs) - base.anchorT0Ns) / base.dtNs;
+          return r.gridToCanvasCss(col, priceToRow(scale, p.price));
+        }) : [[0.25, 0.42], [0.75, 0.62]].map(([x, y]) => {
+          const grid = r.canvasCssToGrid(c.clientWidth * x, c.clientHeight * y);
+          return grid && r.gridToCanvasCss(grid.col, grid.row);
+        });
+        if (!projected.every(xy =>
+          xy && Number.isFinite(xy.x) && Number.isFinite(xy.y) &&
+            xy.x > c.clientWidth * 0.1 && xy.x < c.clientWidth * 0.9 &&
+            xy.y > c.clientHeight * 0.1 && xy.y < c.clientHeight * 0.9)) return false;
+        return { ready: true, view, projected, epoch: state.gridEpoch, session: state.sessionId,
+          drawCount, range: r.residentRange(),
+          canvas: { width: c.width, height: c.height, cssWidth: c.clientWidth, cssHeight: c.clientHeight },
+          timeBase: { anchorSeq: base.anchorSeq, anchorT0Ns: base.anchorT0Ns.toString(), dtNs: base.dtNs } };
+      },
+      { framed, points },
+      );
+      return !!presentation && (presentation as { ready?: boolean }).ready === true;
+    }, { timeout: 45_000 }).toBe(true);
+    await test.info().attach(points ? 'drawings-reload-frame' : 'drawings-placement-frame', {
+      body: JSON.stringify({ ...framed, presentation, points }), contentType: 'application/json',
+    });
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => {
+      const live = (window as unknown as { __flowmapLive?: DrawingsLive }).__flowmapLive;
+      const r = live?.renderer;
+      const state = live?.store.getState();
+      const c = document.querySelector('.draw-layer__canvas') as HTMLCanvasElement | null;
+      return { status: state?.status, session: state?.sessionId, epoch: state?.gridEpoch,
+        ready: r?.marketFrameReady, range: r?.residentRange(), view: r?.viewSnapshot,
+        following: r?.following, priceFollow: r?.priceFollow, draws: r?.stats().draws,
+        canvas: c && { width: c.width, height: c.height, cssWidth: c.clientWidth, cssHeight: c.clientHeight } };
+    }).catch(() => ({ unavailable: true }));
+    await test.info().attach('drawings-frame-failure', {
+      body: JSON.stringify({ diagnostic, points }), contentType: 'application/json',
+    });
+    throw error;
+  }
+}
+
+/** Exact full-backing-canvas count of alpha > 20, read from the source 2D surface. */
 function layerInk(page: Page): Promise<number> {
   return page.evaluate(() => {
     const c = document.querySelector('.draw-layer__canvas') as HTMLCanvasElement | null;
     if (!c || c.width === 0 || c.height === 0) return 0;
-    const off = document.createElement('canvas');
-    off.width = c.width;
-    off.height = c.height;
-    const ctx = off.getContext('2d');
+    const ctx = c.getContext('2d');
     if (!ctx) return 0;
-    ctx.drawImage(c, 0, 0);
-    const d = ctx.getImageData(0, 0, off.width, off.height).data;
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
     let n = 0;
     for (let i = 3; i < d.length; i += 4) if (d[i] > 20) n += 1;
     return n;
@@ -121,6 +239,7 @@ test('drawings: trendline draw → persist across reload (same symbol)', async (
   await seedStorage(page);
   await bootLive(page);
   await waitColumns(page);
+  await frameDrawingsViewport(page);
 
   // Show the drawing toolbar (`D`, its documented toggle) and arm the tool.
   await page.keyboard.press('d');
@@ -128,14 +247,14 @@ test('drawings: trendline draw → persist across reload (same symbol)', async (
   await page.locator('[data-testid="draw-toolbar"] button[aria-label="Trend line"]').click();
   await expect(page.locator('[data-testid="drawing-mode"]')).toBeVisible();
 
-  // Drag a trendline near the live edge (so reload leaves it in view).
+  // Real pointer placement inside the explicitly owned, presented data frame.
   const layer = page.locator('[data-testid="drawing-layer"]');
   const box = await layer.boundingBox();
   expect(box).not.toBeNull();
   const b = box!;
-  const x0 = b.x + b.width * 0.72;
+  const x0 = b.x + b.width * 0.25;
   const y0 = b.y + b.height * 0.42;
-  const x1 = b.x + b.width * 0.96;
+  const x1 = b.x + b.width * 0.75;
   const y1 = b.y + b.height * 0.62;
   await page.mouse.move(x0, y0);
   await page.mouse.down();
@@ -154,10 +273,19 @@ test('drawings: trendline draw → persist across reload (same symbol)', async (
     localStorage.getItem('flowmap.drawings.v1.sim.SIM-DEMO'),
   );
   expect(raw).toBeTruthy();
-  const doc = JSON.parse(raw!) as { version: number; drawings: { tool: string }[] };
+  const doc = JSON.parse(raw!) as {
+    version: number; drawings: { tool: string; points: SavedDrawingPoint[] }[];
+  };
   expect(doc.version).toBe(1);
   expect(doc.drawings).toHaveLength(1);
   expect(doc.drawings[0].tool).toBe('trendline');
+  const points = doc.drawings[0].points;
+  expect(points).toHaveLength(2);
+  for (const point of points) {
+    expect(point.tNs).toMatch(/^-?\d+$/);
+    expect(Number.isFinite(point.price)).toBe(true);
+  }
+  expect(points[0].tNs).not.toBe(points[1].tNs);
 
   // Reload on the SAME symbol: the drawing must come back (loaded from storage).
   await page.reload();
@@ -167,7 +295,14 @@ test('drawings: trendline draw → persist across reload (same symbol)', async (
       () => page.evaluate(() => localStorage.getItem('flowmap.drawings.v1.sim.SIM-DEMO')),
       { timeout: 15_000 },
     )
-    .toBeTruthy();
+    .toBe(raw);
+  await expect.poll(() => page.evaluate(async () => {
+    // @ts-expect-error Vite serves the real drawings store used by the layer.
+    const { useDrawingsStore } = await import('/src/drawings/store.ts');
+    return JSON.parse(JSON.stringify({ version: 1, drawings: useDrawingsStore.getState().items },
+      (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+  }), { timeout: 15_000 }).toEqual(doc);
+  await frameDrawingsViewport(page, points);
   await page.keyboard.press('d');
   await expect(clearBtn).toBeEnabled();
   await expect.poll(() => layerInk(page), { timeout: 15_000 }).toBeGreaterThan(50);

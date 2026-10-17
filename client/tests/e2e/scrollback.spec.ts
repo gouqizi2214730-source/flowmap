@@ -2,7 +2,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { expect, test } from '@playwright/test';
+import { expect, test, type ConsoleMessage, type Page } from '@playwright/test';
+import type { Renderer } from '../../src/gl/renderer';
+import type { useFlowMapStore } from '../../src/state/store';
 
 /**
  * T8 verification — deep scroll-back: LRU full-res residency + HistoryRequest
@@ -39,6 +41,107 @@ const BUDGET = 512;
 const OVERRUN_TARGET = BUDGET * 2 + 128; // ~1152 cols → ~29 s at 40 cols/s
 const THERMAL_LUMA = 25;
 const MIN_THERMAL_PIXELS = 150;
+// Functional completion allowance for full-ring history on software-rendered CI.
+// This does not change the outer test deadline or any rendering/performance gate.
+const FULL_RING_HISTORY_FUNCTIONAL_TIMEOUT_MS = 150_000;
+const HISTORY_OBSERVATION_INTERVAL_MS = 10_000;
+const MAX_HISTORY_OBSERVATIONS = 16; // Reserve the last observation for success.
+const FAILURE_DIAGNOSTIC_TIMEOUT_MS = 1_500;
+
+interface HistoryObservation {
+  stage: 'B' | 'C';
+  start: number;
+  end: number;
+  startedAt: number;
+  nextObservationAt: number;
+  observations: number;
+  intervalMs: number;
+  maxObservations: number;
+  failureSnapshot: boolean;
+}
+
+/** Runs inside the existing predicate; scalar sampling adds no polling loop. */
+function observeFullRingHistory(observation: HistoryObservation) {
+  const live = (window as unknown as { __flowmapLive?: {
+    renderer: Renderer;
+    store: typeof useFlowMapStore;
+  } }).__flowmapLive;
+  const r = live?.renderer;
+  const range = observation.failureSnapshot ? r?.residentRange() : r!.residentRange();
+  const { start, end } = observation;
+  const complete = range && range.oldest <= start && range.newest >= end && r!.validFromSeq <= start && !r!.historyStats()?.inFlight;
+  const now = Date.now();
+  if (observation.failureSnapshot || complete ||
+      (now >= observation.nextObservationAt && observation.observations < observation.maxObservations - 1)) {
+    const view = r?.viewSnapshot;
+    const history = r?.historyStats();
+    const state = live?.store.getState();
+    const snapshot = {
+      stage: observation.stage,
+      event: observation.failureSnapshot ? 'failure-state' : complete ? 'pass' : observation.observations === 0 ? 'start' : 'progress',
+      elapsedMs: now - observation.startedAt,
+      requestedStart: start, requestedEnd: end,
+      viewColOffset: view?.colOffset ?? null, viewColScale: view?.colScale ?? null,
+      viewRowOffset: view?.rowOffset ?? null, viewRowScale: view?.rowScale ?? null,
+      following: r?.following ?? null, wantedFollowTime: r?.wantedFollowTime ?? null,
+      priceFollow: r?.priceFollow ?? null, budget: r?.residentBudgetCols ?? null,
+      residentOldest: range?.oldest ?? null, residentNewest: range?.newest ?? null,
+      residentCount: range?.count ?? null, validFrom: r?.validFromSeq ?? null,
+      newestSourceSeq: r?.newestColSeq ?? null,
+      requestCount: history?.requestCount ?? null, inFlight: history?.inFlight ?? null,
+      historyError: history?.error?.slice(0, 512) ?? null,
+      connectionStatus: state?.status ?? null, sessionId: state?.sessionId?.slice(0, 128) ?? null,
+      gridEpoch: state?.gridEpoch ?? null, sessionRevision: state?.sessionRevision ?? null,
+      serverRetainedBounds: 'unavailable',
+    };
+    if (observation.failureSnapshot) return snapshot;
+    if (observation.observations < observation.maxObservations) {
+      console.info(`FLOWMAP_HISTORY_WAIT ${observation.stage} ${JSON.stringify(snapshot)}`);
+      observation.observations++;
+      observation.nextObservationAt = now + observation.intervalMs;
+    }
+  }
+  return complete;
+}
+
+async function waitForFullRingHistory(page: Page, stage: 'B' | 'C', target: { start: number; end: number }): Promise<void> {
+  const observation: HistoryObservation = {
+    stage, ...target, startedAt: Date.now(), nextObservationAt: 0, observations: 0,
+    intervalMs: HISTORY_OBSERVATION_INTERVAL_MS, maxObservations: MAX_HISTORY_OBSERVATIONS,
+    failureSnapshot: false,
+  };
+  const prefix = `FLOWMAP_HISTORY_WAIT ${stage} `;
+  const forwardObservation = (message: ConsoleMessage) => {
+    if (message.type() === 'info' && message.text().startsWith(prefix)) console.log(message.text());
+  };
+  page.on('console', forwardObservation);
+  console.log(prefix + JSON.stringify({ event: 'wait-start', ...target, elapsedMs: 0, state: 'awaiting page observation' }));
+  try {
+    await page.waitForFunction(observeFullRingHistory, observation, {
+      timeout: FULL_RING_HISTORY_FUNCTIONAL_TIMEOUT_MS,
+    });
+  } catch (error) {
+    // Persist the original error before asking a potentially stalled page for state.
+    console.error(prefix + JSON.stringify({ event: 'fail', ...target, elapsedMs: Date.now() - observation.startedAt }), error);
+    let diagnosticTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const snapshot = await Promise.race([
+        page.evaluate(observeFullRingHistory, { ...observation, failureSnapshot: true }),
+        new Promise<never>((_, reject) => {
+          diagnosticTimer = setTimeout(() => reject(new Error('page diagnostics unavailable after 1500ms')), FAILURE_DIAGNOSTIC_TIMEOUT_MS);
+        }),
+      ]);
+      console.log(prefix + JSON.stringify(snapshot));
+    } catch (diagnosticError) {
+      console.log(prefix + JSON.stringify({ event: 'failure-state-unavailable', reason: String(diagnosticError).slice(0, 512) }));
+    } finally {
+      clearTimeout(diagnosticTimer);
+    }
+    throw error;
+  } finally {
+    page.off('console', forwardObservation);
+  }
+}
 
 interface CanvasStats {
   thermal: number;
@@ -201,11 +304,7 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
   expect(zoomState.span, 'time-zoomed out to the whole ring').toBeGreaterThanOrEqual(
     zoomState.budget,
   );
-  await page.waitForFunction(({start, end}) => {
-    const r = window.__flowmapLive!.renderer;
-    const range = r.residentRange();
-    return range && range.oldest <= start && range.newest >= end && r.validFromSeq <= start && !r.historyStats()?.inFlight;
-  }, zoomState, { timeout: 90_000 });
+  await waitForFullRingHistory(page, 'B', zoomState);
   const reqAfterZoom = await page.evaluate(
     () => (window as unknown as { __flowmapLive: any }).__flowmapLive.renderer.historyStats().requestCount,
   );
@@ -224,11 +323,7 @@ test('deep scroll-back: LRU residency + history backfill + context-loss recovery
     r.setViewForTest(start, budget, v.rowOffset, v.rowScale);
     return { start, end };
   }, BUDGET);
-  await page.waitForFunction(({start, end}) => {
-    const r = window.__flowmapLive!.renderer;
-    const range = r.residentRange();
-    return range && range.oldest <= start && range.newest >= end && r.validFromSeq <= start && !r.historyStats()?.inFlight;
-  }, forward, { timeout: 90_000 });
+  await waitForFullRingHistory(page, 'C', forward);
   expect((await readStats()).thermal).toBeGreaterThan(MIN_THERMAL_PIXELS);
 
   // --- (D) WebGL context loss → recover and render again. ---------------------

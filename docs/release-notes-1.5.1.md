@@ -21,3 +21,5 @@ Windows measurements on this PC passed graphics gates in a 10-minute LIVE trial 
 The measured private build08 predates the picker correction and corrected external health harness. The original traces used the earlier harness. Corrected release source has not undergone new native performance, campaign, installer or pixel validation.
 
 Stable publication waits for all eight platform installers and their checksum manifest.
+
+Testing: saved-drawing checks explicitly frame persisted anchors. Functional full-ring history waits allow 150 seconds on software-rendered CI. The 360-second outer test and complete correctness and pixel checks remain; this is a longer wait allowance, not a loading speed improvement. CI retains test results and traces.
