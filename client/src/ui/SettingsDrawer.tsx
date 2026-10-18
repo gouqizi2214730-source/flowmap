@@ -222,12 +222,22 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
                 return <button type="button" key={id}
                   className={`appearance-choice${theme === id ? ' is-on' : ''}`}
                   aria-pressed={theme === id} data-testid={`theme-${id}`} onClick={() => setTheme(id)}>
-                  <svg className="theme-preview" viewBox="0 0 100 42" aria-hidden="true">
-                    <rect width="100" height="42" fill={chart.bg} />
-                    <path d="M0 14H100M0 28H100M32 0V42M66 0V42" stroke={chart.grid} strokeOpacity=".35" />
-                    {[.2,.4,.6,.8].map((n,i) => <rect key={n} x={8+i*6} y={8+i*7} width={80-i*10} height="3" fill={`rgb(${preview.density[i+1].rgb.join(',')})`} />)}
-                    <path d="M0 30L14 27L25 31L42 18L57 23L69 12L85 16L100 8" fill="none" stroke={THEMES[id].mode === 'light' ? '#FFFFFF' : '#000000'} strokeWidth="3" />
-                    <path d="M0 30L14 27L25 31L42 18L57 23L69 12L85 16L100 8" fill="none" stroke={chart.price} strokeWidth="1.3" />
+                  <svg className="theme-preview" viewBox="0 0 144 64" aria-hidden="true">
+                    <rect width="144" height="64" fill={THEMES[id].canvas.bg} />
+                    <rect width="144" height="10" fill={chart.chipBg} />
+                    <path d="M5 5H21M28 5H46" stroke={chart.ink} strokeWidth="2" />
+                    <path d="M118 5H139" stroke={chart.accent} strokeWidth="3" />
+                    <rect y="11" width="105" height="46" fill={chart.bg} />
+                    <path d="M0 25H105M0 41H105M32 11V57M67 11V57" stroke={chart.grid} strokeOpacity=".25" />
+                    {[.2,.4,.6,.8].map((n,i) => <rect key={n} x={5+i*8} y={18+i*9} width={90-i*14} height="3" fill={`rgb(${preview.density[i+1].rgb.join(',')})`} />)}
+                    <path d="M0 46L14 40L25 44L42 29L57 34L69 23L85 27L104 17" fill="none" stroke={THEMES[id].mode === 'light' ? '#FFFFFF' : '#000000'} strokeWidth="3" />
+                    <path d="M0 46L14 40L25 44L42 29L57 34L69 23L85 27L104 17" fill="none" stroke={chart.price} strokeWidth="1.3" />
+                    <rect x="106" y="11" width="38" height="46" fill={chart.gutterBg} />
+                    <path d="M111 17H137M111 25H137M111 33H137M111 41H137M111 49H137" stroke={chart.chipBorder} />
+                    <path d="M127 21H138M127 29H134" stroke={THEMES[id].canvas.ask} strokeWidth="3" />
+                    <path d="M111 37H122M115 45H122" stroke={THEMES[id].canvas.bid} strokeWidth="3" />
+                    <rect y="58" width="144" height="6" fill={chart.chipBg} />
+                    <path d="M5 61H138" stroke={chart.accent} strokeOpacity=".65" />
                   </svg>
                   <span className="appearance-choice__name">{t(`theme.${id}.name`)}<span aria-hidden="true">{theme === id ? '✓' : ''}</span></span>
                   <span className="appearance-choice__hint">{t(`theme.${id}.hint`)}</span>

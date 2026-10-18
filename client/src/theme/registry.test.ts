@@ -4,7 +4,7 @@
  * The load-bearing invariant: EVERY theme declares EVERY variable that
  * `ui/theme.css` owns, parsed programmatically from both sheets — a var
  * added to the design system without theme coverage fails here. Also:
- * `midnight` must stay byte-identical to `:root` (default = today's look),
+ * `midnight` must match `:root` so the initial paint matches the default,
  * and each theme's registry canvas literals must match its CSS values.
  */
 
@@ -89,6 +89,26 @@ function relLumRgb(rgb: readonly number[]): number {
   return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
 }
 
+/** CIE Lab (D65) for opaque sRGB surface colors, used by the regression below. */
+function surfaceLab(color: string): [number, number, number] {
+  const [r, g, b] = parseCss(color).slice(0, 3).map((v) => {
+    const s = v / 255;
+    return s <= 0.04045 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  const [x, y, z] = [
+    (0.4124564 * r + 0.3575761 * g + 0.1804375 * b) / 0.95047,
+    0.2126729 * r + 0.7151522 * g + 0.0721750 * b,
+    (0.0193339 * r + 0.1191920 * g + 0.9503041 * b) / 1.08883,
+  ].map((v) => v > (6 / 29) ** 3 ? Math.cbrt(v) : v / (3 * (6 / 29) ** 2) + 4 / 29);
+  return [116 * y - 16, 500 * (x - y), 200 * (y - z)];
+}
+
+function surfaceDistance(a: string, b: string): number {
+  const left = surfaceLab(a);
+  const right = surfaceLab(b);
+  return Math.hypot(...left.map((v, i) => v - right[i]));
+}
+
 /** WCAG contrast between an rgb triple and a css ground literal. */
 function contrastRgb(rgb: readonly number[], ground: string): number {
   const g = parseCss(ground);
@@ -138,9 +158,7 @@ describe('theme registry / css coverage', () => {
     expect(THEME_IDS[0]).toBe('midnight');
   });
 
-  /** Chart-palette tokens (theme-owned since campaign 2026-09-11): every
-   *  theme declares all twelve; the F6 legacy-ramp override re-pins midnight's
-   *  set when `data-chart-ramp` selects flow/inferno/classic. */
+  /** Chart tokens remain theme-owned for every heatmap family. */
   function isChartToken(name: string): boolean {
     return name.startsWith('--chart-');
   }
@@ -190,6 +208,28 @@ describe('theme registry / css coverage', () => {
 
   it('palette choices never override chart theme tokens', () => {
     expect(themesCss).not.toContain('data-chart-ramp');
+  });
+
+  it('theme pairs differ across at least two large-area surface roles', () => {
+    const roles = ['--chart-bg', '--bg-1', '--bg-2', '--bg-3', '--chart-gutter-bg'] as const;
+    for (let i = 0; i < THEME_IDS.length; i++) {
+      for (let j = i + 1; j < THEME_IDS.length; j++) {
+        const a = THEME_IDS[i];
+        const b = THEME_IDS[j];
+        const left = blockOf(themesCss, `:root[data-theme='${a}']`);
+        const right = blockOf(themesCss, `:root[data-theme='${b}']`);
+        const distances = roles.map((role) => ({
+          role,
+          distance: surfaceDistance(valueOf(left, role), valueOf(right, role)),
+        }));
+        // Guard against reverting to nearly identical neutral fields with only
+        // different accent colors. This bound is not proof of recognizable
+        // identity: review complete, equally framed theme screenshots as well.
+        const separated = distances.filter(({ distance }) => distance >= 12);
+        const details = distances.map(({ role, distance }) => `${role}: ${distance.toFixed(2)}`).join(', ');
+        expect(separated.length, `${a} vs ${b} (${details})`).toBeGreaterThanOrEqual(2);
+      }
+    }
   });
 
   it('midnight is visually identical to :root — every value matches (chart tokens included)', () => {

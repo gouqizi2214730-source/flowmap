@@ -152,12 +152,12 @@ describe('HeatLegend (mounted)', () => {
     const bar = legend.querySelector('[data-testid="heat-legend-bar"]')!;
     expect(legend.getAttribute('aria-label')).toContain('theme colormap');
     expect(bar.getAttribute('data-ramp')).toBe(String(RAMP_THEME));
-    // Midnight's density ramp is byte-identical to the FLOW stops at the source.
-    expect(bar.getAttribute('style')).toContain('rgb(11, 17, 27) 0.0%');
+    // Zero density uses the active chart ground; the family owns the other stops.
+    expect(bar.getAttribute('style')).toContain('rgb(8, 27, 55) 0.0%');
 
     act(() => setTheme('paper'));
-    expect(bar.getAttribute('style')).toContain('rgb(242, 245, 248) 0.0%');
-    expect(bar.getAttribute('style')).not.toContain('rgb(11, 17, 27) 0.0%');
+    expect(bar.getAttribute('style')).toContain('rgb(255, 244, 220) 0.0%');
+    expect(bar.getAttribute('style')).not.toContain('rgb(8, 27, 55) 0.0%');
   });
 
   it('theme + SYNTH: the bar follows the active theme synth ramp (R1-M2)', () => {

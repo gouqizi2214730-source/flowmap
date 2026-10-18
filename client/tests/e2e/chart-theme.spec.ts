@@ -1,5 +1,5 @@
 import type { FlowmapTestApi } from '../../src/gl/testHook';
-import { COLORMAP_CATALOG, resolveAppearance } from '../../src/theme/appearance';
+import { COLORMAP_CATALOG, hexRgb, resolveAppearance } from '../../src/theme/appearance';
 import { expect, test, type Page } from '@playwright/test';
 
 import { THEMES, THEME_IDS, type ThemeId } from '../../src/theme/registry';
@@ -8,11 +8,9 @@ import { buildRamp } from '../../src/gl/lut';
 /**
  * Visual campaign 2026-09-11 (lane L4) — the chart follows the active theme.
  *
- * F6 contract: the active colormap family is stamped on `<html data-chart-ramp>`
- * and the CSS mirror declares the whole `--chart-*` set per theme; `'theme'`
- * lets the active theme own the chart ground/ink, while legacy families
- * (`flow` / `inferno` / `classic`) pin the shipped dark-island values no matter
- * the theme. This spec asserts the DOM token side unconditionally and probes the
+ * The active colormap family is stamped on `<html data-chart-ramp>`.
+ * Every family keeps the theme's chart ground and ink. This spec checks the
+ * DOM token side unconditionally and probes the
  * real GL canvas HARD: R1-H1 (StrictMode-stale theme gate) made the paper boot
  * render the dark FLOW island until a theme switch, so the paper case now
  * requires a light canvas at boot plus `renderer.currentRamp === RAMP_THEME`.
@@ -40,6 +38,10 @@ function chartVar(page: Page, name: string): Promise<string> {
 
 function luma(px: Px): number {
   return 0.299 * px[0] + 0.587 * px[1] + 0.114 * px[2];
+}
+
+function cssRgb(hex: string): string {
+  return `rgb(${hexRgb(hex).join(', ')})`;
 }
 
 /**
@@ -143,7 +145,7 @@ async function reloadSim(page: Page): Promise<void> {
   await bootSim(page);
 }
 
-test('default midnight + theme colormap keeps the shipped dark chart ground', async ({ page }) => {
+test('default midnight + theme colormap boots with its navy chart ground', async ({ page }) => {
   await bootSim(page);
 
   // Post-migration default colormap is `theme` (F6 wiring stamps it on <html>).
@@ -151,10 +153,8 @@ test('default midnight + theme colormap keeps the shipped dark chart ground', as
     .poll(() => page.evaluate(() => document.documentElement.dataset.chartRamp), { timeout: 15_000 })
     .toBe('theme');
 
-  // DOM mirror: midnight keeps the shipped chart tokens — the ground is the
-  // active ramp's first stop (#05080e), i.e. the exact GL clear colour.
-  expect(await chartVar(page, '--chart-bg')).toBe('rgb(11, 17, 27)');
-  expect(await chartVar(page, '--chart-ink')).toBe('rgb(226, 235, 246)');
+  expect(await chartVar(page, '--chart-bg')).toBe(cssRgb(THEMES.midnight.chart.bg));
+  expect(await chartVar(page, '--chart-ink')).toBe(cssRgb(THEMES.midnight.chart.ink));
 
   // S2-Q1 decoupling check: midnight's OWN density ramp is served from the
   // theme row now — the renderer must report RAMP_THEME (5), not the frozen
@@ -206,7 +206,7 @@ test('paper theme flips the chart ground + ink to the light palette', async ({ p
     .poll(() => page.evaluate(() => document.documentElement.dataset.chartRamp), { timeout: 15_000 })
     .toBe('theme');
 
-  expect(await chartVar(page, '--chart-bg')).toBe('rgb(242, 245, 248)');
+  expect(await chartVar(page, '--chart-bg')).toBe(cssRgb(THEMES.paper.chart.bg));
   const inkNorm = await chartVar(page, '--chart-ink');
   const inkRgb = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(inkNorm);
   expect(inkRgb, `--chart-ink resolved to "${inkNorm}"`).not.toBeNull();
@@ -256,8 +256,8 @@ test('classic colormap preserves the light chart ground and dark ink', async ({ 
     .poll(() => page.evaluate(() => document.documentElement.dataset.chartRamp), { timeout: 15_000 })
     .toBe('classic');
 
-  expect(await chartVar(page, '--chart-bg')).toBe('rgb(242, 245, 248)');
-  expect(await chartVar(page, '--chart-ink')).toBe('rgb(29, 44, 61)');
+  expect(await chartVar(page, '--chart-bg')).toBe(cssRgb(THEMES.paper.chart.bg));
+  expect(await chartVar(page, '--chart-ink')).toBe(cssRgb(THEMES.paper.chart.ink));
   expect((await meanCanvasLuma(page))!).toBeGreaterThan(90);
 });
 

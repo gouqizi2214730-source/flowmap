@@ -75,7 +75,7 @@ describe('ChartLegend', () => {
     expect(colors(el,'[data-swatch="line"]')).toEqual([OVERLAY.price.css,OVERLAY.vwap.css].map(normalizedColor));
     // Only the store notification re-renders React. No root.render follows bridge effects.
     act(() => setTheme('paper'));
-    expect(colors(el,'[data-swatch="line"]')).toEqual(['rgb(29, 44, 61)','rgb(113, 60, 160)']);
+    expect(colors(el,'[data-swatch="line"]')).toEqual(['rgb(53, 40, 24)','rgb(113, 60, 160)']);
     expect(colors(el,'[data-swatch="line"]')).toEqual([OVERLAY.price.css,OVERLAY.vwap.css].map(normalizedColor));
   });
 });

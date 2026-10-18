@@ -125,11 +125,11 @@ describe('getCanvasPalette', () => {
     );
     expect(getCanvasPalette('swiss')).toEqual({
       bg: '#FFFFFF',
-      grid: '#AEBFCE',
-      text: '#142C42',
-      bid: '#07665F',
-      ask: '#A3323C',
-      accent: '#1D5593',
+      grid: '#9B9B9B',
+      text: '#202020',
+      bid: '#006653',
+      ask: '#A32642',
+      accent: '#364BC5',
     });
   });
 });
