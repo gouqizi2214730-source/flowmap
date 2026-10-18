@@ -30,6 +30,9 @@ Semantics:
   return usable expired observations with their original timestamps while
   one bounded refresh runs. ``wait_for_refresh`` makes movers prewarm await
   the fresh shared fetch. :meth:`aclose` drains owned background tasks.
+- **Finite catalog preparation.** Production starts a separate one-pass,
+  two-worker warmup for every bundled symbol. Pure revisioned snapshots let
+  clients receive each observation without starting per-row network reads.
 """
 
 from __future__ import annotations
@@ -38,6 +41,7 @@ import asyncio
 import logging
 import math
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Sequence
 
 import msgspec
@@ -71,6 +75,7 @@ CRYPTO_MOVERS_CONCURRENCY = 4
 # enforces) and slices per caller: caching the FIRST caller's limit poisoned
 # a later, larger request for a whole TTL (survey-1 #4).
 _MOVERS_MAX = 100
+_PREVIEW_QUOTE_TIMEOUT_S = 15.0
 
 QuoteFn = Callable[[str, str], Awaitable["QuoteData"]]
 MoversFn = Callable[[str, int], Awaitable[list["QuoteData"]]]
@@ -139,6 +144,7 @@ class MarketDataCache:
         stale_while_revalidate: bool = False,
         max_quote_refreshes: int = 8,
         quote_refresh_timeout_s: float = 15.0,
+        preview_catalog: Sequence[tuple[str, str]] = (),
     ) -> None:
         self._quote_fn = quote_fn
         self._movers_fn = movers_fn
@@ -155,6 +161,14 @@ class MarketDataCache:
         self._quote_refresh_timeout_s = max(0.01, float(quote_refresh_timeout_s))
         self._quote_refreshes: dict[tuple[str, str], asyncio.Task] = {}
         self._closed = False
+        self._preview_catalog = tuple(dict.fromkeys((market, symbol.upper()) for market, symbol in preview_catalog))
+        self._preview_completed: set[tuple[str, str]] = set()
+        self._preview_started = False
+        self._preview_warming = bool(self._preview_catalog)
+        self._preview_task: asyncio.Task | None = None
+        self._preview_generation = uuid.uuid4().hex
+        self._quote_revision = 0
+        self._quote_revisions: dict[tuple[str, str], int] = {}
 
     # -- quotes ----------------------------------------------------------------
 
@@ -189,7 +203,7 @@ class MarketDataCache:
             except TimeoutError:
                 cached = self._quotes.get(key)
                 if cached is not None:
-                    self._quotes[key] = (self._clock(), self._fallback_quote(*key, cached))
+                    self._store_quote(key, self._fallback_quote(*key, cached))
             finally:
                 self._quote_refreshes.pop(key, None)
 
@@ -213,15 +227,14 @@ class MarketDataCache:
                     if self._stale_while_revalidate and cached is not None:
                         # A failed refresh has its own TTL, avoiding a new
                         # request on every hover while preserving useful data.
-                        self._quotes[key] = (self._clock(), fallback)
+                        self._store_quote(key, fallback)
                     return fallback
                 if (
                     self._stale_while_revalidate and cached is not None
                     and self._usable_quote(cached[1]) and not self._usable_quote(q)
                 ):
                     q = msgspec.structs.replace(cached[1], stale=True, reachable=q.reachable)
-                self._quotes[key] = (self._clock(), q)
-                self._evict(self._quotes)
+                self._store_quote(key, q)
                 return q
         finally:
             # AFTER the async with released the lock (and any waiters that
@@ -239,7 +252,40 @@ class MarketDataCache:
         inserts pay this cost — error fallbacks never grow the store.
         """
         while len(store) > self._max_entries:
-            store.pop(next(iter(store)))
+            key = next(iter(store))
+            store.pop(key)
+            if store is self._quotes:
+                self._quote_revisions.pop(key, None)
+
+    def _store_quote(self, key: tuple[str, str], quote: QuoteData) -> None:
+        self._quotes[key] = (self._clock(), quote)
+        self._quote_revision += 1
+        self._quote_revisions[key] = self._quote_revision
+        self._evict(self._quotes)
+
+    def preview_snapshot(self, after: int = 0, generation: str | None = None) -> dict[str, object]:
+        """Pure bounded cache read: no provider calls, refreshes or awaited work.
+
+        Each retained key carries only its newest revision. A different process
+        generation (or a cursor ahead of this cache) requests a full reset.
+        """
+        revision = self._quote_revision
+        full = after <= 0 or after > revision or (generation is not None and generation != self._preview_generation)
+        quotes = []
+        for key, (stored_at, quote) in self._quotes.items():
+            if full or self._quote_revisions.get(key, 0) > after:
+                display = quote if self._fresh(stored_at) else msgspec.structs.replace(quote, stale=True)
+                quotes.append(quote_to_json(display))
+        ready = sum(
+            1 for key in self._preview_catalog
+            if key in self._quotes and self._usable_quote(self._quotes[key][1])
+            and sum(math.isfinite(value) and value > 0 for value in self._quotes[key][1].spark) >= 2
+        )
+        return {
+            "quotes": quotes, "revision": revision, "generation": self._preview_generation,
+            "warming": self._preview_warming, "total": len(self._preview_catalog),
+            "completed": len(self._preview_completed), "ready": ready,
+        }
 
     @staticmethod
     def _release_lock(locks: dict, key, lock: asyncio.Lock) -> None:
@@ -306,6 +352,54 @@ class MarketDataCache:
 
     # -- background prewarm (production only) ----------------------------------
 
+    async def run_preview_catalog(self) -> None:
+        """One finite startup pass over the bundled catalog, at most two jobs.
+
+        Hover and movers share the same per-key quote admission, so cached or
+        in-flight observations are reused. Empty providers remain empty.
+        """
+        if self._closed or self._preview_started:
+            return
+        self._preview_started = True
+        self._preview_task = asyncio.current_task()
+        next_index = 0
+
+        async def worker() -> None:
+            nonlocal next_index
+            while not self._closed and next_index < len(self._preview_catalog):
+                key = self._preview_catalog[next_index]
+                next_index += 1
+                result: QuoteData | None = None
+                try:
+                    async with asyncio.timeout(_PREVIEW_QUOTE_TIMEOUT_S):
+                        result = await self.quote(*key, wait_for_refresh=True)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.debug("preview warmup failed for %s:%s", *key, exc_info=True)
+                if key not in self._quotes:
+                    # A finished unavailable attempt is still useful to the
+                    # picker: publish its explicit empty result with the
+                    # normal negative TTL instead of repeating the same slow
+                    # request on first hover. Never replace a concurrent good
+                    # observation, and never fabricate a price or sparkline.
+                    self._store_quote(key, result or self._fallback_quote(*key, None))
+                self._preview_completed.add(key)
+
+        workers = [asyncio.create_task(worker(), name=f"preview-catalog-{i}")
+                   for i in range(min(2, len(self._preview_catalog)))]
+        try:
+            if workers:
+                await asyncio.gather(*workers)
+        finally:
+            for task in workers:
+                if not task.done():
+                    task.cancel()
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
+            self._preview_warming = False
+            self._preview_task = None
+
     async def run_background(self, markets: tuple[str, ...], interval_s: float) -> None:
         """Periodically refresh movers so the first UI read is warm. Started
         by ``create_app``'s lifespan for the production cache (cancelled on
@@ -320,12 +414,17 @@ class MarketDataCache:
     async def aclose(self) -> None:
         """Stop admission, cancel and drain every owned quote-refresh task."""
         self._closed = True
+        catalog = self._preview_task
+        if catalog is not None and catalog is not asyncio.current_task():
+            catalog.cancel()
+            await asyncio.gather(catalog, return_exceptions=True)
         tasks = list(self._quote_refreshes.values())
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._quote_refreshes.clear()
+        self._preview_warming = False
 
     def _fresh(self, at_ns: int) -> bool:
         return self._clock() - at_ns < self._ttl_ns

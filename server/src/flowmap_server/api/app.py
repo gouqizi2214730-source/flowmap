@@ -126,16 +126,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     market_cache = getattr(app.state, "market_cache", None)
     run_background = getattr(market_cache, "run_background", None)
     prewarm: asyncio.Task | None = None
+    preview_warm: asyncio.Task | None = None
     if callable(run_background):
         prewarm = asyncio.create_task(
             run_background(("crypto", "equity"), 30.0), name="market-cache-prewarm"
         )
+    run_catalog = getattr(market_cache, "run_preview_catalog", None)
+    if callable(run_catalog):
+        preview_warm = asyncio.create_task(run_catalog(), name="market-preview-catalog")
     try:
         yield
     finally:
-        if prewarm is not None:
-            prewarm.cancel()
-            await asyncio.gather(prewarm, return_exceptions=True)
+        warmups = [task for task in (prewarm, preview_warm) if task is not None]
+        for task in warmups:
+            task.cancel()
+        if warmups:
+            await asyncio.gather(*warmups, return_exceptions=True)
         close_cache = getattr(market_cache, "aclose", None)
         if callable(close_cache):
             await close_cache()
@@ -172,6 +178,8 @@ def create_app(
     # provider seams, called on /api/movers|/api/quote reads and by the lifespan
     # prewarm task (see _lifespan).
     if market_cache is None:
+        from flowmap_server.data.universe import CRYPTO_MARKET, CRYPTO_SYMBOLS, EQUITY_TICKERS
+
         async def shared_quote(market: str, symbol: str):
             # Movers and hover previews share observation ownership; successful
             # workers warm previews before the complete ranking is available.
@@ -183,6 +191,8 @@ def create_app(
         market_cache = MarketDataCache(
             quote_fn=default_quote_fn, movers_fn=shared_movers,
             stale_while_revalidate=True,
+            preview_catalog=tuple((CRYPTO_MARKET, symbol) for symbol in CRYPTO_SYMBOLS)
+            + tuple(("equity", symbol) for symbol in EQUITY_TICKERS),
         )
     app = FastAPI(
         title="flowmap-server",

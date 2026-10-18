@@ -644,6 +644,58 @@ describe('SymbolSearch recents + keyboard navigation', () => {
 // that identity aborted the in-flight `/api/quote` (request #1 always wasted;
 // BTCUSDT's preview arrived 4-8 s late). These tests pin the keyed keep-alive.
 describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
+  it('collects never-opened catalogue previews while search is closed', async () => {
+    let releaseSnapshot: ((value: unknown) => void) | undefined;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes('/api/previews?')) {
+        return new Promise((resolve) => {
+          releaseSnapshot = (value) => resolve({ ok: true, json: async () => value } as Response);
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => url.includes('/api/universe?')
+        ? { symbols: [...BUNDLED, { market: 'equity', symbol: 'GLD', capability: {} }] } : body(url) } as Response);
+    }) as unknown as typeof fetch;
+    const container = render();
+    expect(palette()).toBeNull();
+    expect(calls.some(url => url.includes('/api/previews?after=0'))).toBe(true);
+    act(() => releaseSnapshot?.({ generation: 'catalog-first', revision: 1, total: 260,
+      completed: 1, ready: 1, warming: true, quotes: [
+        { market: 'equity', symbol: 'GLD', price: 420, changePct: 1, spark: [410, 415, 420] },
+      ] }));
+    await settle();
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    type(palette().querySelector('input')!, 'GLD');
+    expect(palette().querySelector('.sympal__pv-sym')!.textContent).toBe('GLD');
+    expect(palette().querySelector('.sympal__pv-px')!.textContent).toBe('420.00');
+    expect(palette().querySelector('.sympal__pv-spark path')).not.toBeNull();
+    expect(calls.some(url => url.includes('/api/quote?') && url.includes('symbol=GLD'))).toBe(false);
+    expect(palette().textContent).toContain('preparing previews 1/260');
+    await settle();
+  });
+
+  it('adopts a restarted server generation even when its revision is already higher', async () => {
+    const snapshotCalls: string[] = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/previews?')) {
+        snapshotCalls.push(url);
+        return Promise.resolve({ ok: true, json: async () => ({
+          generation: snapshotCalls.length === 1 ? 'server-a' : 'server-b',
+          revision: snapshotCalls.length === 1 ? 10 : 20,
+          total: 260, completed: 0, ready: 0, warming: true, quotes: [],
+        }) } as Response);
+      }
+      return Promise.resolve({ ok: true, json: async () => body(url) } as Response);
+    }) as unknown as typeof fetch;
+    render();
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 1_100)); });
+    expect(snapshotCalls[0]).toContain('after=0');
+    expect(snapshotCalls[1]).toContain('after=10&generation=server-a');
+    expect(snapshotCalls[2]).toContain('after=20&generation=server-b');
+  });
+
   it('shows persisted real graphs on the first render and keeps identity while all HTTP is pending', () => {
     const fetchedAt = Date.now() - 60_000;
     window.localStorage.setItem('flowmap.recents', JSON.stringify(['equity:AAPL', 'binance-spot:BTCUSDT']));

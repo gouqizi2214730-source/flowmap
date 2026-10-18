@@ -1,4 +1,4 @@
-"""Search / discovery REST routes (GOAL 2): venues, universe, movers, quote.
+"""Search / discovery REST routes: venues, universe, movers, quote, previews.
 
 - ``/api/venues`` is PURE: the engine's venue set (native connectors + every
   ccxt id + equity + sim), read from module constants.
@@ -9,6 +9,8 @@
   is behind the TTL-debounced :class:`~flowmap_server.api.market_cache.MarketDataCache`
   on ``app.state.market_cache`` (injectable; canned in tests). A closed/stale
   equity value is surfaced as ``stale`` — never presented as a live NBBO print.
+- ``/api/previews`` reads the bounded cache and startup-warmup progress only;
+  it never starts provider work.
 
 The cache absence is tolerated: if no cache is wired (should not happen in the
 real app), movers/quote degrade to empty/unreachable rather than 500.
@@ -127,3 +129,13 @@ async def quote(request: Request, market: str, symbol: str) -> dict[str, object]
         q = QuoteData(market=market, symbol=symbol.upper(), reachable=False, stale=True)
         return quote_to_json(q)
     return quote_to_json(await cache.quote(market, symbol))
+
+
+@router.get("/previews")
+async def previews(request: Request, after: int = 0, generation: str | None = None) -> dict[str, object]:
+    """Incremental cached previews and startup progress; never starts provider I/O."""
+    cache = _cache(request)
+    if cache is None:
+        return {"quotes": [], "revision": 0, "generation": "", "warming": False,
+                "total": 0, "completed": 0, "ready": 0}
+    return cache.preview_snapshot(after, generation)

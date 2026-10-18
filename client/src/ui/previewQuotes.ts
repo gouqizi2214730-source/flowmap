@@ -12,8 +12,11 @@ export interface PreviewQuote {
 }
 
 export const PREVIEW_QUOTES_KEY = 'flowmap.preview-quotes.v1';
-const CAPACITY = 128;
+const CAPACITY = 512;
 const MAX_SPARK = 64;
+// All 260 curated symbols plus custom picks fit together. At full capacity,
+// valid long decimal prices and escaped 128-character symbols exceed 1 MB.
+const MAX_CACHE_CHARS = 2_000_000;
 const FRESH_MS = 15_000;
 const FAILURE_MS = 5_000;
 const RETAIN_MS = 7 * 24 * 60 * 60 * 1_000;
@@ -243,7 +246,7 @@ export class PreviewQuotes {
   private hydrate(): void {
     try {
       const raw = this.options.storage?.getItem(PREVIEW_QUOTES_KEY);
-      if (!raw || raw.length > 1_000_000) return;
+      if (!raw || raw.length > MAX_CACHE_CHARS) return;
       const parsed = JSON.parse(raw) as { version?: unknown; entries?: unknown };
       if (parsed.version !== 1 || !Array.isArray(parsed.entries)) return;
       for (const value of parsed.entries.slice(-CAPACITY)) {

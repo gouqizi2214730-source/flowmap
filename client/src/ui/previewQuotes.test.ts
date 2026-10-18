@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { PREVIEW_QUOTES_KEY, PreviewQuotes, type PreviewQuote } from './previewQuotes';
+import { BUNDLED_DIRECTORY } from './bundledDirectory';
 
 const NOW = 1_800_000_000_000;
 const DAY = 24 * 60 * 60 * 1_000;
@@ -229,25 +230,67 @@ it('aborts on disposal without failure notifications and resumes useful work aft
   expect(cache.get('equity:AAPL')?.price).toBe(125); expect(onChange).toHaveBeenCalledOnce();
 });
 
-it('caps cache entries at 128, spark history at 64, and removes seven-day-old observations', () => {
+it('caps cache entries at 512, spark history at 64, and removes seven-day-old observations', () => {
   const { cache } = make();
-  for (let n = 0; n < 130; n++) cache.put({ ...quote(`S${n}`), spark: Array.from({ length: 100 }, (_, k) => k + 1) });
+  for (let n = 0; n < 514; n++) cache.put({ ...quote(`S${n}`), spark: Array.from({ length: 100 }, (_, k) => k + 1) });
   expect(cache.get('equity:S0')).toBeUndefined(); expect(cache.get('equity:S1')).toBeUndefined();
-  expect(cache.get('equity:S129')?.spark).toEqual(Array.from({ length: 64 }, (_, k) => k + 37));
+  expect(cache.get('equity:S513')?.spark).toEqual(Array.from({ length: 64 }, (_, k) => k + 37));
   cache.dispose();
-  expect(JSON.parse(localStorage.getItem(PREVIEW_QUOTES_KEY)!).entries).toHaveLength(128);
+  expect(JSON.parse(localStorage.getItem(PREVIEW_QUOTES_KEY)!).entries).toHaveLength(512);
   vi.setSystemTime(NOW + 7 * DAY + 1);
-  expect(cache.get('equity:S129')).toBeUndefined();
+  expect(cache.get('equity:S513')).toBeUndefined();
 });
 
 it('uses explicit requests for retention while directory-render reads stay passive', () => {
   const { cache } = make();
-  for (let n = 0; n < 128; n++) cache.put(quote(`S${n}`));
+  for (let n = 0; n < 512; n++) cache.put(quote(`S${n}`));
   cache.request('equity', 'S0'); // actively selected fresh quote; no network
-  for (let n = 0; n < 128; n++) cache.get(`equity:S${n}`); // render all rows
+  for (let n = 0; n < 512; n++) cache.get(`equity:S${n}`); // render all rows
   cache.put(quote('NEW'));
   expect(cache.get('equity:S0')?.price).toBe(120);
   expect(cache.get('equity:S1')).toBeUndefined();
+});
+
+it('restores real charts for the entire 260-symbol directory before any HTTP request', () => {
+  expect(BUNDLED_DIRECTORY).toHaveLength(260);
+  const observations = BUNDLED_DIRECTORY.map((entry, index) => ({
+    market: entry.market, symbol: entry.symbol, price: index + 1, changePct: index / 10,
+    spark: [index + .5, index + 1, index + 1.5], asOf: NOW * 1e6,
+  }));
+  const { cache } = make();
+  for (const observation of observations) cache.put(observation);
+  cache.put(quote('CUSTOM')); // custom picks must not evict the start of the catalogue
+  cache.dispose();
+  const restored = make();
+  for (const observation of observations) {
+    expect(restored.cache.get(`${observation.market}:${observation.symbol}`))
+      .toEqual({ ...observation, stale: true });
+  }
+  expect(restored.cache.get('binance-spot:BTCUSDT')?.spark).toEqual(observations[0].spark);
+  expect(restored.cache.get('equity:GLD')?.spark).toEqual(observations.at(-1)!.spark);
+  expect(restored.cache.get('equity:CUSTOM')?.price).toBe(120);
+  expect(restored.fetchQuote).not.toHaveBeenCalled();
+  expect(restored.onChange).not.toHaveBeenCalled();
+});
+
+it('round-trips all 512 entries even when valid float precision and escaped symbols exceed one MB', () => {
+  const { cache } = make();
+  const decimal = .0000010000000000000002;
+  const keys: string[] = [];
+  for (let n = 0; n < 512; n++) {
+    const symbol = String(n).padEnd(128, '"');
+    const market = 'm'.repeat(64);
+    keys.push(`${market}:${symbol}`);
+    cache.put({ market, symbol, price: decimal, changePct: -decimal,
+      spark: Array(64).fill(decimal), asOf: Number.MAX_VALUE, stale: true, reachable: false }, Number.MAX_VALUE);
+  }
+  cache.dispose();
+  const raw = localStorage.getItem(PREVIEW_QUOTES_KEY)!;
+  expect(raw.length).toBeGreaterThan(1_000_000);
+  expect(raw.length).toBeLessThan(2_000_000);
+  const restored = make();
+  for (const key of keys) expect(restored.cache.get(key)?.spark).toEqual(Array(64).fill(decimal));
+  expect(restored.fetchQuote).not.toHaveBeenCalled();
 });
 
 it('coalesces persistence for 100 ms and flushes useful observations on dispose', () => {

@@ -99,6 +99,29 @@ interface Row {
   quote?: PreviewQuote;
 }
 
+interface PreviewWarmup {
+  total: number;
+  completed: number;
+  ready: number;
+  warming: boolean;
+}
+
+interface PreviewSnapshot extends PreviewWarmup {
+  quotes: PreviewQuote[];
+  revision: number;
+  generation: string;
+}
+
+function validPreviewSnapshot(value: PreviewSnapshot | null): value is PreviewSnapshot {
+  return value !== null && Array.isArray(value.quotes)
+    && Number.isSafeInteger(value.revision) && value.revision >= 0
+    && typeof value.generation === 'string' && value.generation.length > 0 && value.generation.length <= 64
+    && typeof value.warming === 'boolean'
+    && Number.isInteger(value.total) && value.total >= 0 && value.total <= 512
+    && Number.isInteger(value.completed) && value.completed >= 0 && value.completed <= value.total
+    && Number.isInteger(value.ready) && value.ready >= 0 && value.ready <= value.total;
+}
+
 /**
  * Where the current scope's symbol list stands. `idle` = the bundled `all` scope.
  *
@@ -148,6 +171,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
       ),
       onChange: () => setQuoteRevision((revision) => revision + 1),
     }));
+    const [previewWarmup, setPreviewWarmup] = useState<PreviewWarmup | null>(null);
     // Venue scope: `all` = the bundled directory (instant), else a market string
     // enumerated live. `venues === null` means /api/venues has not answered yet.
     const [venues, setVenues] = useState<VenueInfo[] | null>(null);
@@ -188,6 +212,52 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
     useEffect(() => {
       previewQuotes.resume();
       return () => previewQuotes.dispose();
+    }, [previewQuotes]);
+
+    // The server prepares the entire catalog from startup. Pull only newly
+    // completed observations while this menu is closed too; this endpoint
+    // reads memory and never starts provider work. A generation token recovers
+    // the cursor if the desktop sidecar restarts without reloading the UI.
+    useEffect(() => {
+      let stopped = false;
+      let revision = 0;
+      let generation = '';
+      let timer: number | undefined;
+      let timeout: number | undefined;
+      let controller: AbortController | undefined;
+      const poll = async () => {
+        const requestedAt = Date.now();
+        controller = new AbortController();
+        const currentController = controller;
+        timeout = window.setTimeout(() => currentController.abort(), 3_000);
+        const body = await getJson<PreviewSnapshot>(
+          `/api/previews?after=${revision}${generation ? `&generation=${encodeURIComponent(generation)}` : ''}`,
+          currentController.signal,
+        );
+        window.clearTimeout(timeout);
+        if (stopped) return;
+        let next = 3_000;
+        if (validPreviewSnapshot(body)) {
+          // Limit untrusted responses even though the server also caps its cache.
+          for (const quote of body.quotes.slice(0, 512)) previewQuotes.put(quote, requestedAt);
+          revision = body.revision;
+          generation = body.generation;
+          setPreviewWarmup((previous) => previous && previous.total === body.total
+            && previous.completed === body.completed && previous.ready === body.ready
+            && previous.warming === body.warming ? previous : {
+              total: body.total, completed: body.completed, ready: body.ready, warming: body.warming,
+            });
+          next = body.warming ? 500 : 30_000;
+        }
+        timer = window.setTimeout(() => void poll(), next);
+      };
+      void poll();
+      return () => {
+        stopped = true;
+        controller?.abort();
+        window.clearTimeout(timer);
+        window.clearTimeout(timeout);
+      };
     }, [previewQuotes]);
 
     // Prepare the current and recent symbols before the trader opens search.
@@ -539,7 +609,9 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
         ? 'reading venue list…'
         : `${venueRows.length} of ${allVenues.length} venues`
       : scope === ALL_VENUES
-        ? `${universe.length} symbols — prices update separately`
+        ? previewWarmup && previewWarmup.total > 0
+          ? `${universe.length} symbols — ${previewWarmup.warming ? 'preparing previews' : 'previews ready'} ${previewWarmup.ready}/${previewWarmup.total}`
+          : `${universe.length} symbols — prices update separately`
         : scopeState === 'loading'
           ? 'listing…'
           : scopeState === 'failed'
