@@ -63,24 +63,9 @@ Anything a session shows can be recorded to parquet on disk and replayed with se
   if it dies mid-session, and enforces a single running instance, for macOS (Apple Silicon /
   Intel), Windows x64 / ARM64, and Linux (deb / AppImage).
 
-## Real life example
+## Ultra wide view — 16 hours of market data
 
-![Annotated live SANDUSDT heatmap showing a sell wall start and selling pressure](docs/media/sandusdt-real-life-example.png)
-
-## Screenshots
-
-<!-- Placeholder: replace with fresh captures of the current build. -->
-<!-- Capture guide: sim:SIM-DEMO for markers, binance-spot:BTCUSDT for live L2, equity:AAPL replay for SYNTH. -->
-
-| | |
-|---|---|
-| ![Live Binance BTCUSDT: WebGL2 heatmap, DOM ladder, tick tape](docs/media/heatmap-btcusdt-live.png) | ![equity:AAPL keyless SYNTH tier, replaying a recorded session](docs/media/equity-aapl-synth-replay.png) |
-| ![Crosshair with exact per-cell liquidity readout](docs/media/crosshair-readout.png) | ![Settings drawer: colormap, tolerance, normalization, overlay toggles](docs/media/settings-drawer.png) |
-
-More captures (`docs/media/sim-demo-markers.png`) ship in the repo. The screens above predate
-the latest feature wave (drawings, indicators, alerts, themes) — fresh captures are tracked in
-the [roadmap](ROADMAP.md). The [user guide](docs/user-guide.md) walks through every feature
-these screenshots show.
+![Ultra wide SANDUSDT heatmap showing 16 hours of market data](docs/media/ultra-wide-16-hours.png)
 
 ## Documentation
 
