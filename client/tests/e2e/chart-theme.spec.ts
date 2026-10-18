@@ -3,6 +3,7 @@ import { COLORMAP_CATALOG, resolveAppearance } from '../../src/theme/appearance'
 import { expect, test, type Page } from '@playwright/test';
 
 import { THEMES, THEME_IDS, type ThemeId } from '../../src/theme/registry';
+import { buildRamp } from '../../src/gl/lut';
 
 /**
  * Visual campaign 2026-09-11 (lane L4) — the chart follows the active theme.
@@ -42,15 +43,13 @@ function luma(px: Px): number {
 }
 
 /**
- * Min Manhattan distance from a probed dominant canvas colour to the nearest
- * density stop of the given theme (2026-09-14, QA25 recalibration): the F10
- * tolerance-0 coverage policy makes the MODAL field colour a ramp stop rather
- * than the bare background, so the old pins (distance to the chart bg) no
- * longer describe the shipped render. Bounding the distance to the active
- * ramp keeps the check honest and policy-robust.
+ * Compare actual pixels with every interpolated density LUT entry. A valid
+ * middle color need not be close to either authored control point.
  */
 function nearestStopDistance(dom: Px, themeId: ThemeId): number {
-  const stops = THEMES[themeId].chart.density.map((s) => s.rgb as Px);
+  const ramp = buildRamp(THEMES[themeId].chart.density);
+  const stops = Array.from({ length: 256 }, (_, i) =>
+    Array.from(ramp.slice(i * 4, i * 4 + 3)) as Px);
   return Math.min(
     ...stops.map((r) => Math.abs(dom[0] - r[0]) + Math.abs(dom[1] - r[1]) + Math.abs(dom[2] - r[2])),
   );
