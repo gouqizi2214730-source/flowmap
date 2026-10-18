@@ -430,7 +430,7 @@ export class OverlayManager {
     this.volumeText.syncSize(ctx.dims.cssW, stripH, ctx.dpr);
     this.volumeText.clear();
     if (this.visibility.volume) {
-      this.volumeText.rect(0, 0, ctx.dims.cssW, stripH, 'rgb(5, 8, 12)');
+      this.volumeText.rect(0, 0, ctx.dims.cssW, stripH, OVERLAY.volumeBg);
       this.volumeText.rect(0, 0, ctx.dims.cssW, 1, OVERLAY.grid.css);
       Object.assign(this.volumeDims, ctx.dims, { cssH: stripH, drawH: stripH * ctx.dpr });
       this.volumeGm.refill(ctx.view, this.volumeDims, ctx.time, ctx.price);

@@ -13,6 +13,8 @@
  * Pure DOM/2D — no GL — so it survives a WebGL context loss untouched.
  */
 
+import { OVERLAY } from './overlays/palette';
+
 const FONT_STACK = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
 /** Default font size (CSS px) for {@link TextLayer.text} — exported so callers
@@ -37,7 +39,7 @@ export interface TextOpts {
 }
 
 export interface BadgeOpts extends TextOpts {
-  /** Background fill behind the text (default near-black chrome). */
+  /** Background fill behind the text (default current chart badge plate). */
   bg?: string;
   /** Padding in CSS px around the text (default 3). */
   pad?: number;
@@ -139,7 +141,7 @@ export class TextLayer {
     ctx.font = `${opts.weight ?? 400} ${opts.size ?? DEFAULT_TEXT_SIZE}px ${FONT_STACK}`;
     ctx.textAlign = opts.align ?? 'left';
     ctx.textBaseline = opts.baseline ?? 'alphabetic';
-    ctx.fillStyle = opts.color ?? 'rgba(163, 176, 194, 1)';
+    ctx.fillStyle = opts.color ?? OVERLAY.axis.css;
     ctx.fillText(str, x, y);
   }
 
@@ -169,13 +171,13 @@ export class TextLayer {
       ctx.arcTo(bx, by + boxH, bx, by, r);
       ctx.arcTo(bx, by, bx + boxW, by, r);
       ctx.closePath();
-      ctx.fillStyle = opts.bg ?? 'rgba(5, 8, 12, 0.82)';
+      ctx.fillStyle = opts.bg ?? OVERLAY.badgeBg;
       ctx.fill();
     } else {
-      ctx.fillStyle = opts.bg ?? 'rgba(5, 8, 12, 0.82)';
+      ctx.fillStyle = opts.bg ?? OVERLAY.badgeBg;
       ctx.fillRect(bx, by, boxW, boxH);
     }
-    ctx.fillStyle = opts.color ?? 'rgba(230, 237, 243, 1)';
+    ctx.fillStyle = opts.color ?? OVERLAY.badgeText;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.fillText(str, bx + pad, by + boxH / 2 + 0.5);

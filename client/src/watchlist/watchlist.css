@@ -75,8 +75,8 @@
 
 .watchlist__row:focus-visible {
   background: var(--bg-3);
-  outline: 1px solid var(--accent-line);
-  outline-offset: -1px;
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .watchlist__row.is-active {

@@ -78,7 +78,7 @@ describe('overlay palette theme bridge', () => {
     expect(OVERLAY.priceFillTop.css).toBe('rgba(14, 124, 114, 0.07)');
     expect(OVERLAY.priceFillBottom.css).toBe('rgba(14, 124, 114, 0)');
     expect(OVERLAY.pricePillText.css).toBe('rgba(243, 241, 234, 1)');
-    expect(OVERLAY.badgeBg).toBe('rgba(251, 250, 246, 0.82)');
+    expect(OVERLAY.badgeBg).toBe('rgba(251, 250, 246, 1)');
     // The GL twin follows the same ink, alphas preserved per entry.
     expect(OVERLAY.price.gl).toEqual([14 / 255, 124 / 255, 114 / 255, 0.98]);
     expect(OVERLAY.priceGlow.gl[3]).toBe(0.22);

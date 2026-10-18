@@ -26,8 +26,8 @@
   cursor: crosshair;
 }
 .draw-layer.has-focus:focus-visible {
-  outline: 1px solid var(--accent-line, #1c3b37);
-  outline-offset: -1px;
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 .draw-layer__canvas {
   position: absolute;

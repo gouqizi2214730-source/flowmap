@@ -217,11 +217,11 @@ export class Markers {
         // Upward triangle centered on the price.
         solid.addTri(cx, cy + gy, cx - gx, cy - gy, cx + gx, cy - gy, OVERLAY.liquidation.gl);
       } else if (code === KIND_CODE.capitol) {
-        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, [0.22, 0.74, 0.97, 0.95]);
+        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, OVERLAY.capitol.gl);
       } else if (code === KIND_CODE.defense_contract) {
-        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, [0.29, 0.87, 0.50, 0.95]);
+        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, OVERLAY.defense.gl);
       } else if (code === KIND_CODE.clinical) {
-        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, [0.93, 0.28, 0.60, 0.95]);
+        solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, OVERLAY.clinical.gl);
       } else {
         // Diamond glyph for the other event kinds.
         solid.addQuad(cx, cy + gy, cx + gx, cy, cx, cy - gy, cx - gx, cy, OVERLAY.event.gl);
@@ -346,11 +346,11 @@ export class Markers {
           : gr.code === KIND_CODE.liquidation
             ? OVERLAY.liquidation.css
             : gr.code === KIND_CODE.capitol
-              ? '#38bdf8'
+              ? OVERLAY.capitol.css
               : gr.code === KIND_CODE.defense_contract
-                ? '#4ade80'
+                ? OVERLAY.defense.css
                 : gr.code === KIND_CODE.clinical
-                  ? '#ec4899'
+                  ? OVERLAY.clinical.css
                   : OVERLAY.event.css;
       text.text(gr.x, y, label, { color, size: LABEL_SIZE, weight: 600 });
     }

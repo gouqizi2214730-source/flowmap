@@ -310,6 +310,26 @@ describe('theme registry / css coverage', () => {
     }
   });
 
+  it('specific watchlist and drawing focus consumers use the measured focus role separately from selection', () => {
+    const watchlistCss = readFileSync(join(here, '../watchlist/watchlist.css'), 'utf8');
+    const drawingCss = readFileSync(join(here, '../drawings/drawings.css'), 'utf8');
+    // These selectors beat the global :focus-visible rule. Inspect their actual
+    // declarations: a token-only contrast test cannot catch a stale consumer.
+    for (const [css, selector] of [
+      [watchlistCss, '.watchlist__row:focus-visible'],
+      [drawingCss, '.draw-layer.has-focus:focus-visible'],
+    ]) {
+      const body = blockOf(css, selector);
+      expect(valueOf(body, 'outline')).toBe('2px solid var(--focus)');
+      expect(valueOf(body, 'outline-offset')).toBe('-2px');
+      expect(body).not.toContain('--accent-line');
+    }
+    const active = blockOf(watchlistCss, '.watchlist__row.is-active');
+    expect(valueOf(active, 'border-left-color')).toBe('var(--accent)');
+    expect(valueOf(active, 'background')).toBe('var(--bg-3)');
+    expect(active).not.toContain('outline');
+  });
+
   it('themes have unique labels and a valid mode', () => {
     const labels = THEME_IDS.map((id) => THEMES[id].label);
     expect(new Set(labels).size).toBe(labels.length);

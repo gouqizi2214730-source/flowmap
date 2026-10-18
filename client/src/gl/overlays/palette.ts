@@ -57,12 +57,22 @@ export const OVERLAY = {
   gap: { gl: rgba(150, 160, 176, 0.6), css: css(150, 160, 176) },
   /** Iceberg / large-lot / halt / luld / info generic glyph. */
   event: { gl: rgba(214, 161, 58, 0.9), css: css(214, 161, 58) },
+  /** Authored event channels; raw glyph decimals and label inks stay exact. */
+  capitol: { gl: [0.22, 0.74, 0.97, 0.95] as RGBA, css: '#38bdf8' },
+  defense: { gl: [0.29, 0.87, 0.50, 0.95] as RGBA, css: '#4ade80' },
+  clinical: { gl: [0.93, 0.28, 0.60, 0.95] as RGBA, css: '#ec4899' },
+  /** GEX ceiling / floor / regime-change channels (green / red / cyan). */
+  gexCall: { gl: [0, 1, 0.45, 0.85] as RGBA, css: '#00ff73' },
+  gexPut: { gl: [1, 0.25, 0.25, 0.85] as RGBA, css: '#ff4040' },
+  gexGamma: { gl: [0.2, 0.85, 1, 0.75] as RGBA, css: '#33d6ff' },
   /** Axis label + tick color. */
   axis: { gl: rgba(91, 102, 117, 1), css: css(163, 176, 194) },
   /** Faint gridline for axis ticks over the heatmap. */
   grid: { gl: rgba(120, 132, 150, 0.14), css: css(120, 132, 150, 0.14) },
-  /** Text-badge background (near-black terminal chrome). */
+  /** Independent opaque strip and default text/badge paints; raw fallbacks. */
+  volumeBg: 'rgb(5, 8, 12)',
   badgeBg: 'rgba(5, 8, 12, 0.82)',
+  badgeText: 'rgba(230, 237, 243, 1)',
 } as const;
 
 // Semantic market colors are independent of density families.
@@ -191,8 +201,10 @@ export function resolveChartInkColors(p: ChartInkPalette) {
   const bg = parseCssColor(p.bg);
   const light = bg !== null && (0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]) > 128;
   const categories = light
-    ? { vwap: '#713CA0', cvd: '#815C0B', profile: '#3D628B', poc: '#93600C', liquidation: '#AC430E', event: '#785319' }
-    : { vwap: '#CFACF3', cvd: '#E8C485', profile: '#8FB5DC', poc: '#F0CD7A', liquidation: '#FFA36E', event: '#D6BB8A' };
+    ? { vwap: '#713CA0', cvd: '#815C0B', profile: '#3D628B', poc: '#865509', liquidation: '#AC430E', event: '#785319',
+      capitol: '#075D88', defense: '#24632D', clinical: '#9B235D', gexCall: '#24632D', gexPut: '#A32B33', gexGamma: '#006477' }
+    : { vwap: '#CFACF3', cvd: '#E8C485', profile: '#8FB5DC', poc: '#F0CD7A', liquidation: '#FFA36E', event: '#D6BB8A',
+      capitol: '#68C9F0', defense: '#91D6A1', clinical: '#F392C1', gexCall: '#61D48C', gexPut: '#F18C91', gexGamma: '#73CEE7' };
   return { ...categories, gap: p.inkDim, unknown: p.inkDim, price: p.price, priceHalo: light ? '#FFFFFF' : '#000000' };
 }
 
@@ -208,6 +220,7 @@ const CHART_INK_KEYS = [
   'price',
   'priceHalo',
   'vwap', 'cvd', 'profile', 'poc', 'liquidation', 'event', 'gap', 'unknown',
+  'capitol', 'defense', 'clinical', 'gexCall', 'gexPut', 'gexGamma',
   'priceGlow',
   'priceLevel',
   'pricePill',
@@ -215,6 +228,8 @@ const CHART_INK_KEYS = [
   'priceFillBottom',
   'pricePillText',
   'badgeBg',
+  'badgeText',
+  'volumeBg',
 ] as const;
 
 /** The last-price family: every entry fed by the palette's single `price` ink. */
@@ -239,7 +254,8 @@ function midnightAlpha(key: string): { gl: number; css: number } {
  * Feed a theme's chart-ground ink into the overlay palette, or `null` to
  * restore the shipped `midnight` values for exactly the entries this bridge
  * owns. Alphas are preserved per existing OVERLAY entry (`.gl` and `.css`
- * separately); `badgeBg` takes the rgb of `chipBg` at its shipped 0.82 alpha.
+ * separately). Active badge plates and volume ground are opaque so their
+ * contrast cannot depend on the density cell underneath; null keeps raw paint.
  */
 export function applyChartInk(p: ChartInkPalette | null): void {
   const rec = OVERLAY as unknown as Record<string, OverlayColor | string>;
@@ -268,9 +284,12 @@ export function applyChartInk(p: ChartInkPalette | null): void {
   // overlay palette deliberately has no entries for them.
   for (const key of CHART_INK_PRICE_KEYS) write(key, _price);
   write('pricePillText', p.bg);
+  const ground = parseCssColor(p.bg);
+  if (ground) rec.volumeBg = rgbaStr(ground[0], ground[1], ground[2], 1);
+  const ink = parseCssColor(p.ink);
+  if (ink) rec.badgeText = rgbaStr(ink[0], ink[1], ink[2], 1);
   if (p.chipBg) {
     const chip = parseCssColor(p.chipBg);
-    const base = typeof MIDNIGHT.badgeBg === 'string' ? parseCssColor(MIDNIGHT.badgeBg) : null;
-    if (chip && base) rec.badgeBg = rgbaStr(chip[0], chip[1], chip[2], base[3]);
+    if (chip) rec.badgeBg = rgbaStr(chip[0], chip[1], chip[2], 1);
   }
 }

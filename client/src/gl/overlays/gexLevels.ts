@@ -8,6 +8,7 @@
  */
 
 import type { OverlayFrame } from './frame';
+import { OVERLAY } from './palette';
 import type { GexLevelUpdate } from '../../proto/types';
 
 export class GexOverlay {
@@ -68,19 +69,17 @@ export class GexOverlay {
       });
     };
 
-    // 1. Call Wall (Volatility Dampening Ceiling -> Fluorescent Green)
+    // Ceiling / floor / regime change keep their green / red / cyan meaning.
     if (gex.call_wall > 0) {
-      drawLevel(gex.call_wall, [0.0, 1.0, 0.45, 0.85] as const, '#00ff73', 'CALL WALL');
+      drawLevel(gex.call_wall, OVERLAY.gexCall.gl, OVERLAY.gexCall.css, 'CALL WALL');
     }
 
-    // 2. Put Wall (Volatility Crash Floor -> Fluorescent Red)
     if (gex.put_wall > 0) {
-      drawLevel(gex.put_wall, [1.0, 0.25, 0.25, 0.85] as const, '#ff4040', 'PUT WALL');
+      drawLevel(gex.put_wall, OVERLAY.gexPut.gl, OVERLAY.gexPut.css, 'PUT WALL');
     }
 
-    // 3. Gamma Flip (Volatility Trigger -> Cyan)
     if (gex.gamma_flip > 0) {
-      drawLevel(gex.gamma_flip, [0.2, 0.85, 1.0, 0.75] as const, '#33d6ff', 'GAMMA FLIP');
+      drawLevel(gex.gamma_flip, OVERLAY.gexGamma.gl, OVERLAY.gexGamma.css, 'GAMMA FLIP');
     }
   }
 }
