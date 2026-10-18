@@ -21,10 +21,7 @@ if (!rootEl) {
 initTheme();
 initLocale();
 
-// R1-L1: stamp the persisted colormap on <html data-chart-ramp> BEFORE the
-// first paint. The App effect (App.tsx) keeps it in sync for later changes;
-// doing it here too means a stored legacy family pins the dark chart tokens
-// from frame one instead of flashing the light theme mirror first.
+// Seed the persisted family before the first React render.
 document.documentElement.dataset.chartRamp = loadSettings(
   typeof window !== 'undefined' ? window.localStorage : null,
 ).colormap;

@@ -289,11 +289,9 @@ describe('SettingsDrawer colormap (F6 theme ramp)', () => {
       />,
     );
     const group = container.querySelector('[data-testid="setting-colormap"]')!;
-    expect([...group.querySelectorAll('button')].map((b) => b.textContent)).toEqual([
-      'Theme',
-      'Flow',
-      'Inferno',
-      'Classic',
+    expect([...group.querySelectorAll('button')].map((b) => b.getAttribute('data-testid'))).toEqual([
+      'colormap-theme', 'colormap-flow', 'colormap-inferno', 'colormap-classic',
+      'colormap-ice', 'colormap-viridis', 'colormap-cividis', 'colormap-mono',
     ]);
     expect(container.querySelector('[data-testid="colormap-theme"]')!.getAttribute('aria-pressed')).toBe(
       'true',

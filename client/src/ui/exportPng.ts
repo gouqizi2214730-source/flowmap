@@ -28,12 +28,11 @@
 
 import { OVERLAY } from '../gl/overlays/palette';
 import {
-  RAMP_THEME,
-  RAMP_THEME_SYNTH,
   rampCssGradient,
-  rampForColormap,
   type Colormap,
 } from '../gl/lut';
+
+import { resolveLegend, type LegendInput, type LegendDescriptor } from './heatLegendModel';
 
 const FONT_STACK = "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
 
@@ -172,7 +171,7 @@ export function exportProvenanceNotes(input: ExportProvenanceInput): string[] {
 }
 
 /** Legend descriptor for the density ramp chip (colormap + honesty tier). */
-export interface ExportLegend {
+export interface ExportLegend extends LegendInput {
   colormap: Colormap;
   /** Synthetic depth is painted from the theme's synth row (amber identity). */
   synth?: boolean;
@@ -266,7 +265,10 @@ export interface ExportRampStop {
  * texture share one stop list, so the chip cannot drift from the heatmap ramp.
  */
 export function exportRampStops(row: number): ExportRampStop[] {
-  const css = rampCssGradient(row);
+  return exportGradientStops(rampCssGradient(row));
+}
+
+export function exportGradientStops(css: string): ExportRampStop[] {
   const stops: ExportRampStop[] = [];
   const re = /rgb\((\d+),\s*(\d+),\s*(\d+)\)\s*([\d.]+)%/g;
   let m: RegExpExecArray | null;
@@ -274,13 +276,6 @@ export function exportRampStops(row: number): ExportRampStop[] {
     stops.push({ css: `rgb(${m[1]}, ${m[2]}, ${m[3]})`, t: Number(m[4]) / 100 });
   }
   return stops;
-}
-
-/** Legend rows to paint for a colormap (theme rows resolve via the lut store). */
-function exportLegendRow(legend: ExportLegend): number {
-  if (legend.synth) return RAMP_THEME_SYNTH;
-  if (legend.colormap === 'theme') return RAMP_THEME;
-  return rampForColormap(legend.colormap);
 }
 
 /** Price-family legend entries — the same four the on-screen ChartLegend keys. */
@@ -371,8 +366,9 @@ export function composeExportLayers(
 
   // 5) Density ramp chip (top-right, mirrors the on-screen HeatLegend).
   if (opts.legend) {
-    const stops = exportRampStops(exportLegendRow(opts.legend));
-    if (stops.length > 1) drawRampChip(ctx, W, px(6), dpr, chrome, stops, opts.legend.tier);
+    const descriptor = resolveLegend(opts.legend);
+    const stops = exportGradientStops(descriptor.gradient);
+    if (stops.length > 1) drawRampChip(ctx, W, px(6), dpr, chrome, stops, opts.legend.tier, descriptor);
   }
 
   // 6) Provenance footer: identity always, honesty caveats when the state has
@@ -474,6 +470,7 @@ function drawRampChip(
   chrome: ExportChrome,
   stops: ExportRampStop[],
   tier: string | undefined,
+  descriptor: LegendDescriptor,
 ): void {
   const px = (n: number) => Math.round(n * dpr);
   const pad = px(5);
@@ -481,10 +478,10 @@ function drawRampChip(
   const barH = px(56);
   const size = px(9);
   ctx.font = `400 ${size}px ${FONT_STACK}`;
-  const tierText = tier && tier.length > 0 ? tier : '';
+  const tierText = [tier, descriptor.channelNote].filter(Boolean).join(' · ');
   const textW = Math.max(
-    ctx.measureText('more').width,
-    ctx.measureText('less').width,
+    ctx.measureText(descriptor.topCap).width,
+    ctx.measureText(descriptor.bottomCap).width,
     tierText ? ctx.measureText(tierText).width : 0,
   );
   const chipW = pad * 2 + Math.max(barW, textW);
@@ -496,13 +493,13 @@ function drawRampChip(
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillStyle = chrome.ink;
-  ctx.fillText('more', cx, y0 + pad + moreH / 2);
+  ctx.fillText(descriptor.topCap, cx, y0 + pad + moreH / 2);
   const barTop = y0 + pad + moreH;
   const grad = ctx.createLinearGradient(0, barTop + barH, 0, barTop);
   for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.t)), s.css);
   ctx.fillStyle = grad;
   ctx.fillRect(cx - barW / 2, barTop, barW, barH);
-  ctx.fillText('less', cx, barTop + barH + moreH / 2);
+  ctx.fillText(descriptor.bottomCap, cx, barTop + barH + moreH / 2);
   if (tierText) {
     ctx.fillStyle = chrome.inkBright;
     ctx.fillText(tierText, cx, barTop + barH + moreH + px(6));

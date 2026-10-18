@@ -278,12 +278,13 @@ const OVERLAY_PRUNE_PAD = 64;
  * A theme's chart ramps as the renderer consumes them (structural — the theme
  * registry's `ChartPalette` satisfies this without a gl↔theme import).
  * Every theme (midnight included, S2-Q1) resolves its density through the
- * theme-owned row 5; only midnight's synth keeps resolving to the frozen row 1.
+ * theme-owned row 5 and its dedicated synthetic row 6.
  */
 export interface ChartThemeInput {
   readonly id: string;
   readonly density: readonly RampStop[];
   readonly synth: readonly RampStop[];
+  readonly imbalance?: readonly RampStop[];
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -882,17 +883,12 @@ export class Renderer {
   private applyRamp(): void {
     const depthTier = (this.store.getState().capability as { depth?: unknown } | null)?.depth;
     const mode = this.lastColMode ?? MODE_SYNTH_PROFILE;
-    // S2-Q1 decoupling: midnight+`'theme'` now serves its OWN density ramp from
-    // RAMP_THEME (row 5) — the old `id !== 'midnight'` alias to the frozen FLOW
-    // row is retired. The synth side keeps resolving to the frozen §7 amber row
-    // (RAMP_SYNTH) for midnight: `midnight.synth` is a byte-copy of SYNTH_STOPS
-    // and the equity honesty observables (`currentRamp === RAMP_SYNTH`) pin it,
-    // so only the density row moved (3 → 5).
+    // Active appearances always use adaptive density and dedicated synthetic rows.
     const themed =
-      this.colormap === 'theme' && this.chartTheme !== null
+      this.chartTheme !== null
         ? {
             density: RAMP_THEME,
-            synth: this.chartTheme.id === 'midnight' ? RAMP_SYNTH : RAMP_THEME_SYNTH,
+            synth: RAMP_THEME_SYNTH,
           }
         : null;
     this.ramp = rampForMode(mode, depthTier, this.colormap, themed);
@@ -919,10 +915,11 @@ export class Renderer {
         theme !== null &&
         prev.id === theme.id &&
         prev.density === theme.density &&
-        prev.synth === theme.synth);
+        prev.synth === theme.synth &&
+        prev.imbalance === theme.imbalance);
     if (same) return;
     this.chartTheme = theme;
-    setThemeStops(theme ? { density: theme.density, synth: theme.synth } : null);
+    setThemeStops(theme);
     uploadLUTAtlas(this.ctx.gl, this.lut);
     this.applyRamp();
     this.clearBackground();

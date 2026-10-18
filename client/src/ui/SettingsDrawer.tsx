@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useRef } from 'react';
+import { COLORMAP_CATALOG, resolveAppearance, stopsGradient } from '../theme/appearance';
 
 import type { OverlayVisibility } from '../gl/overlays/frame';
 import { LOCALES, getLocale, localeLabel, setLocale } from '../i18n';
@@ -28,7 +29,6 @@ import {
   DEPTH_CHANNELS,
   HISTORY_DEPTHS,
   PRICE_BANDS,
-  type Colormap,
   type DepthChannelMode,
   type FlowMapSettings,
   type HistoryDepth,
@@ -49,17 +49,6 @@ const BAND_HINT_KEY: Record<PriceBand, string> = {
   deep: 'settings.bandHint.deep',
 };
 
-/**
- * Colormap families (F6 chart harmony). `'theme'` first and default: the chart
- * follows the active theme; the three legacy families pin the fixed dark chart.
- */
-const COLORMAP_OPTIONS: readonly Colormap[] = ['theme', 'flow', 'inferno', 'classic'];
-const COLORMAP_LABELS: Record<Colormap, string> = {
-  theme: 'Theme',
-  flow: 'Flow',
-  inferno: 'Inferno',
-  classic: 'Classic',
-};
 
 /** i18n keys for the depth display channel (contract C2). */
 const CHANNEL_LABEL_KEY: Record<DepthChannelMode, string> = {
@@ -226,23 +215,25 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
           {/* theme picker (lane CE registry; T cycles, this pins a choice) */}
           <div className="setting">
             <span className="setting__label">{t('settings.theme')}</span>
-            <div className="segrow" role="group" aria-label="theme" data-testid="setting-theme">
-              {THEME_IDS.map((id) => (
-                <button
-                  type="button"
-                  key={id}
-                  className={`segrow__btn${theme === id ? ' is-on' : ''}`}
-                  aria-pressed={theme === id}
-                  data-testid={`theme-${id}`}
-                  onClick={() => setTheme(id)}
-                >
-                  {THEMES[id].label}
-                </button>
-              ))}
+            <div className="appearance-grid" role="group" aria-label="theme" data-testid="setting-theme">
+              {THEME_IDS.map((id) => {
+                const chart = THEMES[id].chart;
+                const preview = resolveAppearance(id, settings.colormap);
+                return <button type="button" key={id}
+                  className={`appearance-choice${theme === id ? ' is-on' : ''}`}
+                  aria-pressed={theme === id} data-testid={`theme-${id}`} onClick={() => setTheme(id)}>
+                  <svg className="theme-preview" viewBox="0 0 100 42" aria-hidden="true">
+                    <rect width="100" height="42" fill={chart.bg} />
+                    <path d="M0 14H100M0 28H100M32 0V42M66 0V42" stroke={chart.grid} strokeOpacity=".35" />
+                    {[.2,.4,.6,.8].map((n,i) => <rect key={n} x={8+i*6} y={8+i*7} width={80-i*10} height="3" fill={`rgb(${preview.density[i+1].rgb.join(',')})`} />)}
+                    <path d="M0 30L14 27L25 31L42 18L57 23L69 12L85 16L100 8" fill="none" stroke={THEMES[id].mode === 'light' ? '#FFFFFF' : '#000000'} strokeWidth="3" />
+                    <path d="M0 30L14 27L25 31L42 18L57 23L69 12L85 16L100 8" fill="none" stroke={chart.price} strokeWidth="1.3" />
+                  </svg>
+                  <span className="appearance-choice__name">{t(`theme.${id}.name`)}<span aria-hidden="true">{theme === id ? '✓' : ''}</span></span>
+                  <span className="appearance-choice__hint">{t(`theme.${id}.hint`)}</span>
+                </button>;
+              })}
             </div>
-            <span className="setting__hint">
-              {`${THEMES[theme].label} · ${THEMES[theme].mode} — ${THEMES[theme].cvd}`}
-            </span>
           </div>
 
           {/* language picker (i18n shell: EN default + TR). useT() above makes
@@ -344,18 +335,20 @@ export function SettingsDrawer({ settings, onChange, onClose }: SettingsDrawerPr
           {/* colormap */}
           <div className="setting">
             <span className="setting__label">{t('settings.colormap')}</span>
-            <div className="segrow" role="group" aria-label="colormap" data-testid="setting-colormap">
-              {COLORMAP_OPTIONS.map((c) => (
+            <div className="appearance-grid" role="group" aria-label="colormap" data-testid="setting-colormap">
+              {COLORMAP_CATALOG.map(({ id: c, label, hint }) => (
                 <button
                   type="button"
                   key={c}
-                  className={`segrow__btn${settings.colormap === c ? ' is-on' : ''}`}
+                  className={`appearance-choice${settings.colormap === c ? ' is-on' : ''}`}
                   aria-pressed={settings.colormap === c}
                   data-testid={`colormap-${c}`}
                   disabled={densityControlsDisabled}
                   onClick={() => onChange({ colormap: c })}
                 >
-                  {COLORMAP_LABELS[c]}
+                  <span className="palette-preview" aria-hidden="true" style={{background:`linear-gradient(to right, ${stopsGradient(resolveAppearance(theme,c).density)})`}} />
+                  <span className="appearance-choice__name">{c === 'theme' ? t('palette.theme') : label}<span aria-hidden="true">{settings.colormap === c ? '✓' : ''}</span></span>
+                  <span className="appearance-choice__hint">{t(`palette.${hint}`)}</span>
                 </button>
               ))}
             </div>

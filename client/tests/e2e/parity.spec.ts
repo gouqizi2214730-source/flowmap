@@ -53,7 +53,7 @@ const SIDE_UNKNOWN = 2;
 const SIDE_SRC_EXCHANGE = 0;
 const SIDE_SRC_NA = 2;
 const RAMP_THEME = 5;
-const RAMP_SYNTH = 1;
+const RAMP_SYNTH = 6;
 
 const TAGS = {
   DEPTH,

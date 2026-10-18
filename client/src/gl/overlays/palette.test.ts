@@ -182,7 +182,7 @@ describe('overlay palette theme bridge', () => {
     expect(OVERLAY.badgeBg).toBe(badgeBefore);
   });
 
-  it('applyChartInk does not touch bid/ask/buy/sell/categoricals', () => {
+  it('applyChartInk does not touch bid/ask/buy/sell and adapts categoricals', () => {
     applyOverlayPalette({
       bg: '#ffffff',
       grid: '#2b2b2b',
@@ -196,14 +196,6 @@ describe('overlay palette theme bridge', () => {
       sell: OVERLAY.sell.css,
       bid: OVERLAY.bid.css,
       ask: OVERLAY.ask.css,
-      unknown: OVERLAY.unknown.css,
-      vwap: OVERLAY.vwap.css,
-      cvd: OVERLAY.cvd.css,
-      profile: OVERLAY.profile.css,
-      poc: OVERLAY.poc.css,
-      liquidation: OVERLAY.liquidation.css,
-      event: OVERLAY.event.css,
-      gap: OVERLAY.gap.css,
     };
     applyChartInk({
       ink: '#24272d',
@@ -219,15 +211,9 @@ describe('overlay palette theme bridge', () => {
       sell: OVERLAY.sell.css,
       bid: OVERLAY.bid.css,
       ask: OVERLAY.ask.css,
-      unknown: OVERLAY.unknown.css,
-      vwap: OVERLAY.vwap.css,
-      cvd: OVERLAY.cvd.css,
-      profile: OVERLAY.profile.css,
-      poc: OVERLAY.poc.css,
-      liquidation: OVERLAY.liquidation.css,
-      event: OVERLAY.event.css,
-      gap: OVERLAY.gap.css,
     }).toEqual(untouched);
+    expect(OVERLAY.vwap.css).toBe('rgba(113, 60, 160, 1)');
+    expect(OVERLAY.priceHalo.css).toBe('rgba(255, 255, 255, 1)');
     // The semantic bridge values survive a chart-ink write.
     expect(OVERLAY.bid.css).toBe('rgba(0, 105, 95, 1)');
     expect(OVERLAY.ask.css).toBe('rgba(165, 42, 29, 1)');

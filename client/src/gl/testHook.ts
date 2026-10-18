@@ -162,10 +162,13 @@ interface HookState {
 
 export function installHeatmapTestHook(canvas: HTMLCanvasElement): void {
   let state: HookState | null = null;
+  let activeTheme = false;
 
   const api: FlowmapTestApi = {
     setPriceScale(scale) { if (state !== null) state.heatmap.priceScale = scale; },
     init(rows, layers, width = 512, height = 512, mips = false) {
+      activeTheme = false;
+      setThemeStops(null);
       canvas.width = width;
       canvas.height = height;
       // EXT_color_buffer_float may be absent on some CI GL backends; the
@@ -212,11 +215,12 @@ export function installHeatmapTestHook(canvas: HTMLCanvasElement): void {
       state.heatmap.encoding = {
         decodeScale,
         norm,
-        ramp: synth ? RAMP_SYNTH : RAMP_INFERNO,
+        ramp: synth ? (activeTheme ? RAMP_THEME_SYNTH : RAMP_SYNTH) : RAMP_INFERNO,
       };
     },
 
     setThemeRamp(density, synth) {
+      activeTheme = density !== null && synth !== null;
       if (!state) throw new Error('__flowmapTest: init() first');
       setThemeStops(density && synth ? { density, synth } : null);
       uploadLUTAtlas(state.ctx.gl, state.lut);
@@ -225,7 +229,7 @@ export function installHeatmapTestHook(canvas: HTMLCanvasElement): void {
     setColormap(colormap) {
       if (!state) throw new Error('__flowmapTest: init() first');
       const themed =
-        colormap === 'theme' ? { density: RAMP_THEME, synth: RAMP_THEME_SYNTH } : null;
+        activeTheme ? { density: RAMP_THEME, synth: RAMP_THEME_SYNTH } : null;
       state.heatmap.encoding = {
         ...state.heatmap.encoding,
         ramp: rampForMode(MODE_L2, 'L2', colormap, themed),

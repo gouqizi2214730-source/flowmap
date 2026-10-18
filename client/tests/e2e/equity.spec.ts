@@ -33,7 +33,7 @@ const ARTIFACT_DIR = join(__dirname, '__artifacts__');
 // Msg-type wire tags (proto/types MsgType) + SYNTH_PROFILE mode.
 const DEPTH = 3;
 const MODE_SYNTH_PROFILE = 2;
-const RAMP_SYNTH = 1;
+const RAMP_SYNTH = 6;
 
 test('§7 M3 T3: SYNTH-profile equity renders honestly (amber ramp, SYNTH ladder, closed banner)', async ({
   page,

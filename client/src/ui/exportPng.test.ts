@@ -210,6 +210,17 @@ describe('composeExportLayers', () => {
     expect(stops.length).toBeGreaterThan(4);
   });
 
+  it('exports signed imbalance caps and ordered adapted stops, while SYNTH forces density Sum', () => {
+    const imbalance=fakeOutCanvas();
+    composeExportLayers(baseLayers(),{createCanvas:()=>imbalance.canvas,legend:{theme:'paper',colormap:'viridis',channel:'imbalance',tier:'L2'}});
+    expect(texts(imbalance.ctx)).toContain('ask-heavy');expect(texts(imbalance.ctx)).toContain('bid-heavy');expect(texts(imbalance.ctx)).not.toContain('more');
+    const stops=imbalance.ctx.calls.filter(c=>c.op==='addColorStop');
+    expect(stops[0].args).toEqual([0,'rgb(146, 80, 16)']);expect(stops.at(-1)!.args).toEqual([1,'rgb(24, 93, 152)']);
+    const synth=fakeOutCanvas();
+    composeExportLayers(baseLayers(),{createCanvas:()=>synth.canvas,legend:{theme:'paper',colormap:'viridis',channel:'imbalance',synth:true,tier:'SYNTH'}});
+    expect(texts(synth.ctx)).toContain('more');expect(texts(synth.ctx)).toContain('SYNTH');expect(texts(synth.ctx)).not.toContain('ask-heavy');
+  });
+
   it('exports the independent volume strip below the plot and before the time axis', () => {
     const { canvas, ctx } = fakeOutCanvas();
     const layers = { ...baseLayers(), volume: layer(1118, 44) };

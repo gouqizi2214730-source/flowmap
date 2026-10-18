@@ -342,10 +342,10 @@ describe('rampForMode (§7 mode → colormap)', () => {
     expect(rampForMode(MODE_L2, 'L2', 'theme', themed)).toBe(RAMP_THEME);
     expect(rampForMode(MODE_L1_BAND, 'SYNTH', 'theme', themed)).toBe(RAMP_THEME_SYNTH);
     expect(rampForMode(MODE_SYNTH_PROFILE, undefined, 'theme', themed)).toBe(RAMP_THEME_SYNTH);
-    // Legacy families ignore the themed rows entirely.
-    expect(rampForMode(MODE_L2, 'L2', 'flow', themed)).toBe(RAMP_FLOW);
-    expect(rampForMode(MODE_L2, 'L2', 'inferno', themed)).toBe(RAMP_INFERNO);
-    expect(rampForMode(MODE_L2, 'L2', 'classic', themed)).toBe(RAMP_CLASSIC);
+    // Every active family uses the resolved adaptive density row.
+    expect(rampForMode(MODE_L2, 'L2', 'flow', themed)).toBe(RAMP_THEME);
+    expect(rampForMode(MODE_L2, 'L2', 'inferno', themed)).toBe(RAMP_THEME);
+    expect(rampForMode(MODE_L2, 'L2', 'classic', themed)).toBe(RAMP_THEME);
   });
 
   it('synthetic still wins over the theme rows (honesty is unconditional)', () => {
@@ -504,8 +504,8 @@ describe('theme ramp rows 5/6 (campaign visual 2026-09-11, F2)', () => {
     setThemeStops({ density: DENSITY, synth: SYNTH_ROWS });
     expect(rampCssGradient(RAMP_THEME)).toContain('rgb(4, 4, 6) 0.0%');
     expect(rampCssGradient(RAMP_THEME_SYNTH)).toContain('rgb(90, 60, 30) 100.0%');
-    expect(rampCssGradientReversed(RAMP_THEME)).toContain('rgb(240, 230, 200) 100.0%');
-    expect(rampCssGradientReversed(RAMP_THEME)).toContain('rgb(4, 4, 6) 0.0%');
+    expect(rampCssGradientReversed(RAMP_THEME)).toContain('rgb(240, 230, 200) 0.0%');
+    expect(rampCssGradientReversed(RAMP_THEME)).toContain('rgb(4, 4, 6) 100.0%');
   });
 
   it('an explicit buildLUTAtlas(theme) argument overrides the store', () => {

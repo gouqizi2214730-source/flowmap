@@ -101,7 +101,7 @@ describe('getCanvasPalette', () => {
       ['--text', '#dd0001'],
       ['--accent', '#00aa02'],
       ['--sell', '#cc0003'],
-      ['--accent-bright', '#11bb04'],
+      ['--ui-accent', '#11bb04'],
     ]);
     vi.spyOn(window, 'getComputedStyle').mockImplementation(
       () =>
@@ -124,12 +124,12 @@ describe('getCanvasPalette', () => {
       () => ({ getPropertyValue: () => '' }) as unknown as CSSStyleDeclaration,
     );
     expect(getCanvasPalette('swiss')).toEqual({
-      bg: '#ffffff',
-      grid: '#2b2b2b',
-      text: '#000000',
-      bid: '#00695f',
-      ask: '#a52a1d',
-      accent: '#004d45',
+      bg: '#FFFFFF',
+      grid: '#AEBFCE',
+      text: '#142C42',
+      bid: '#07665F',
+      ask: '#A3323C',
+      accent: '#1D5593',
     });
   });
 });

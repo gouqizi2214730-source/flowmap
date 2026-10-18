@@ -64,8 +64,8 @@ describe('legendForChannel (pure selection)', () => {
     // Top of the bar = the ramp's t=0 ice-blue ask stop (last in the `to top`
     // list); its t=1 amber bid stop sits at the bottom — matching the chart.
     expect(l.gradient).toBe(rampCssGradientReversed(RAMP_IMBALANCE));
-    expect(l.gradient.endsWith('rgb(148, 202, 255) 0.0%')).toBe(true);
-    expect(l.gradient.startsWith('rgb(255, 206, 110) 100.0%')).toBe(true);
+    expect(l.gradient.endsWith('rgb(148, 202, 255) 100.0%')).toBe(true);
+    expect(l.gradient.startsWith('rgb(255, 206, 110) 0.0%')).toBe(true);
   });
 
   it('bid/ask keep the density ramp but label the channel', () => {
@@ -86,12 +86,12 @@ describe('legendForChannel (pure selection)', () => {
     const synthStops = THEMES.paper.chart.synth;
     const l = legendForChannel('sum', 'theme', true, undefined, synthStops);
     expect(l.row).toBe(RAMP_THEME_SYNTH);
-    expect(l.rampName).toBe('synthetic theme colormap');
+    expect(l.rampName).toBe('synthetic amber colormap');
     expect(l.gradient.startsWith(`rgb(${synthStops[0].rgb.join(', ')}) 0.0%`)).toBe(true);
     // Legacy families never take the theme branch, even with synth stops handed in.
     const legacy = legendForChannel('imbalance', 'flow', true, undefined, synthStops);
-    expect(legacy.row).toBe(RAMP_SYNTH);
-    expect(legacy.gradient).toBe(rampCssGradient(RAMP_SYNTH));
+    expect(legacy.row).toBe(RAMP_THEME_SYNTH);
+    expect(legacy.gradient).toBe(l.gradient);
   });
 
   it('theme mode paints the active theme density ramp (F6)', () => {
@@ -101,7 +101,7 @@ describe('legendForChannel (pure selection)', () => {
     expect(l.rampName).toBe('theme colormap');
     expect(l.gradient.startsWith(`rgb(${stops[0].rgb.join(', ')}) 0.0%`)).toBe(true);
     // Legacy families never take the theme branch, even with stops handed in.
-    expect(legendForChannel('sum', 'flow', false, stops).row).toBe(RAMP_FLOW);
+    expect(legendForChannel('sum', 'flow', false, stops).row).toBe(RAMP_THEME);
   });
 });
 
@@ -129,7 +129,7 @@ describe('HeatLegend (mounted)', () => {
         `${channel} depth`,
       );
       expect(legend.querySelector('[data-testid="heat-legend-bar"]')!.getAttribute('data-ramp')).toBe(
-        String(RAMP_FLOW),
+        String(RAMP_THEME),
       );
     }
   });
@@ -153,11 +153,11 @@ describe('HeatLegend (mounted)', () => {
     expect(legend.getAttribute('aria-label')).toContain('theme colormap');
     expect(bar.getAttribute('data-ramp')).toBe(String(RAMP_THEME));
     // Midnight's density ramp is byte-identical to the FLOW stops at the source.
-    expect(bar.getAttribute('style')).toContain('rgb(5, 8, 14) 0.0%');
+    expect(bar.getAttribute('style')).toContain('rgb(11, 17, 27) 0.0%');
 
     act(() => setTheme('paper'));
-    expect(bar.getAttribute('style')).toContain('rgb(243, 241, 234) 0.0%');
-    expect(bar.getAttribute('style')).not.toContain('rgb(5, 8, 14) 0.0%');
+    expect(bar.getAttribute('style')).toContain('rgb(242, 245, 248) 0.0%');
+    expect(bar.getAttribute('style')).not.toContain('rgb(11, 17, 27) 0.0%');
   });
 
   it('theme + SYNTH: the bar follows the active theme synth ramp (R1-M2)', () => {

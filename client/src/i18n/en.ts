@@ -5,6 +5,31 @@
  * feature-pane strings here without a shell reason.
  */
 export const en: Record<string, string> = {
+  'theme.midnight.name': 'Midnight',
+  'theme.midnight.hint': 'Cool graphite',
+  'theme.paper.name': 'Paper',
+  'theme.paper.hint': 'Soft daylight',
+  'theme.swiss.name': 'Studio',
+  'theme.swiss.hint': 'Crisp white',
+  'theme.amber.name': 'Amber',
+  'theme.amber.hint': 'Warm graphite',
+  'theme.sea.name': 'Deep sea',
+  'theme.sea.hint': 'Petrol blue',
+  'theme.paper-deut.name': 'Daylight',
+  'theme.paper-deut.hint': 'Cool mineral',
+  'theme.contrast.name': 'High contrast',
+  'theme.contrast.hint': 'Explicit separation',
+  'palette.theme': 'Theme',
+  'palette.identity': 'Theme identity',
+  'palette.detail': 'Cool liquidity detail',
+  'palette.warm': 'Warm intensity',
+  'palette.thermal': 'Thermal range',
+  'palette.cool': 'Cool single hue',
+  'palette.green': 'Purple, green, yellow',
+  'palette.blueYellow': 'Blue to yellow',
+  'palette.mono': 'Monochrome density',
+
+
   'replayPicker.title': 'Recorded replay',
   'replayPicker.cancel': 'Cancel',
   'replayPicker.zone': 'Local time zone:',
@@ -105,7 +130,7 @@ export const en: Record<string, string> = {
   'drawer.sectionKeyboard': 'Keyboard',
   'settings.colormap': 'Colormap',
   'settings.colormapHint':
-    'Theme makes the chart follow the active theme. Flow / Inferno / Classic pin the fixed dark chart.',
+    'Colors follow your theme. Density increases from left to right.',
   'settings.contrast': 'Contrast',
   'settings.contrastHint': 'Darkens the mid-density field against the brightest walls — higher is punchier.',
   'settings.tolerance': 'Tolerance',

@@ -4,6 +4,30 @@
  * Feature panes stay English; these are shell strings only.
  */
 export const tr: Record<string, string> = {
+  'theme.midnight.name': 'Midnight',
+  'theme.midnight.hint': 'Serin grafit',
+  'theme.paper.name': 'Paper',
+  'theme.paper.hint': 'Yumuşak gün ışığı',
+  'theme.swiss.name': 'Studio',
+  'theme.swiss.hint': 'Net beyaz',
+  'theme.amber.name': 'Amber',
+  'theme.amber.hint': 'Sıcak grafit',
+  'theme.sea.name': 'Deep sea',
+  'theme.sea.hint': 'Petrol mavisi',
+  'theme.paper-deut.name': 'Daylight',
+  'theme.paper-deut.hint': 'Serin mineral',
+  'theme.contrast.name': 'Yüksek kontrast',
+  'theme.contrast.hint': 'Belirgin ayrım',
+  'palette.theme': 'Tema',
+  'palette.identity': 'Temanın renkleri',
+  'palette.detail': 'Serin likidite ayrıntıları',
+  'palette.warm': 'Sıcak yoğunluk',
+  'palette.thermal': 'Termal aralık',
+  'palette.cool': 'Tek serin renk',
+  'palette.green': 'Mor, yeşil, sarı',
+  'palette.blueYellow': 'Maviden sarıya',
+  'palette.mono': 'Tek renkli yoğunluk',
+
   'replayPicker.title': 'Kayıttan tekrar',
   'replayPicker.cancel': 'Vazgeç',
   'replayPicker.zone': 'Yerel saat dilimi:',
@@ -101,7 +125,7 @@ export const tr: Record<string, string> = {
   'drawer.sectionKeyboard': 'Klavye',
   'settings.colormap': 'Renk haritası',
   'settings.colormapHint':
-    'Tema: grafik aktif temanın paletini izler. Flow / Inferno / Classic sabit koyu grafiği kullanır.',
+    'Renkler temanıza uyum sağlar. Yoğunluk soldan sağa artar.',
   'settings.contrast': 'Kontrast',
   'settings.contrastHint':
     'Orta yoğunluk alanını en parlak duvarlara göre karartır — yükseldikçe daha vurucu olur.',

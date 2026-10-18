@@ -22,6 +22,7 @@ import {
   withAlpha,
 } from './priceLine';
 import { deriveL2Bbo } from './manager';
+import { OVERLAY } from './palette';
 import { accumulateProfile } from './profile';
 import { sessionVwap } from './vwap';
 import { makeHybrid, rowToPrice } from '../priceScale';
@@ -387,8 +388,8 @@ describe('L6 price-line ink tuning', () => {
 
   it('pins the tightened widths/alphas (no area-wash constant — F4 removed it)', () => {
     expect(PRICE_LINE_WIDTH).toBe(2.0);
-    expect(PRICE_GLOW_WIDTH).toBe(6.0);
-    expect(PRICE_GLOW_ALPHA).toBe(0.16);
+    expect(PRICE_GLOW_WIDTH).toBe(4.0);
+    expect(PRICE_GLOW_ALPHA).toBe(1);
     expect(PRICE_LEVEL_ALPHA).toBe(0.28);
     expect(PRICE_STUB_ALPHA).toBe(0.7);
     expect(PRICE_LEVEL_DASH).toEqual([3, 6]);
@@ -407,15 +408,15 @@ describe('L6 price-line ink tuning', () => {
     pl.add({ col_seq: 5, c: 7 } as never);
     const fill: string[] = [];
     const dash: Array<{ color: string; pattern?: number[] }> = [];
-    const lines: Array<{ width: number; alpha?: number }> = [];
+    const lines: Array<{ width: number; alpha?: number; color: string }> = [];
     const text = {
       fillUnder: (_p: unknown[], _yBase: number, top: string) => {
         // The full-height wash was the measured defect (luma ~25 vs bg 7.8,
         // tiling over reconstruct). Any call here is a regression.
         fill.push(top);
       },
-      polyline: (_p: unknown[], o: { width: number; alpha?: number }) => {
-        lines.push({ width: o.width, alpha: o.alpha });
+      polyline: (_p: unknown[], o: { width: number; alpha?: number; color: string }) => {
+        lines.push({ width: o.width, alpha: o.alpha, color: o.color });
       },
       dashedLine: (
         _x0: number,
@@ -431,9 +432,10 @@ describe('L6 price-line ink tuning', () => {
     pl.draw({ gm: g, text, resident: null } as unknown as OverlayFrame);
 
     expect(fill).toEqual([]); // NO area wash — the line + glow carry the trace
-    expect(lines[0]).toEqual({ width: 6, alpha: 0.16 }); // glow (softened W6 swarm2)
-    expect(lines[1]).toEqual({ width: 2, alpha: 0.7 }); // right-edge stub
-    expect(lines[2]).toEqual({ width: 2, alpha: undefined }); // bright core
+    expect(lines[0]).toEqual({ width: 4, alpha: 1, color: OVERLAY.priceHalo.css }); // glow (softened W6 swarm2)
+    expect(lines[1]).toEqual({ width: 4, alpha: undefined, color: OVERLAY.priceHalo.css });
+    expect(lines[2]).toEqual({ width: 2, alpha: 0.7, color: OVERLAY.price.css }); // right-edge stub
+    expect(lines[3]).toEqual({ width: 2, alpha: undefined, color: OVERLAY.price.css }); // bright core
     expect(dash[0].color).toBe('rgba(245, 248, 252, 0.28)'); // quieter level
     expect(dash[0].pattern).toEqual([3, 6]); // calmer long-dash texture
     // The call must hand the layer a FRESH array — canvas dash state is sticky,

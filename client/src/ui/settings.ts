@@ -1,3 +1,4 @@
+import { isColormap } from '../theme/appearance';
 /**
  * Persisted workspace settings (§9 settings drawer, T12) — pure load/save over a
  * Storage-shaped backend, so persistence + defaults + corruption tolerance are
@@ -155,13 +156,6 @@ export const SETTINGS_KEY = 'flowmap.settings.v1';
 /** Current persisted schema version (F6 chart-harmony migration). */
 export const SETTINGS_VERSION = 2;
 
-/**
- * The colormap families `normalizeSettings` accepts. `'theme'` (the F6 default)
- * makes the chart follow the active theme; the three legacy families pin the
- * fixed dark chart they always did.
- */
-const COLORMAPS: readonly Colormap[] = ['theme', 'flow', 'inferno', 'classic'];
-
 export const DEFAULT_SETTINGS: FlowMapSettings = {
   settingsVersion: SETTINGS_VERSION,
   contrast: DEFAULT_CONTRAST,
@@ -227,7 +221,7 @@ export function normalizeSettings(raw: unknown): FlowMapSettings {
     // back to DEFAULT_COLORMAP. See the module docblock.
     colormap:
       storedVersion >= SETTINGS_VERSION
-        ? COLORMAPS.includes(o.colormap as Colormap)
+        ? isColormap(o.colormap)
           ? (o.colormap as Colormap)
           : DEFAULT_COLORMAP
         : 'theme',

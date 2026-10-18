@@ -39,13 +39,10 @@ import type { Pt } from '../textLayer';
 
 /** CSS-px width of the bright price-line core. */
 export const PRICE_LINE_WIDTH = 2.0;
-/** CSS-px width of the translucent glow drawn underneath the core. */
-export const PRICE_GLOW_WIDTH = 6.0;
-/** Alpha of the wide glow pass (over the near-white core color). Bookmap-class
- *  judgement (W6, swarm2): the halo must seat the trace, not fatten it — 0.22
- *  read as a ~5px-thick line at 1:1; 0.16 keeps the depth cue while the 2px
- *  core stays the crisp protagonist. */
-export const PRICE_GLOW_ALPHA = 0.16;
+/** CSS-px width of the contrasting under-stroke (one pixel beside the core). */
+export const PRICE_GLOW_WIDTH = 4.0;
+/** Opaque under-stroke: either price or halo clears 3:1 on every LUT sample. */
+export const PRICE_GLOW_ALPHA = 1;
 /** Alpha of the dashed last-price level marker (quieter than the trace).
  *  `OVERLAY.priceLevel` is palette-lane owned; this slice re-stamps its alpha
  *  here so hues stay palette-owned. */
@@ -168,13 +165,12 @@ export class PriceLine {
 
     // No area wash (swarm2 F4): the old full-height `fillUnder` slab flooded the
     // field (QA3 H-1) and tiled into flat 1-px slabs over reconstructed history.
-    // The glow + core carry the trace, like Bookmap.
+    // The contrasting under-stroke + core carry the trace.
 
-    // Glow pass (wide, translucent) — flushed first so the bright core sits on
-    // top; canvas AA + round joins make the two passes read as one smooth line.
+    // Reuse the same points for the opaque under-stroke; no second history pass.
     text.polyline(pts, {
       width: PRICE_GLOW_WIDTH,
-      color: OVERLAY.price.css,
+      color: OVERLAY.priceHalo.css,
       alpha: PRICE_GLOW_ALPHA,
     });
     // Right-edge solid stub: carries the trace the last few px into the gutter
@@ -184,6 +180,7 @@ export class PriceLine {
     const newest = pts[pts.length - 1];
     const stubEnd = Math.min(gm.dims.cssW, newest.x + PRICE_STUB_PX);
     if (stubEnd - newest.x >= 1) {
+      text.polyline([newest, { x: stubEnd, y: newest.y }], { width: PRICE_GLOW_WIDTH, color: OVERLAY.priceHalo.css });
       text.polyline([newest, { x: stubEnd, y: newest.y }], {
         width: PRICE_LINE_WIDTH,
         color: OVERLAY.price.css,
@@ -194,6 +191,7 @@ export class PriceLine {
     text.polyline(pts, { width: PRICE_LINE_WIDTH, color: OVERLAY.price.css });
     // A single visible vertex: draw a short dash so it's still visible.
     if (pts.length === 1) {
+      text.dashedLine(pts[0].x - 4, pts[0].y, pts[0].x + 4, pts[0].y, OVERLAY.priceHalo.css, [99, 0], PRICE_GLOW_WIDTH);
       text.dashedLine(pts[0].x - 4, pts[0].y, pts[0].x + 4, pts[0].y, OVERLAY.price.css, [99, 0], PRICE_LINE_WIDTH);
     }
 

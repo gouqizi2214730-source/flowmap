@@ -1,3 +1,5 @@
+import { COLORMAP_CATALOG, resolveAppearance } from '../theme/appearance';
+import { setThemeStops } from './lut';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { Renderer } from './renderer';
@@ -147,6 +149,7 @@ describe('Renderer (fake GL harness)', () => {
   });
 
   afterEach(() => {
+    setThemeStops(null);
     restoreGetContext();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -1144,6 +1147,21 @@ describe('Renderer (fake GL harness)', () => {
     pump(16);
     expect(r.getDepthChannel()).toBe('imbalance'); // the SETTING is remembered...
     expect(channelValues(before)).toEqual([0]); // ...but SYNTH renders sum
+  });
+
+  it('appearance matrix preserves resident data, cache, LUT object, normalization, camera and follow; identical setter does not upload', () => {
+    const { r, store } = makeRenderer();
+    for(let i=0;i<8;i++) store.emit(makeCol(i,true));
+    r.setPriceFollow('off'); r.setFollowTime(false); pump(16);
+    const internal = r as unknown as Record<string,unknown>;
+    const before = {ring:internal.ring,cache:internal.columnCache,lut:internal.lut,normalizer:internal.normalizer,camera:internal.camera,view:r.viewSnapshot,range:r.residentRange(),follow:r.following,price:r.priceFollow};
+    for(const theme of THEME_IDS) for(const {id:family} of COLORMAP_CATALOG) {
+      const a=resolveAppearance(theme,family); r.setColormap(family); r.setChartTheme(a);
+      const uploads=gl.callsOf('texImage2D').length; r.setChartTheme(a);r.setChartTheme({...a});
+      expect(gl.callsOf('texImage2D').length).toBe(uploads);
+      expect(r.currentRamp).toBe(5);expect(internal.ring).toBe(before.ring);expect(internal.columnCache).toBe(before.cache);expect(internal.lut).toBe(before.lut);expect(internal.normalizer).toBe(before.normalizer);expect(internal.camera).toBe(before.camera);expect(r.viewSnapshot).toEqual(before.view);expect(r.residentRange()).toEqual(before.range);expect(r.following).toBe(before.follow);expect(r.priceFollow).toBe(before.price);
+    }
+    r.dispose();
   });
 
   it('keeps synthetic depth in Sum for every themed synthetic ramp', () => {

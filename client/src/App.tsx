@@ -1,3 +1,4 @@
+import { resolveAppearance } from './theme/appearance';
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 
 import { gammaForContrast } from './gl/heatmap';
@@ -6,7 +7,6 @@ import type { PriceFollow } from './gl/camera';
 import { applyChartInk, applyOverlayPalette } from './gl/overlays/palette';
 import {
   attachThemeKey,
-  DEFAULT_THEME_ID,
   getCanvasPalette,
   getTheme,
   THEMES,
@@ -222,10 +222,7 @@ export function App() {
   // human-frequency.
   const { theme } = useTheme();
 
-  // F6: push the (theme, colormap) pair onto the renderer's theme ramp. Legacy
-  // families pin today's ramps (`null`); `'theme'` follows the active theme.
-  // Idempotent via `lastChartThemeRef` — `setChartTheme` recreates the LUT
-  // texture, so repeated settings writes must not re-upload it.
+  // Resolve once per theme/family pair; reuse the existing LUT texture.
   const syncChartTheme = useCallback((themeId: ThemeId, colormap: Colormap): void => {
     const r = rendererRef.current;
     if (!r) return;
@@ -233,9 +230,7 @@ export function App() {
     if (lastChartThemeRef.current === sig) return;
     lastChartThemeRef.current = sig;
     r.setChartTheme(
-      colormap === 'theme'
-        ? { id: themeId, density: THEMES[themeId].chart.density, synth: THEMES[themeId].chart.synth }
-        : null,
+      resolveAppearance(themeId, colormap),
     );
   }, []);
 
@@ -593,20 +588,11 @@ export function App() {
   // and dialog guarded, so it yields to the drawer/search like the keys above).
   useEffect(() => attachThemeKey(), []);
 
-  // Theme → canvas bridge: GL/2D overlay colors follow the shell theme. The
-  // DEFAULT theme (`midnight`) IS the shipped literal palette, so the bridge is
-  // never invoked for it (pixel-identity by construction); switching back to
-  // midnight restores the originals via the null call.
+  // Theme owns chart semantics and ink for every density family.
   useEffect(() => {
-    applyOverlayPalette(theme === DEFAULT_THEME_ID ? null : getCanvasPalette(theme));
-    // F6 chart harmony: theme (or colormap) changes repaint the 2D ink layers
-    // through `applyChartInk` and re-ramp the GL canvas through `setChartTheme`.
-    // `'theme'` skips the midnight restore (midnight IS the shipped literal
-    // palette); legacy families force the null restore.
+    applyOverlayPalette(getCanvasPalette(theme));
     applyChartInk(
-      settings.colormap === 'theme' && theme !== DEFAULT_THEME_ID
-        ? chartInkOf(THEMES[theme].chart)
-        : null,
+      chartInkOf(THEMES[theme].chart),
     );
     syncChartTheme(theme, settings.colormap);
   }, [theme, settings.colormap]);
@@ -623,9 +609,7 @@ export function App() {
     }
   }, [theme]);
 
-  // F6 chart harmony: stamp the ramp choice on <html> so the CSS pin
-  // `:root[data-chart-ramp='flow'|'inferno'|'classic']` can keep the legacy
-  // dark chart tokens while `'theme'` lets the theme own them.
+  // Expose the persisted family for diagnostics; theme CSS owns chart tokens.
   useEffect(() => {
     document.documentElement.dataset.chartRamp = settings.colormap;
   }, [settings.colormap]);
@@ -796,6 +780,8 @@ export function App() {
         notes: exportProvenanceNotes({ following: renderer?.following ?? null, mode: sub?.mode, capability }),
         legend: {
           colormap: settingsRef.current.colormap,
+          theme: getTheme(),
+          channel: settingsRef.current.depthChannel,
           synth: typeof capability?.depth === 'string' && capability.depth.startsWith('SYNTH'),
           tier: typeof capability?.depth === 'string' ? capability.depth : undefined,
         },

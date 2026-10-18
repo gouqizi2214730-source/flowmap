@@ -344,9 +344,9 @@ body,
   border-color: var(--line-2);
 }
 .tbtn.is-on {
-  color: var(--text);
-  border-color: var(--accent-line);
-  background: var(--accent-dim);
+  color: var(--selection-ink);
+  border-color: var(--ui-accent);
+  background: var(--selection-bg);
 }
 
 /* PNG export button icon — filled with currentColor like the wordmark, so it
@@ -1783,7 +1783,7 @@ body,
 }
 .setting__value {
   font-size: var(--fs-sm);
-  color: var(--accent);
+  color: var(--ui-accent);
   text-transform: none;
   letter-spacing: 0.02em;
   font-variant-numeric: tabular-nums;
@@ -1838,9 +1838,9 @@ body,
   color: var(--text-2);
 }
 .segrow__btn.is-on {
-  color: var(--text);
-  background: var(--bg-3);
-  box-shadow: inset 0 0 0 1px var(--line-2);
+  color: var(--selection-ink);
+  background: var(--selection-bg);
+  box-shadow: inset 0 0 0 1px var(--ui-accent);
 }
 
 /* F15 (QA12 H-1): the theme picker carries 7 options; measured at the 340px
@@ -1885,16 +1885,16 @@ body,
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid #06120f;
+  background: var(--ui-accent);
+  border: 2px solid var(--bg);
   cursor: pointer;
 }
 .range::-moz-range-thumb {
   width: 14px;
   height: 14px;
   border-radius: 50%;
-  background: var(--accent);
-  border: 2px solid #06120f;
+  background: var(--ui-accent);
+  border: 2px solid var(--bg);
   cursor: pointer;
 }
 
@@ -1927,12 +1927,12 @@ body,
   transition: transform var(--t-fast), background var(--t-fast);
 }
 .check.is-on .check__box {
-  background: var(--accent-dim);
-  border-color: var(--accent-line);
+  background: var(--selection-bg);
+  border-color: var(--ui-accent);
 }
 .check.is-on .check__box::after {
   transform: translateX(16px);
-  background: var(--accent);
+  background: var(--ui-accent);
 }
 
 .drawer__divider {
@@ -1963,9 +1963,9 @@ body,
   color: var(--text);
 }
 .overlay-toggle.is-on {
-  color: var(--text);
-  border-color: var(--accent-line);
-  background: var(--accent-dim);
+  color: var(--selection-ink);
+  border-color: var(--ui-accent);
+  background: var(--selection-bg);
 }
 
 /* ==========================================================================
@@ -2037,13 +2037,13 @@ body,
 .keyshelp__close:focus-visible,
 .range:focus-visible,
 .minimap__scrub:focus-visible {
-  outline: 2px solid var(--accent-bright);
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
   border-radius: var(--r-1);
 }
 .gl-canvas:focus-visible {
   outline: none;
-  box-shadow: inset 0 0 0 2px var(--accent-line);
+  box-shadow: inset 0 0 0 2px var(--focus);
 }
 .range:focus-visible::-webkit-slider-thumb,
 .minimap__scrub:focus-visible::-webkit-slider-thumb {
@@ -2538,7 +2538,7 @@ body,
    2. INVERT THE DARK CHART. The GL canvas keeps painting its theme ramp (CSS
       cannot recolor canvas pixels), so everywhere the chart ground is DARK —
       a dark theme with `colormap: theme`, or a legacy flow/inferno/classic
-      ramp under ANY theme (the `data-chart-ramp` dark-island rule) — the whole
+      ramp under ANY theme (the active theme ground) — the whole
       canvas stack prints through `invert(1) hue-rotate(180deg)`: the classic
       light-paper transform. Hue is preserved, lightness flips, so the field
       prints light with dark liquidity bands and dark price/axis ink instead of
@@ -2611,10 +2611,7 @@ body,
   :root:root[data-theme='midnight'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot),
   :root:root[data-theme='amber'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot),
   :root:root[data-theme='sea'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot),
-  :root:root[data-theme='contrast'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot),
-  :root:root[data-chart-ramp='flow'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot),
-  :root:root[data-chart-ramp='inferno'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot),
-  :root:root[data-chart-ramp='classic'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot) {
+  :root:root[data-theme='contrast'] :is(.stage canvas, .heat-legend__bar, .chart-legend__line, .chart-legend__dot) {
     filter: invert(1) hue-rotate(180deg);
   }
 
@@ -2684,7 +2681,7 @@ body,
 
 /* --- keyboard focus: a calm accent ring, never the browser default --- */
 :focus-visible {
-  outline: 2px solid var(--accent-glow);
+  outline: 2px solid var(--focus);
   outline-offset: 1px;
   border-radius: var(--r-1);
 }
@@ -2755,3 +2752,16 @@ body,
     animation: none;
   }
 }
+
+/* Compact terminal previews: the resolved chart and heatmap colors are the content. */
+.appearance-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; width:100%; }
+.appearance-choice { display:flex; flex-direction:column; min-width:0; gap:4px; padding:6px; text-align:left; color:var(--text); background:var(--bg); border:1px solid var(--line); border-radius:var(--r-1); cursor:pointer; font:inherit; }
+.appearance-choice:hover { border-color:var(--ui-accent); }
+.appearance-choice.is-on { border-color:var(--ui-accent); box-shadow:inset 0 0 0 1px var(--ui-accent); }
+.appearance-choice:focus-visible { outline:2px solid var(--focus); outline-offset:3px; }
+.appearance-choice:disabled { opacity:.6; cursor:default; }
+.appearance-choice__name { display:flex; justify-content:space-between; gap:4px; width:100%; font-size:12px; line-height:1.2; }
+.appearance-choice__name > span { color:var(--ui-accent); font-weight:700; }
+.appearance-choice__hint { font-size:11px; line-height:1.25; color:var(--text-2); overflow-wrap:anywhere; }
+.theme-preview { display:block; width:100%; height:42px; border:1px solid var(--line); }
+.palette-preview { display:block; width:100%; height:14px; border:1px solid var(--line); }

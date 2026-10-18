@@ -1,6 +1,8 @@
+import type { FlowmapTestApi } from '../../src/gl/testHook';
+import { COLORMAP_CATALOG, resolveAppearance } from '../../src/theme/appearance';
 import { expect, test, type Page } from '@playwright/test';
 
-import { THEMES, type ThemeId } from '../../src/theme/registry';
+import { THEMES, THEME_IDS, type ThemeId } from '../../src/theme/registry';
 
 /**
  * Visual campaign 2026-09-11 (lane L4) — the chart follows the active theme.
@@ -152,8 +154,8 @@ test('default midnight + theme colormap keeps the shipped dark chart ground', as
 
   // DOM mirror: midnight keeps the shipped chart tokens — the ground is the
   // active ramp's first stop (#05080e), i.e. the exact GL clear colour.
-  expect(await chartVar(page, '--chart-bg')).toBe('rgb(5, 8, 14)');
-  expect(await chartVar(page, '--chart-ink')).toBe('rgb(230, 237, 243)');
+  expect(await chartVar(page, '--chart-bg')).toBe('rgb(11, 17, 27)');
+  expect(await chartVar(page, '--chart-ink')).toBe('rgb(226, 235, 246)');
 
   // S2-Q1 decoupling check: midnight's OWN density ramp is served from the
   // theme row now — the renderer must report RAMP_THEME (5), not the frozen
@@ -205,7 +207,7 @@ test('paper theme flips the chart ground + ink to the light palette', async ({ p
     .poll(() => page.evaluate(() => document.documentElement.dataset.chartRamp), { timeout: 15_000 })
     .toBe('theme');
 
-  expect(await chartVar(page, '--chart-bg')).toBe('rgb(243, 241, 234)');
+  expect(await chartVar(page, '--chart-bg')).toBe('rgb(242, 245, 248)');
   const inkNorm = await chartVar(page, '--chart-ink');
   const inkRgb = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(inkNorm);
   expect(inkRgb, `--chart-ink resolved to "${inkNorm}"`).not.toBeNull();
@@ -236,7 +238,7 @@ test('paper theme flips the chart ground + ink to the light palette', async ({ p
   ).toBeLessThanOrEqual(48);
 });
 
-test('legacy classic colormap pins the dark chart ground regardless of theme', async ({ page }) => {
+test('classic colormap preserves the light chart ground and dark ink', async ({ page }) => {
   await bootSim(page);
 
   await page.evaluate(() => {
@@ -255,14 +257,40 @@ test('legacy classic colormap pins the dark chart ground regardless of theme', a
     .poll(() => page.evaluate(() => document.documentElement.dataset.chartRamp), { timeout: 15_000 })
     .toBe('classic');
 
-  // The F6 CSS pin restores the shipped --chart-* values for legacy families,
-  // even while the shell stays paper (light).
-  expect(await chartVar(page, '--chart-bg')).toBe('rgb(5, 8, 14)');
-  expect(await chartVar(page, '--chart-ink')).toBe('rgb(230, 237, 243)');
+  expect(await chartVar(page, '--chart-bg')).toBe('rgb(242, 245, 248)');
+  expect(await chartVar(page, '--chart-ink')).toBe('rgb(29, 44, 61)');
+  expect((await meanCanvasLuma(page))!).toBeGreaterThan(90);
+});
 
-  const dom = await dominantCanvasColor(page);
-  if (dom) {
-    // classic ramp head is (2, 4, 12) — dark in both paths.
-    expect(luma(dom)).toBeLessThan(90);
-  }
+// Every combination is painted by the real heatmap shader, including its exact zero and high-density endpoint.
+test('all theme × family combinations render adaptive density and amber synthetic pixels', async ({ page }) => {
+ await page.goto('/?test=heatmap');
+ await page.waitForFunction(() => '__flowmapTest' in window);
+ const appearances = THEME_IDS.flatMap(id=>COLORMAP_CATALOG.map(c=>resolveAppearance(id,c.id)));
+ const probes=await page.evaluate((items)=>{
+  const api=(window as unknown as {__flowmapTest:FlowmapTestApi}).__flowmapTest;
+  api.init(64,1,128,128);
+  const bid=Array(64).fill(0);for(let r=28;r<=36;r++)bid[r]=100;
+  for(let c=0;c<64;c++)api.appendColumn(c,bid,Array(64).fill(0));
+  api.fitView();const range=api.residentRange();
+  return items.map(a=>{
+   api.setThemeRamp(a.density,a.synth);api.setEncoding(1,100);api.setColormap(a.colormap);
+   const zero=api.readPixels(64,8,1,1), wall=api.readPixels(64,64,1,1);
+   api.setEncoding(1,100,true);const synthetic=api.readPixels(64,64,1,1);
+   return {key:a.key,zero,wall,synthetic,retained:JSON.stringify(api.residentRange())===JSON.stringify(range)};
+  });
+ },appearances);
+ for(const [i,p] of probes.entries()) {
+  const a=appearances[i];expect(p.retained,p.key).toBe(true);
+  expect(p.zero.slice(0,3),`${p.key} zero`).toEqual([...a.density[0].rgb]);
+  for(const [px,target] of [[p.wall,a.density.at(-1)!.rgb],[p.synthetic,a.synth.at(-1)!.rgb]] as const) for(let c=0;c<3;c++) expect(Math.abs(px[c]-target[c]),`${p.key} high-density pixel`).toBeLessThanOrEqual(2);
+ }
+});
+
+test('changing theme and a new family persists together across reload', async ({ page }) => {
+ await bootSim(page);await page.getByTestId('settings-open').click();
+ await page.getByTestId('theme-swiss').click();await page.getByTestId('colormap-cividis').click();
+ await page.reload();await bootSim(page);
+ expect(await chartVar(page,'--chart-bg')).toBe('rgb(255, 255, 255)');
+ expect(await page.evaluate(()=>document.documentElement.dataset.chartRamp)).toBe('cividis');
 });

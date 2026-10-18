@@ -54,6 +54,8 @@
  */
 
 import { MODE_SYNTH_PROFILE } from '../proto/types';
+import type { Colormap } from '../theme/colormaps';
+export type { Colormap } from '../theme/colormaps';
 
 export const LUT_SIZE = 256;
 
@@ -72,16 +74,16 @@ export const RAMP_THEME_SYNTH = 6;
 
 /**
  * Rows 0 (REAL depth) and 1 (SYNTH amber) are pinned by the e2e parity matrix —
- * new ramps therefore append and never renumber. Row 4 appends the divergent
+ * raw rows therefore never renumber. Row 4 holds the divergent
  * imbalance row; rows 5/6 append the theme-owned ramps (campaign visual
- * 2026-09-11); rows 0..4 keep their exact bytes (pinned by golden tests).
+ * 2026-09-11). Unthemed rows 0..4 retain their frozen bytes; active row 4 may adapt.
  */
 export const LUT_ROWS = 7;
 
 /** The colormap families a user can choose between (the §9 Settings knob).
- *  `'theme'` follows the active theme's chart palette; the legacy three pin
- *  the shipped dark ramps regardless of theme. */
-export type Colormap = 'theme' | 'flow' | 'inferno' | 'classic';
+ *  The catalog in theme/appearance.ts powers acceptance and picker choices.
+ *  Active appearances resolve all families into row 5; raw fixtures keep 0..3. */
+
 
 export const DEFAULT_COLORMAP: Colormap = 'theme';
 
@@ -112,13 +114,14 @@ export interface RampStop {
 export interface ThemeRampStops {
   readonly density: readonly RampStop[];
   readonly synth: readonly RampStop[];
+  readonly imbalance?: readonly RampStop[];
 }
 
 /**
  * Active theme stops (module-level, not per-renderer): the atlas rows 5/6 and
  * the legend gradients are global singletons, and the renderer keeps a single
  * live instance. `null` → rows 5/6 default to FLOW_STOPS / SYNTH_STOPS, which
- * makes the `midnight` + `'theme'` path byte-identical to the legacy flow path.
+ * preserves the unthemed GL fixture fallback bytes.
  */
 let themeStops: ThemeRampStops | null = null;
 
@@ -234,6 +237,7 @@ const RAMP_STOPS: Record<number, readonly RampStop[]> = {
  *  The single source of truth for the GPU texture AND the HTML legend gradient,
  *  so they can never drift apart. */
 function stopsForRow(row: number): readonly RampStop[] {
+  if (row === RAMP_IMBALANCE && themeStops?.imbalance) return themeStops.imbalance;
   if (row === RAMP_THEME) return themeStops?.density ?? FLOW_STOPS;
   if (row === RAMP_THEME_SYNTH) return themeStops?.synth ?? SYNTH_STOPS;
   return RAMP_STOPS[row] ?? RAMP_STOPS[RAMP_INFERNO];
@@ -274,8 +278,8 @@ export function rampForColormap(colormap: Colormap): number {
  *
  * The synthetic test runs FIRST and unconditionally, so the `colormap` argument
  * can never override it. `themed` carries the theme-owned atlas rows to use for
- * the `'theme'` family (the renderer passes null for the midnight identity, so
- * the observable rows stay RAMP_FLOW/RAMP_SYNTH). Pure, so the selection is
+ * every active family. No active appearance keeps the raw fixture rows. Pure,
+ * so the selection is
  * unit-testable without GL.
  */
 export function rampForMode(
@@ -286,7 +290,8 @@ export function rampForMode(
 ): number {
   const synthetic = depth === 'SYNTH' || depth === 'SYNTH_PROFILE';
   if (synthetic || mode === MODE_SYNTH_PROFILE) return themed?.synth ?? RAMP_SYNTH;
-  if (colormap === 'theme') return themed?.density ?? RAMP_FLOW;
+  if (themed) return themed.density;
+  if (colormap === 'theme') return RAMP_FLOW;
   return rampForColormap(colormap);
 }
 
@@ -369,7 +374,7 @@ export function rampCssGradient(row: number): string {
  */
 export function rampCssGradientReversed(row: number): string {
   const stops = stopsForRow(row);
-  return gradientOfStops([...stops].reverse());
+  return gradientOfStops([...stops].reverse().map(s => ({ ...s, t: 1 - s.t })));
 }
 
 function gradientOfStops(stops: readonly RampStop[]): string {
@@ -391,7 +396,7 @@ export function buildLUTAtlas(theme: ThemeRampStops | null = themeStops): Uint8A
   atlas.set(buildSynthLUT(), RAMP_SYNTH * LUT_SIZE * 4);
   atlas.set(buildClassicLUT(), RAMP_CLASSIC * LUT_SIZE * 4);
   atlas.set(buildFlowLUT(), RAMP_FLOW * LUT_SIZE * 4);
-  atlas.set(buildImbalanceLUT(), RAMP_IMBALANCE * LUT_SIZE * 4);
+  atlas.set(theme?.imbalance ? buildRamp(theme.imbalance) : buildImbalanceLUT(), RAMP_IMBALANCE * LUT_SIZE * 4);
   atlas.set(buildRamp(theme?.density ?? FLOW_STOPS), RAMP_THEME * LUT_SIZE * 4);
   atlas.set(buildRamp(theme?.synth ?? SYNTH_STOPS), RAMP_THEME_SYNTH * LUT_SIZE * 4);
   return atlas;

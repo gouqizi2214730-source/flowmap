@@ -31,6 +31,7 @@ export const OVERLAY = {
    *  price, clearly apart from the colored density, VWAP (violet) and BBO. */
   price: { gl: rgba(245, 248, 252, 0.98), css: css(245, 248, 252) },
   /** Soft glow drawn under the price line to fatten it without hard edges. */
+  priceHalo: { gl: rgba(0, 0, 0), css: css(0, 0, 0) },
   priceGlow: { gl: rgba(245, 248, 252, 0.22), css: css(245, 248, 252, 0.22) },
   /** Area wash under the price line (text-layer gradient, top → bottom). Kept
    *  very faint: the density field is the protagonist, the wash only seats the
@@ -64,26 +65,7 @@ export const OVERLAY = {
   badgeBg: 'rgba(5, 8, 12, 0.82)',
 } as const;
 
-// --- theme bridge (campaign 3 INT; fix 2026-09-10 F1-2) ---------------------------
-//
-// The literal table above IS the `midnight` theme. `applyOverlayPalette` rewrites
-// the runtime values of the SEMANTIC bid/ask entries so the GL + 2D overlay
-// layers follow the active shell theme; `applyOverlayPalette(null)` restores the
-// original literals byte-for-byte. App.tsx calls the bridge for non-default
-// themes and passes null on `midnight`, so the default rendering stays
-// pixel-identical (the bridge is never invoked for it).
-//
-// DARK-ISLAND RULE (fix 2026-09-10 F1-2): the WebGL canvas background is
-// ramp-derived and ALWAYS dark (`clearColorForRamp` — lut.ts), in every theme.
-// The chart is therefore a dark island inside light shells too, and its ink must
-// NOT follow the theme: `text`, `grid` and the `bg`-derived pill/badge plate stay
-// the midnight literals in ALL themes. Only the semantic `bid`/`ask` (and their
-// buy/sell twins) follow the theme — that is what keeps e.g. `sea`'s CVD-safe
-// sell→blue recolor working without ever inking the dark canvas with light-theme
-// near-black text.
-//
-// Deliberately NOT themed (categorical accents that read on light and dark ground):
-// vwap / cvd / profile / poc / liquidation / event / gap / unknown.
+// Semantic market colors are independent of density families.
 
 /** Structural shape of the theme registry's canvas palette (theme/registry.ts). */
 export interface OverlayThemePalette {
@@ -149,17 +131,7 @@ function rgbaStr(r: number, g: number, b: number, a: number): string {
   return `rgba(${r}, ${g}, ${b}, ${a})`;
 }
 
-/**
- * Feed a theme's SEMANTIC colors into the overlay palette, or `null` to restore
- * the shipped `midnight` literals. Idempotent; a throwing/unparseable field is
- * skipped (the previous value stays), so a bad computed style can never blank
- * the overlays.
- *
- * DARK-ISLAND RULE (fix 2026-09-10 F1-2): only `bid`/`ask` are consumed — the
- * canvas is ramp-dark in every theme, so `text`/`grid`/`bg` are deliberately
- * IGNORED and the chart's ink, grid and pill plates stay the midnight literals
- * in all themes.
- */
+/** Apply theme market channels. Null restores the raw fixture palette. */
 export function applyOverlayPalette(p: OverlayThemePalette | null): void {
   const rec = OVERLAY as unknown as Record<string, OverlayColor | string>;
   if (p === null) {
@@ -179,8 +151,7 @@ export function applyOverlayPalette(p: OverlayThemePalette | null): void {
     setColor(rec, 'sell', ask, 0.95, 1);
     setColor(rec, 'ask', ask, 0.95, 1);
   }
-  // p.text / p.grid / p.bg intentionally unused: they belong to the chart-ink
-  // bridge (`applyChartInk`) that follows the chart ground, not the shell.
+  // Chart ink and categorical colors are owned by applyChartInk.
 }
 
 // --- chart-ink bridge (visual campaign 2026-09-11, L4) --------------------------
@@ -220,6 +191,8 @@ const CHART_INK_KEYS = [
   'axis',
   'grid',
   'price',
+  'priceHalo',
+  'vwap', 'cvd', 'profile', 'poc', 'liquidation', 'event', 'gap', 'unknown',
   'priceGlow',
   'priceLevel',
   'pricePill',
@@ -269,6 +242,13 @@ export function applyChartInk(p: ChartInkPalette | null): void {
     const a = midnightAlpha(key);
     setColor(rec, key, rgb, alpha ?? a.gl, alpha ?? a.css);
   };
+  const bg = parseCssColor(p.bg);
+  const light = bg !== null && (0.2126*bg[0] + 0.7152*bg[1] + 0.0722*bg[2]) > 128;
+  write('priceHalo', light ? '#FFFFFF' : '#000000', 1);
+  const categories = light
+    ? {vwap:'#713CA0', cvd:'#815C0B', profile:'#3D628B', poc:'#93600C', liquidation:'#AC430E', event:'#785319', gap:p.inkDim, unknown:p.inkDim}
+    : {vwap:'#CFACF3', cvd:'#E8C485', profile:'#8FB5DC', poc:'#F0CD7A', liquidation:'#FFA36E', event:'#D6BB8A', gap:p.inkDim, unknown:p.inkDim};
+  for (const [key, color] of Object.entries(categories)) write(key, color);
   write('axis', p.axis);
   // L-4: light themes raise the gridline alpha (the shipped 0.14 hairline
   // vanishes on paper/white); omitted keeps the entry's shipped alpha.
