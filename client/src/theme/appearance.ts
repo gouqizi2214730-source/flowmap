@@ -6,23 +6,23 @@ export { COLORMAP_CATALOG, isColormap } from './colormaps';
 type Colors = readonly string[];
 // Light variants encode more density with darker ink; hue paths are authored independently.
 const DARK: Record<Exclude<Colormap, 'theme'>, Colors> = {
- flow: ['#12304A','#20556C','#42878E','#89B4AE','#D3D8AB'],
+ flow: ['#143A18','#27652B','#4F9345','#96C768','#E0E59A'],
  inferno: ['#371C4D','#71315D','#B45B5D','#DF9870','#F1D497'],
- classic: ['#162B66','#225D9A','#4C9DAF','#B1C48B','#F0DD8C'],
- ice: ['#16384C','#28637E','#4994B1','#8CC4D4','#D0E6EC'],
- viridis: ['#3E295E','#3D597B','#3F8A85','#83BA75','#E0D985'],
- cividis: ['#1D345B','#4E617D','#858C8A','#BAB78C','#EBDD9A'],
- mono: ['#30373F','#59616A','#869099','#B6BEC5','#E3E8EC'],
+ classic: ['#102B88','#087D9E','#30B985','#D0CA4B','#FFE58A'],
+ ice: ['#121F55','#203D91','#346ED2','#70AEEC','#C4E7FA'],
+ viridis: ['#472063','#315595','#159C91','#6CCB6E','#E4E46C'],
+ cividis: ['#102D75','#3B5E94','#7B8D85','#BFB74A','#F1DE73'],
+ mono: ['#2B2B2B','#545454','#858585','#B7B7B7','#E5E5E5'],
 };
 const LIGHT: Record<Exclude<Colormap, 'theme'>, Colors> = {
- flow: ['#C1DCE0','#8DBBC2','#548E9C','#2E6177','#163A50'],
+ flow: ['#C7E8B8','#93BE76','#65933F','#3B681D','#1D3B0A'],
  inferno: ['#EACCA7','#D09F87','#A56D79','#6E4265','#382747'],
  // Keep the thermal family distinct from Inferno's peach-to-purple light ramp.
  classic: ['#BDEDEE','#83C298','#C88735','#AB3924','#4C182C'],
- ice: ['#C8DFE8','#93BCCF','#6095B1','#356986','#173E56'],
- viridis: ['#D6DDA6','#A1BC91','#669384','#3A6676','#342E52'],
- cividis: ['#DED6AB','#B7B08B','#858D80','#526777','#243C5B'],
- mono: ['#D3D8DD','#A6AFB8','#7A8794','#4D5F71','#203448'],
+ ice: ['#BFE8FA','#80BCEB','#4889D0','#2358A7','#102C72'],
+ viridis: ['#DDED97','#A3D16A','#4BA883','#237A91','#48245F'],
+ cividis: ['#EDE4AA','#CABC57','#97952E','#586F36','#203B62'],
+ mono: ['#D9D9D9','#B0B0B0','#858585','#565656','#202020'],
 };
 export function hexRgb(hex: string): readonly [number, number, number] {
   return [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];

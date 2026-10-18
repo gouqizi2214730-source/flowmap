@@ -24,6 +24,22 @@ function lab(rgb: readonly number[] | Uint8Array): number[] {
 }
 
 describe('palette identity', () => {
+ for (const id of THEME_IDS) {
+  it(`${id}: every palette has a distinct middle-density color path`, () => {
+   const palettes=COLORMAP_CATALOG.map(({id:family}) => {
+    const ramp=buildRamp(resolveAppearance(id,family).density);
+    return {family, colors:Array.from({length:154},(_,i)=>
+     lab(ramp.slice((i+51)*4,(i+51)*4+3)))};
+   });
+   for(let i=0;i<palettes.length;i++) for(let j=i+1;j<palettes.length;j++) {
+    const a=palettes[i],b=palettes[j];
+    const mean=a.colors.reduce((sum,color,k)=>
+     sum+Math.hypot(...color.map((v,c)=>v-b.colors[k][c])),0)/154;
+    // Compare whole paths: two valid ramps can cross at a particular intensity.
+    expect(mean,`${a.family} vs ${b.family}`).toBeGreaterThanOrEqual(20);
+   }
+  });
+ }
  for (const id of THEME_IDS.filter(id => THEMES[id].mode==='light')) {
   it(`${id}: Classic and Inferno stay visibly different through middle densities`, () => {
    const classic=buildRamp(resolveAppearance(id,'classic').density);
