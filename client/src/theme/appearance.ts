@@ -17,7 +17,8 @@ const DARK: Record<Exclude<Colormap, 'theme'>, Colors> = {
 const LIGHT: Record<Exclude<Colormap, 'theme'>, Colors> = {
  flow: ['#C1DCE0','#8DBBC2','#548E9C','#2E6177','#163A50'],
  inferno: ['#EACCA7','#D09F87','#A56D79','#6E4265','#382747'],
- classic: ['#E5D697','#CAA581','#A7768C','#625480','#26355C'],
+ // Keep the thermal family distinct from Inferno's peach-to-purple light ramp.
+ classic: ['#BDEDEE','#83C298','#C88735','#AB3924','#4C182C'],
  ice: ['#C8DFE8','#93BCCF','#6095B1','#356986','#173E56'],
  viridis: ['#D6DDA6','#A1BC91','#669384','#3A6676','#342E52'],
  cividis: ['#DED6AB','#B7B08B','#858D80','#526777','#243C5B'],

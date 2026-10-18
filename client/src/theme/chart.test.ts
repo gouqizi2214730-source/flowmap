@@ -10,6 +10,37 @@ import { normalizeSettings } from '../ui/settings';
 function lum(rgb: readonly number[] | Uint8Array): number { const c = Array.from(rgb).slice(0,3).map(v => {const s=v/255; return s<=.04045?s/12.92:((s+.055)/1.055)**2.4}); return .2126*c[0]+.7152*c[1]+.0722*c[2] }
 function contrast(a: readonly number[] | Uint8Array, b: readonly number[] | Uint8Array): number { const x=lum(a),y=lum(b); return (Math.max(x,y)+.05)/(Math.min(x,y)+.05) }
 afterEach(() => {setThemeStops(null);applyOverlayPalette(null)});
+
+/** CIE Lab distance checks palette separation where most visible liquidity sits. */
+function lab(rgb: readonly number[] | Uint8Array): number[] {
+ const [r,g,b] = Array.from(rgb).slice(0,3).map(v => {
+  const s=v/255; return s<=.04045?s/12.92:((s+.055)/1.055)**2.4;
+ });
+ const xyz = [(.4124564*r+.3575761*g+.1804375*b)/.95047,
+  .2126729*r+.7151522*g+.072175*b,
+  (.0193339*r+.119192*g+.9503041*b)/1.08883];
+ const [x,y,z] = xyz.map(v => v>(6/29)**3?v**(1/3):v/(3*(6/29)**2)+4/29);
+ return [116*y-16,500*(x-y),200*(y-z)];
+}
+
+describe('palette identity', () => {
+ for (const id of THEME_IDS.filter(id => THEMES[id].mode==='light')) {
+  it(`${id}: Classic and Inferno stay visibly different through middle densities`, () => {
+   const classic=buildRamp(resolveAppearance(id,'classic').density);
+   const inferno=buildRamp(resolveAppearance(id,'inferno').density);
+   let distanceSum=0;
+   for(let i=51;i<=204;i++) {
+    const a=lab(classic.slice(i*4,i*4+3)),b=lab(inferno.slice(i*4,i*4+3));
+    const distance=Math.hypot(...a.map((v,j)=>v-b[j]));
+    // The old light ramps averaged only 9.2 and almost merged at mid density.
+    expect(distance,`density ${i}/255`).toBeGreaterThan(25);
+    distanceSum+=distance;
+   }
+   expect(distanceSum/154).toBeGreaterThan(35);
+  });
+ }
+});
+
 describe('adaptive appearance matrix', () => {
  for (const id of THEME_IDS) for (const {id:family} of COLORMAP_CATALOG) it(`${id} × ${family}: density, synth, imbalance, price and legend`, () => {
   const a=resolveAppearance(id,family), t=THEMES[id], bg=hexRgb(t.chart.bg);
