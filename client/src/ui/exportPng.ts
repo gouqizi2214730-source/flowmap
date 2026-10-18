@@ -499,6 +499,7 @@ function drawRampChip(
   for (const s of stops) grad.addColorStop(Math.max(0, Math.min(1, s.t)), s.css);
   ctx.fillStyle = grad;
   ctx.fillRect(cx - barW / 2, barTop, barW, barH);
+  ctx.fillStyle = chrome.ink;
   ctx.fillText(descriptor.bottomCap, cx, barTop + barH + moreH / 2);
   if (tierText) {
     ctx.fillStyle = chrome.inkBright;

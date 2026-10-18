@@ -186,6 +186,21 @@ export interface ChartInkPalette {
   warn?: string;
 }
 
+/** Pure chart colors shared by React keys and the imperative canvas bridge. */
+export function resolveChartInkColors(p: ChartInkPalette) {
+  const bg = parseCssColor(p.bg);
+  const light = bg !== null && (0.2126 * bg[0] + 0.7152 * bg[1] + 0.0722 * bg[2]) > 128;
+  const categories = light
+    ? { vwap: '#713CA0', cvd: '#815C0B', profile: '#3D628B', poc: '#93600C', liquidation: '#AC430E', event: '#785319' }
+    : { vwap: '#CFACF3', cvd: '#E8C485', profile: '#8FB5DC', poc: '#F0CD7A', liquidation: '#FFA36E', event: '#D6BB8A' };
+  return { ...categories, gap: p.inkDim, unknown: p.inkDim, price: p.price, priceHalo: light ? '#FFFFFF' : '#000000' };
+}
+
+/** Pure theme palette: render-time consumers do not depend on effect ordering. */
+export function resolveOverlayColors(market: OverlayThemePalette, chart: ChartInkPalette) {
+  return { ...resolveChartInkColors(chart), bid: market.bid, ask: market.ask, buy: market.bid, sell: market.ask };
+}
+
 /** Every entry `applyChartInk` can write — also the exact null-restore scope. */
 const CHART_INK_KEYS = [
   'axis',
@@ -242,12 +257,8 @@ export function applyChartInk(p: ChartInkPalette | null): void {
     const a = midnightAlpha(key);
     setColor(rec, key, rgb, alpha ?? a.gl, alpha ?? a.css);
   };
-  const bg = parseCssColor(p.bg);
-  const light = bg !== null && (0.2126*bg[0] + 0.7152*bg[1] + 0.0722*bg[2]) > 128;
-  write('priceHalo', light ? '#FFFFFF' : '#000000', 1);
-  const categories = light
-    ? {vwap:'#713CA0', cvd:'#815C0B', profile:'#3D628B', poc:'#93600C', liquidation:'#AC430E', event:'#785319', gap:p.inkDim, unknown:p.inkDim}
-    : {vwap:'#CFACF3', cvd:'#E8C485', profile:'#8FB5DC', poc:'#F0CD7A', liquidation:'#FFA36E', event:'#D6BB8A', gap:p.inkDim, unknown:p.inkDim};
+  const { price: _price, priceHalo, ...categories } = resolveChartInkColors(p);
+  write('priceHalo', priceHalo, 1);
   for (const [key, color] of Object.entries(categories)) write(key, color);
   write('axis', p.axis);
   // L-4: light themes raise the gridline alpha (the shipped 0.14 hairline
@@ -255,7 +266,7 @@ export function applyChartInk(p: ChartInkPalette | null): void {
   write('grid', p.grid, p.gridAlpha);
   // p.sell / p.warn are consumed by CSS (`--chart-sell`/`--chart-warn`); the
   // overlay palette deliberately has no entries for them.
-  for (const key of CHART_INK_PRICE_KEYS) write(key, p.price);
+  for (const key of CHART_INK_PRICE_KEYS) write(key, _price);
   write('pricePillText', p.bg);
   if (p.chipBg) {
     const chip = parseCssColor(p.chipBg);

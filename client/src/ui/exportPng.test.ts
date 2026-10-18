@@ -42,6 +42,7 @@ function fakeDoc() {
 interface Rec {
   op: string;
   args: unknown[];
+  fillStyle?: unknown;
 }
 
 /** Recording 2D context: every draw op lands in `calls` (deterministic widths). */
@@ -66,7 +67,7 @@ function recording2d(): CanvasRenderingContext2D & { calls: Rec[] } {
     arc: push('arc'),
     fill: push('fill'),
     drawImage: push('drawImage'),
-    fillText: push('fillText'),
+    fillText: (...args: unknown[]) => calls.push({ op: 'fillText', args, fillStyle: ctx.fillStyle }),
     createLinearGradient: (...args: unknown[]) => {
       calls.push({ op: 'createLinearGradient', args });
       return {
@@ -208,6 +209,21 @@ describe('composeExportLayers', () => {
     // The ramp chip paints a real gradient from the shared stop list.
     const stops = ctx.calls.filter((c) => c.op === 'addColorStop');
     expect(stops.length).toBeGreaterThan(4);
+  });
+
+  it.each(['sum', 'imbalance'] as const)('exports both %s captions with theme ink after the gradient', channel => {
+    const {canvas,ctx} = fakeOutCanvas();
+    const ink = '#53657A';
+    composeExportLayers({...baseLayers(), chrome: {...DEFAULT_EXPORT_CHROME, ink}}, {
+      createCanvas: () => canvas,
+      legend: {theme:'paper',colormap:'flow',channel,tier:'L2'},
+    });
+    const caps = channel === 'imbalance' ? ['ask-heavy','bid-heavy'] : ['more','less'];
+    for(const cap of caps) {
+      const draw = ctx.calls.find(c => c.op === 'fillText' && c.args[0] === cap);
+      expect(draw, cap).toBeDefined();
+      expect(draw!.fillStyle, cap).toBe(ink);
+    }
   });
 
   it('exports signed imbalance caps and ordered adapted stops, while SYNTH forces density Sum', () => {

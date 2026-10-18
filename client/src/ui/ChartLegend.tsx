@@ -1,26 +1,6 @@
-/**
- * ChartLegend (CP4, campaign 2026-09-11) — the key for the price-family lines.
- *
- * The chart's defaults paint five-plus horizontal marks (near-white last-price
- * line, its dashed level + area wash, violet VWAP, teal/red BBO pair, plus the
- * density field) and the old owner report read that as "several price lines"
- * (survey S4 D6). HeatLegend explains the density ramp; this row explains the
- * LINES, in the chart's own ink:
- *
- *   - Last price — near-white, the shipped `OVERLAY.price` literal;
- *   - VWAP       — violet `OVERLAY.vwap`;
- *   - BBO        — the teal/red pair (`OVERLAY.bid` / `OVERLAY.ask`);
- *   - Trades     — the same teal/red pair as dots (aggressive buy/sell prints).
- *
- * Colors are read from gl/overlays/palette.ts (the ONE source of truth the GL
- * and 2D layers paint from, including the theme bridge), so the legend can never
- * drift from the chart. DOM-only, non-interactive (`pointer-events:none`), and
- * pinned inside the always-dark chart island (--chart-* tokens, never theme ink
- * — the dark-island rule).
- */
-
-import { OVERLAY } from '../gl/overlays/palette';
-import { useTheme } from '../theme';
+/** Price-family key resolved from the current theme, independently of canvas bridge timing. */
+import { resolveOverlayColors } from '../gl/overlays/palette';
+import { THEMES, useTheme, type ThemeId } from '../theme';
 import './ChartLegend.css';
 
 /** Swatch shape: a line (price-family), a teal/red line pair (BBO), or a dot pair (trades). */
@@ -33,25 +13,20 @@ interface LegendItem {
   colors: readonly string[];
 }
 
-/**
- * Built at RENDER time (R2-M3): a theme switch rewrites the palette strings in
- * place (`applyOverlayPalette`), so a module-load snapshot could drift from the
- * chart's ink after `T`. The component subscribes via `useTheme()` so the
- * swatches always show what the renderer is currently painting.
- */
-function legendItems(): LegendItem[] {
+/** The same pure palette the canvas bridge applies after React renders. */
+function legendItems(theme: ThemeId): LegendItem[] {
+  const colors = resolveOverlayColors(THEMES[theme].canvas, THEMES[theme].chart);
   return [
-    { label: 'Last price', kind: 'line', colors: [OVERLAY.price.css] },
-    { label: 'VWAP', kind: 'line', colors: [OVERLAY.vwap.css] },
-    { label: 'BBO', kind: 'pair', colors: [OVERLAY.bid.css, OVERLAY.ask.css] },
-    { label: 'Trades', kind: 'dots', colors: [OVERLAY.buy.css, OVERLAY.sell.css] },
+    { label: 'Last price', kind: 'line', colors: [colors.price] },
+    { label: 'VWAP', kind: 'line', colors: [colors.vwap] },
+    { label: 'BBO', kind: 'pair', colors: [colors.bid, colors.ask] },
+    { label: 'Trades', kind: 'dots', colors: [colors.buy, colors.sell] },
   ];
 }
 
 export function ChartLegend(): JSX.Element {
-  // Subscribe to theme switches: the DOM update re-reads OVERLAY (see above).
-  useTheme();
-  const items = legendItems();
+  const { theme } = useTheme();
+  const items = legendItems(theme);
   return (
     <div
       className="chart-legend"
