@@ -28,6 +28,7 @@ from flowmap_server.proto.events import BBO, Marker, Trade
 
 __all__ = [
     "BookState",
+    "BarSample",
     "BoundedFeedQueue",
     "FEED_QUEUE_MAXSIZE",
     "Feed",
@@ -59,7 +60,22 @@ class BookState(msgspec.Struct):
     revision: int = 0
 
 
-FeedEvent = BookState | Trade | Marker | BBO
+class BarSample(msgspec.Struct):
+    """Published OHLCV sample for a display overlay, never a received print.
+
+    Feed-only input: the session aggregates it into BarColumn and does not
+    append it to tape, infer an aggressor, or record a fabricated Trade.
+    """
+
+    ts_ns: int
+    o: float
+    h: float
+    l: float
+    c: float
+    volume: float
+
+
+FeedEvent = BookState | BarSample | Trade | Marker | BBO
 
 
 # -- live-ingest timestamp sanity (venue clocks are hostile) --------------------

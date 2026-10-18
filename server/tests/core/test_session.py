@@ -1032,6 +1032,158 @@ async def test_equity_grid_reanchors_to_symbol_price():
     assert reanchored and all(d.ask is not None for d in reanchored)
 
 
+async def test_closed_equity_exposes_historical_price_and_last_partial_without_tape():
+    feed = _closed_equity_feed(180.0)
+
+    async def bars_fn():
+        start = _eq_et_ns(2026, 7, 17, 15, 57)
+        return [_eq_bar(start + i * 60 * 10**9, 180.0 + i, 1000.0) for i in range(3)]
+
+    feed._bars_fn = bars_fn
+    mgr = SessionManager(Config(ring_columns=4096), timer=FakeTimer(), feed_factory=lambda sub: feed)
+    sub = Subscribe(market=EQUITY_MARKET, symbol="AAPL", mode="live", source=None, start_t=None)
+    client = ClientTx()
+    sess = await mgr.subscribe(sub, client)
+    await asyncio.wait_for(sess.run_task, 5)
+    msgs = _drain_all(client)
+    bars = [msg for msg in msgs if isinstance(msg, BarColumn) and np.isfinite(msg.c)]
+    assert bars and bars[-1].c == 182.0
+    assert {bar.c for bar in bars} == {180.0, 181.0, 182.0}
+    assert bars[-1].t0_ns == _eq_et_ns(2026, 7, 17, 15, 59)
+    assert all(bar.vol_buy == bar.vol_sell == bar.cvd_cum == 0 for bar in bars)
+    assert not sess._tape and not any(isinstance(msg, Trade) for msg in msgs)
+    assert sess._feed_state == "closed"
+
+
+async def test_preloaded_equity_history_is_not_replayed_backwards_by_feed_warmup():
+    from flowmap_server.core.backfill import Candle
+
+    friday = _eq_et_ns(2026, 7, 17, 15, 57)
+    candles = [Candle(friday + i * 60 * 10**9, 100 + i, 100 + i, 100 + i, 100 + i, 10) for i in range(3)]
+
+    async def backfill(*args, **kwargs):
+        return candles
+
+    feed = _closed_equity_feed(100.0)
+    feed._bars_fn = lambda: _equity_bars_for_candles(candles)
+    sess = Session("eq-preloaded", feed=feed, grid=Grid(GridCfg(
+        tick=.01, tick_multiple=1, dt_ns=10**9, p0=90, rows=2048,
+        ring_columns=4096, mode=MODE_L1_BAND,
+    )), backfill_fn=backfill, backfill_max_cols=512)
+    await sess._boot()
+    before = sess._grid.history(2**63 - 1, 4096)
+    await sess._consume()
+    after = sess._grid.history(2**63 - 1, 4096)
+    assert [(col.col_seq, col.t0_ns, col.bar.c) for col in after] == [
+        (col.col_seq, col.t0_ns, col.bar.c) for col in before
+    ]
+    assert sess._grid.current_partial() is None
+
+
+async def _equity_bars_for_candles(candles):
+    return [_eq_bar(c.t0_ns, c.c, c.volume) for c in candles]
+
+
+@pytest.mark.parametrize("bands", [None, (1.0, 1.0), (10.0, 1.0)])
+async def test_repeated_closed_equity_warmup_is_idempotent_without_backfill(bands):
+    feed = _closed_equity_feed(180.0)
+    extra = {} if bands is None else {"band_up": bands[0], "band_down": bands[1]}
+    sess = Session("eq-repeat", feed=feed, grid=Grid(GridCfg(
+        tick=.01, tick_multiple=1, dt_ns=10**9, p0=170, rows=2048,
+        ring_columns=4096, mode=MODE_L1_BAND, **extra,
+    )))
+    client = ClientTx()
+    sess._clients.add(client)
+    await sess._consume()
+    before = sess._grid.bar_partial()
+    before_columns = sess._grid.history(2**63 - 1, 4096)
+    _drain_all(client)
+    await sess._consume()
+    after = sess._grid.bar_partial()
+    after_columns = sess._grid.history(2**63 - 1, 4096)
+    assert after == before
+    assert before.vwap_den_cum == 5000.0
+    assert [(c.col_seq, c.t0_ns, c.bar) for c in after_columns] == [
+        (c.col_seq, c.t0_ns, c.bar) for c in before_columns
+    ]
+    assert not sess._tape
+    # The wall-clock flusher may repeat the unchanged final partial, but a
+    # second warmup never broadcasts old finalized columns or advances price.
+    for msg in _drain_all(client):
+        if isinstance(msg, DepthColumn):
+            assert not msg.final and msg.col_seq == before.col_seq
+        elif isinstance(msg, BarColumn):
+            assert msg == before
+        else:
+            assert isinstance(msg, Marker)
+
+
+@pytest.mark.parametrize("band", ["native", "wide", "full", "deep"])
+async def test_closed_equity_attaches_bounded_ready_snapshot_for_every_price_band(band):
+    feed = _closed_equity_feed(180.0)
+    start = _eq_et_ns(2026, 7, 17, 9, 30)
+
+    async def history():
+        return [_eq_bar(start + i * 60 * 10**9, 180.0 + i / 100, 1000.0) for i in range(390)]
+
+    feed._bars_fn = history
+    mgr = SessionManager(Config(ring_columns=32768), timer=FakeTimer(), feed_factory=lambda sub: feed)
+    client = ClientTx()
+    sess = await asyncio.wait_for(mgr.subscribe(Subscribe(
+        market=EQUITY_MARKET, symbol="AAPL", mode="live", band=band,
+    ), client), 10)
+    # subscribe already has its ready snapshot, before run() can do more work.
+    snapshot = _drain_all(client)
+    assert len(snapshot) < 1100
+    prices = [msg for msg in snapshot if isinstance(msg, BarColumn)]
+    assert prices and prices[-1].c == 183.89
+    assert prices[-1].t0_ns == start + 389 * 60 * 10**9
+    assert all(np.isfinite(msg.c) and msg.vol_buy == msg.vol_sell == msg.cvd_cum == 0 for msg in prices)
+    assert any(isinstance(msg, Status) and msg.feed_state == "closed" and msg.next_open_ts is not None for msg in snapshot)
+    assert not any(isinstance(msg, Trade) for msg in snapshot)
+    assert mgr.stats.snapshot()["drops"]["tx_lag"] == 0
+    await asyncio.wait_for(sess.run_task, 5)
+    assert mgr.stats.snapshot()["drops"]["tx_lag"] == 0
+    assert len(_drain_all(client)) < 10
+
+
+async def test_empty_closed_equity_retries_before_reattach_without_flooding_existing_client():
+    feed = _closed_equity_feed(180.0)
+    start = _eq_et_ns(2026, 7, 17, 9, 30)
+    calls = []
+
+    async def history():
+        calls.append(True)
+        if len(calls) == 1:
+            return []
+        return [_eq_bar(start + i * 60 * 10**9, 180.0 + i / 100, 1000.0) for i in range(390)]
+
+    feed._bars_fn = history
+    mgr = SessionManager(Config(ring_columns=32768), timer=FakeTimer(), feed_factory=lambda sub: feed)
+    sub = Subscribe(market=EQUITY_MARKET, symbol="AAPL", mode="live", band="deep")
+    first = ClientTx()
+    session = await mgr.subscribe(sub, first)
+    await session.run_task
+    empty = _drain_all(first)
+    assert len(calls) == 1
+    assert not any(isinstance(msg, DepthColumn) for msg in empty)
+    assert any(isinstance(msg, Status) and msg.feed_state == "closed" for msg in empty)
+    second = ClientTx()
+    same = await mgr.subscribe(sub, second)
+    assert same is session
+    await same.run_task
+    assert len(calls) == 2
+    for client in (first, second):
+        recovered = _drain_all(client)
+        assert len(recovered) < 1100
+        assert isinstance(recovered[0], Hello)
+        assert any(isinstance(msg, EpochStart) for msg in recovered)
+        assert [msg for msg in recovered if isinstance(msg, BarColumn)][-1].c == 183.89
+        assert any(isinstance(msg, Status) and msg.feed_state == "closed" for msg in recovered)
+        assert not any(isinstance(msg, Trade) for msg in recovered)
+    assert mgr.stats.snapshot()["drops"]["tx_lag"] == 0
+
+
 def test_reanchor_ref_handles_all_bid_ask_populations():
     """The two-sided synthetic split can leave a book bid-only, ask-only, or
     two-sided; _reanchor_ref must recentre in every case. A sustained intraday

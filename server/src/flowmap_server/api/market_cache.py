@@ -396,12 +396,10 @@ async def _crypto_quote(market: str, symbol: str) -> QuoteData:
 async def _equity_quote(symbol: str) -> QuoteData:
     import datetime
 
-    from flowmap_server.feeds._yahoo import yahoo_types
+    from crocodile.core.scheduler.calendar import USMarketCalendar
+    from flowmap_server.feeds._yahoo import equity_bars
 
-    YahooClient, USMarketCalendar = await yahoo_types()
-
-    async with YahooClient() as client:
-        bars = await client.fetch_intraday_bars(symbol.upper(), "1m")
+    bars = await equity_bars(symbol.upper())
     closes = [float(b.close) for b in bars if b.close is not None]
     now = time.time_ns()
     if not closes:
@@ -421,6 +419,8 @@ async def _equity_quote(symbol: str) -> QuoteData:
         change_pct=change,
         spark=closes[-SPARK_MAX:],
         as_of_ns=last_ts,
-        stale=closed,  # market closed -> last print is not a live NBBO
+        # A stale-while-refresh cache can still contain the previous session
+        # just after the market opens. Its original timestamp remains visible.
+        stale=closed or now - last_ts > 3 * 60 * 10**9,
         reachable=True,
     )

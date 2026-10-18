@@ -95,6 +95,8 @@ export const tr: Record<string, string> = {
   'chartStartup.disconnected': 'Piyasa verisi bağlantısı kesildi',
   'chartStartup.connecting': 'Piyasa verisine bağlanılıyor',
   'chartStartup.preparing': 'Grafik hazırlanıyor',
+  'chartStartup.historyUnavailable': 'Geçmiş veriler kullanılamıyor',
+  'chartStartup.historyUnavailableDetail': 'Kayıtlı veya sağlayıcıdan alınabilen geçmiş veri yok. Başka bir sembol seçin ya da yeniden deneyin.',
 
   // --- TopBar ---
   'topbar.searchPlaceholder': 'Sembol ara',

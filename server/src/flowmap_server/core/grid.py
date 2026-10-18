@@ -682,6 +682,36 @@ class Grid:
 
     # -- trades / bars ---------------------------------------------------------
 
+    def on_bar_sample(
+        self, ts_ns: int, o: float, h: float, l: float, c: float, volume: float
+    ) -> None:
+        """Accept one provider OHLCV sample without creating a tape print.
+
+        Sampling has no aggressor split: buy/sell/CVD remain unchanged. The
+        approximate VWAP uses the bar's typical price and actual volume.
+        BookState must first advance to this sample's interval, so a stale
+        sample cannot silently overwrite a newer current bar.
+        """
+        if not all(math.isfinite(v) for v in (o, h, l, c, volume)):
+            return
+        if min(o, h, l, c) <= 0.0 or volume < 0.0 or h < max(o, l, c) or l > min(o, h, c):
+            return
+        idx = ts_ns // self._cfg.dt_ns
+        if self._cur_idx is None:
+            self._cur_idx = idx
+            self._prev_ts = ts_ns
+        elif idx != self._cur_idx:
+            return
+        if self._bar_has_trade:
+            self._h = max(self._h, h)
+            self._l = min(self._l, l)
+        else:
+            self._o, self._h, self._l = o, h, l
+            self._bar_has_trade = True
+        self._c = c
+        self._vwap_num_cum += ((h + l + c) / 3.0) * volume
+        self._vwap_den_cum += volume
+
     def on_trade(self, ts_ns: int, price: float, size: float, side: int) -> None:
         """Feed a trade into the current interval's bar accumulators.
 

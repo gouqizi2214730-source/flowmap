@@ -728,11 +728,9 @@ async def _ccxt_candles_owned(
 
 
 async def _equity_candles(symbol: str, *, max_cols: int) -> list[Candle]:
-    from flowmap_server.feeds._yahoo import yahoo_types
+    from flowmap_server.feeds._yahoo import equity_bars
 
-    YahooClient, _ = await yahoo_types()
-
-    bars = await YahooClient().fetch_intraday_bars(symbol.upper(), "1m")
+    bars = await equity_bars(symbol.upper())
     out: list[Candle] = []
     for bar in bars[-max_cols:]:
         ts = bar.source_ts if bar.source_ts is not None else bar.local_ts

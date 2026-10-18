@@ -177,99 +177,33 @@ async def test_provider_suppressing_cancellation_cannot_start_tail():
     assert calls == ["FIRST"]
 
 
-async def test_real_yahoo_workers_drain_safely_after_sweep_deadline(monkeypatch):
-    import threading
-    from unittest.mock import AsyncMock, Mock
+async def test_async_yahoo_history_does_not_hold_sweep_after_deadline(monkeypatch):
+    from flowmap_server.feeds import _yahoo as yahoo
 
-    import pandas as pd
-    import requests
-    from yfinance.data import YfData
-
-    from crocodile.equity.providers.yahoo import client as yahoo
-
-    loop = asyncio.get_running_loop()
     started = asyncio.Queue()
-    release = threading.Event()
-    clients = []
-    closed = []
-    calls = []
-    original_client = yahoo.YahooClient
-    data = YfData()
-    original_session = data._session
-    # Measure gate/deadline behavior after this production seam's lazy imports.
-    __import__("crocodile.core.scheduler.calendar")
+    cleaned = []
 
-    def make_client():
-        client = original_client(
-            rate_limiter=SimpleNamespace(acquire=AsyncMock(), update_backoff=Mock())
-        )
-        session = client.session
-        original_close = session.close
+    async def request(symbol):
+        started.put_nowait(symbol)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.append(symbol)
 
-        def close():
-            assert data._session is not session
-            assert not calls or release.is_set()
-            closed.append(session)
-            original_close()
-
-        monkeypatch.setattr(session, "close", close)
-
-        def get(**kwargs):
-            assert data._session is session
-            assert release.wait(2.0)
-            assert session not in closed
-            return SimpleNamespace(url="https://example.invalid/mock")
-
-        monkeypatch.setattr(session, "get", get)
-        clients.append(client)
-        return client
-
-    def history(ticker, **kwargs):
-        assert ticker._data is data  # the real cross-client yfinance singleton
-        calls.append(ticker.ticker)
-        loop.call_soon_threadsafe(started.put_nowait, ticker.ticker)
-        ticker._data.get("https://example.invalid/mock")
-        return pd.DataFrame(
-            {"Open": [1.0], "High": [2.0], "Low": [0.5], "Close": [1.5], "Volume": [10]},
-            index=pd.to_datetime(["2026-06-16 14:30"]),
-        )
-
-    def make_request(self, url, request_method, **kwargs):
-        assert self is data
-        return request_method(url=url)
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("integrated quote regression attempted network I/O")
-
-    monkeypatch.setattr(requests.Session, "request", forbidden)
-    try:
-        from curl_cffi.requests import Session
-    except ImportError:
-        pass
-    else:
-        monkeypatch.setattr(Session, "request", forbidden)
-    monkeypatch.setattr(yahoo, "YahooClient", make_client)
-    monkeypatch.setattr(yahoo.yf.Ticker, "history", history)
-    monkeypatch.setattr(YfData, "_make_request", make_request)
+    monkeypatch.setattr(yahoo, "_request_bars", request)
+    monkeypatch.setattr(yahoo, "_BAR_DEADLINE_S", 0.05)
     symbols = [f"E{i}" for i in range(8)]
     task = asyncio.create_task(
-        market._bounded_quote_sweep(market._equity_quote, symbols, 0.02, max_in_flight=4)
+        market._bounded_quote_sweep(market._equity_quote, symbols, 0.01, max_in_flight=4)
     )
-    try:
-        assert await asyncio.wait_for(started.get(), 1.0) == symbols[0]
-        await asyncio.sleep(0.05)  # heartbeat after deadline while executor calls still wait
-        assert not task.done() and len(clients) == 4 and closed == []
-        assert calls == symbols[:1]  # four admitted clients, one shared provider owner
-        release.set()
-        assert await task == [None] * 8
-        assert len(clients) == len(closed) == 4
-        assert calls == symbols[:1]  # cancelled shared-gate waiters never start I/O
-        assert data._session not in closed
-    finally:
-        release.set()
-        await asyncio.gather(task, return_exceptions=True)
-        with yahoo._YF_WORKER_LOCK:
-            data._set_session(original_session)
+    assert [await started.get() for _ in range(4)] == symbols[:4]
+    # A sweep detaches promptly; the shared history request remains available
+    # to a chart consumer and independently expires at its own short deadline.
+    assert await asyncio.wait_for(task, 0.1) == [None] * 8
+    assert cleaned == []
+    state = yahoo._states[asyncio.get_running_loop()]
+    await asyncio.gather(*tuple(state.tasks.values()), return_exceptions=True)
+    assert sorted(cleaned) == symbols[:4] and started.empty() and not state.tasks
 
 
 async def test_gex_uses_shared_gate_and_borrows_a_live_default_session(monkeypatch):
@@ -407,34 +341,25 @@ async def test_gex_uses_shared_gate_and_borrows_a_live_default_session(monkeypat
 
 
 @pytest.mark.parametrize("outcome", ["success", "empty", "error", "cancel"])
-async def test_equity_quote_closes_created_client_for_every_outcome(monkeypatch, outcome):
-    from crocodile.equity.providers.yahoo import client as yahoo
+async def test_equity_quote_preserves_outcomes_from_shared_history(monkeypatch, outcome):
+    from flowmap_server.feeds import _yahoo as yahoo
 
     started = asyncio.Event()
-    closed = []
     bars = [
         SimpleNamespace(close=10.0, source_ts=1000, local_ts=2000),
         SimpleNamespace(close=12.0, source_ts=3000, local_ts=4000),
     ]
 
-    class Client:
-        async def __aenter__(self):
-            return self
+    async def history(symbol):
+        assert symbol == "AAPL"
+        started.set()
+        if outcome == "error":
+            raise RuntimeError("provider error")
+        if outcome == "cancel":
+            await asyncio.Event().wait()
+        return [] if outcome == "empty" else bars
 
-        async def __aexit__(self, *exc):
-            await asyncio.sleep(0)
-            closed.append(True)
-
-        async def fetch_intraday_bars(self, symbol, interval):
-            assert (symbol, interval) == ("AAPL", "1m")
-            started.set()
-            if outcome == "error":
-                raise RuntimeError("provider error")
-            if outcome == "cancel":
-                await asyncio.Event().wait()
-            return [] if outcome == "empty" else bars
-
-    monkeypatch.setattr(yahoo, "YahooClient", Client)
+    monkeypatch.setattr(yahoo, "equity_bars", history)
     task = asyncio.create_task(market._equity_quote("aapl"))
     await started.wait()
     if outcome == "cancel":
@@ -451,9 +376,5 @@ async def test_equity_quote_closes_created_client_for_every_outcome(monkeypatch,
             assert quote.price is None and quote.stale
         else:
             assert (quote.price, quote.change_pct, quote.spark, quote.as_of_ns) == (
-                12.0,
-                20.0,
-                [10.0, 12.0],
-                3000,
+                12.0, 20.0, [10.0, 12.0], 3000,
             )
-    assert closed == [True]

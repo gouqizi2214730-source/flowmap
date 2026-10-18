@@ -100,6 +100,8 @@ export const en: Record<string, string> = {
   'chartStartup.disconnected': 'Disconnected from market data',
   'chartStartup.connecting': 'Connecting to market data',
   'chartStartup.preparing': 'Preparing chart',
+  'chartStartup.historyUnavailable': 'Historical data unavailable',
+  'chartStartup.historyUnavailableDetail': 'No recorded or provider history is available. Choose another symbol or try again.',
 
   // --- TopBar ---
   'topbar.searchPlaceholder': 'Search symbols',

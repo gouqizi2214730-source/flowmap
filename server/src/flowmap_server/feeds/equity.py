@@ -80,7 +80,7 @@ from crocodile.core.scheduler.calendar import MARKET_TZ, USMarketCalendar
 from crocodile.equity.depth.vap import reference_price as eq_reference_price
 
 from flowmap_server.config import Config
-from flowmap_server.feeds.base import BookState, BoundedFeedQueue, FeedEvent, ts_ns_sane
+from flowmap_server.feeds.base import BarSample, BookState, BoundedFeedQueue, FeedEvent, ts_ns_sane
 from flowmap_server.proto.events import (
     BBO,
     SIDE_BUY,
@@ -563,6 +563,10 @@ class EquityFeed:
             return "open", None
         return "closed", self._next_open_ns(dt)
 
+    def is_closed_now(self) -> bool:
+        """Whether a keyless warmup can terminate without entering live polling."""
+        return self._session_state(self._now_ns())[0] == "closed"
+
     def _next_open_ns(self, now_dt: datetime.datetime) -> int | None:
         et = now_dt.astimezone(MARKET_TZ)
         for add in range(0, 10):
@@ -590,7 +594,16 @@ class EquityFeed:
 
     # -- keyless (fully implemented) -------------------------------------------
 
-    async def _keyless_events(self) -> AsyncIterator[FeedEvent]:
+    async def closed_history_events(self) -> AsyncIterator[FeedEvent]:
+        """Finite closed-market preparation, even if the calendar opens during I/O.
+
+        Session boot calls this only after is_closed_now(); it cannot get stuck
+        in the unbounded live poll loop while no client has attached yet.
+        """
+        async for ev in self._keyless_events(history_only=True):
+            yield ev
+
+    async def _keyless_events(self, *, history_only: bool = False) -> AsyncIterator[FeedEvent]:
         try:
             bars = await self._fetch_bars()
         except Exception:  # noqa: BLE001 — a 429 storm must degrade, not kill the feed
@@ -606,7 +619,7 @@ class EquityFeed:
         builder = _ProfileBuilder(self._profile_tick)
         last_bar_ts = 0
         ref: float | None = None
-        for bar in warmup:
+        for i, bar in enumerate(warmup):
             builder.add_bar(bar)
             ts = _bar_ts(bar)
             last_bar_ts = max(last_bar_ts, ts)
@@ -615,10 +628,17 @@ class EquityFeed:
             # time as the cumulative volume-profile fills in (spec §7).
             ref = float(bar.close)
             yield builder.book_state(ts, ref)
+            # Real published bar prices drive the historical overlay. They
+            # must not appear as received prints or invent an aggressor side.
+            yield BarSample(ts, float(bar.open), float(bar.high), float(bar.low), ref, float(bar.volume))
+            if i % 8 == 7:
+                # A full session can finalize thousands of 1s columns. Let an
+                # unsubscribe/cancellation or another symbol switch through.
+                await asyncio.sleep(0)
 
         now = self._now_ns()
         state, next_open = self._session_state(now)
-        if state == "closed":
+        if state == "closed" or history_only:
             self.feed_state = "closed"
             self.next_open_ts = next_open
             # session_break at the end of the visible profile (last bar), or
@@ -707,12 +727,9 @@ class EquityFeed:
         return await self._default_fetch_bars()
 
     async def _default_fetch_bars(self) -> Sequence[EqBar]:
-        from flowmap_server.feeds._yahoo import yahoo_types
+        from flowmap_server.feeds._yahoo import equity_bars
 
-        YahooClient, _ = await yahoo_types()
-
-        client = YahooClient()
-        return await client.fetch_intraday_bars(self.symbol, "1m")
+        return await equity_bars(self.symbol)
 
     async def _poll_price_safe(self) -> float | None:
         try:

@@ -119,6 +119,20 @@ def test_trade_side_routing_and_cumulative_bars():
     assert b1.vwap_den_cum == 10.0
 
 
+def test_published_bar_sample_populates_price_and_approx_vwap_without_side_volume():
+    g = Grid(CFG)
+    g.on_book(0, *book(100.0, 5.0))
+    g.on_bar_sample(0, 99.0, 103.0, 98.0, 101.0, 60.0)
+    bar = g.bar_partial()
+    assert (bar.o, bar.h, bar.l, bar.c) == (99.0, 103.0, 98.0, 101.0)
+    assert (bar.vol_buy, bar.vol_sell, bar.cvd_cum) == (0.0, 0.0, 0.0)
+    assert bar.vwap_den_cum == 60.0 and bar.vwap_num_cum == (103 + 98 + 101) / 3 * 60
+    g.on_book(1_000_000_000, *book(100.0, 5.0))
+    before = g.bar_partial()
+    g.on_bar_sample(0, 8.0, 9.0, 7.0, 8.0, 1000.0)  # stale prior interval
+    assert g.bar_partial() == before
+
+
 def test_bar_carry_forward_close_on_empty_intervals():
     g = Grid(CFG)
     g.on_book(0, *book(100.0, 5.0))

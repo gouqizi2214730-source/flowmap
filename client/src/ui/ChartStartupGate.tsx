@@ -5,6 +5,7 @@ import './ChartStartupGate.css';
 
 interface ChartPresentation {
   readonly marketFrameReady: boolean;
+  residentRange?: () => { readonly count: number } | null;
 }
 
 interface ChartStartupGateProps {
@@ -27,15 +28,33 @@ export function ChartStartupGate({ rendererRef, disabled = false }: ChartStartup
   const noFeed = useFlowMapStore(s => s.noFeed);
   const identity = `${sessionResetKey(sub)}:${sub?.mode ?? ''}:${sessionId ?? ''}:${revision}`;
   const [revealedIdentity, setRevealedIdentity] = useState<string | null>(null);
+  const [emptyHistoryIdentity, setEmptyHistoryIdentity] = useState<string | null>(null);
 
   useEffect(() => {
     if (disabled) return;
     setRevealedIdentity(null);
+    setEmptyHistoryIdentity(null);
     let raf = 0;
     let presentedFrames = 0;
     let revealed = false;
+    let hadResidentHistory = false;
+    let emptyHistory = false;
     const frame = (): void => {
-      const presented = rendererRef.current?.marketFrameReady === true;
+      const renderer = rendererRef.current;
+      const state = useFlowMapStore.getState();
+      const range = renderer?.residentRange?.();
+      hadResidentHistory ||= (range?.count ?? 0) > 0;
+      // An attached closed feed with no retained history is a result, not an
+      // endless load. Unknown presentation APIs and a GPU rebuild after real
+      // history was retained must not be mistaken for provider data absence.
+      const empty = typeof renderer?.residentRange === 'function' && !hadResidentHistory
+        && (range?.count ?? 0) === 0 && state.status === 'live'
+        && state.feedState === 'closed' && state.sessionId !== null && !state.noFeed;
+      if (empty !== emptyHistory) {
+        emptyHistory = empty;
+        setEmptyHistoryIdentity(empty ? identity : null);
+      }
+      const presented = renderer?.marketFrameReady === true;
       if (!presented) {
         presentedFrames = 0;
         if (revealed) {
@@ -43,7 +62,6 @@ export function ChartStartupGate({ rendererRef, disabled = false }: ChartStartup
           setRevealedIdentity(null);
         }
       } else if (!revealed) {
-        const state = useFlowMapStore.getState();
         // A closed market or reconnect can still present real recorded data.
         // The renderer verifies its source; transport badges remain visible.
         const connected = state.sessionId !== null && !state.noFeed;
@@ -62,15 +80,18 @@ export function ChartStartupGate({ rendererRef, disabled = false }: ChartStartup
   }, [disabled, identity, rendererRef]);
 
   if (disabled || revealedIdentity === identity) return null;
-  const label = noFeed ? t('banner.noFeedDetail') : feedState === 'closed' ? t('banner.closed')
+  const historyUnavailable = emptyHistoryIdentity === identity;
+  const label = noFeed ? t('banner.noFeedDetail')
+    : historyUnavailable ? t('chartStartup.historyUnavailable') : feedState === 'closed' ? t('banner.closed')
     : status === 'reconnecting' || feedState === 'reconnecting' ? t('banner.reconnecting')
     : status === 'closed' ? t('chartStartup.disconnected')
     : status !== 'live' ? t('chartStartup.connecting') : t('chartStartup.preparing');
   return (
     <div className="chart-startup" role="status" aria-live="polite" data-testid="chart-startup-gate">
       <div className="chart-startup__message">
-        <span className="chart-startup__mark" aria-hidden="true" />
+        {!historyUnavailable && <span className="chart-startup__mark" aria-hidden="true" />}
         <strong>{label}</strong>
+        {historyUnavailable && <span className="chart-startup__detail">{t('chartStartup.historyUnavailableDetail')}</span>}
         {sub && <span className="chart-startup__instrument">{sub.symbol} <span>{sub.market}</span></span>}
       </div>
     </div>

@@ -5,8 +5,9 @@
  * - A compact TRIGGER lives in the top bar (current symbol + a ⌘K hint). Clicking
  *   it — or the `/` and ⌘K / Ctrl-K global shortcuts (see input/keys.ts + App) —
  *   opens the modal, which is portalled to <body> and centred over a backdrop.
- * - On open (empty query) it shows THE DAY'S TOP MOVERS across crypto + equity,
- *   each with live price, % change and a mini sparkline (GET /api/movers).
+ * - On open (empty query) it shows the entire bundled directory immediately,
+ *   with recent picks first. Prices and sparklines enrich those rows separately
+ *   (GET /api/movers), never delaying or moving a selectable symbol.
  * - Typing fuzzy-ranks the FULL curated universe (GET /api/universe, fetched once
  *   and matched locally, so it is instant and not a per-keystroke server round
  *   trip) — the substring-only server filter is no longer the ranking.
@@ -50,6 +51,7 @@ import {
 import { createPortal } from 'react-dom';
 
 import { apiBase } from '../net/serverBase';
+import { BUNDLED_DIRECTORY } from './bundledDirectory';
 import {
   ALL_VENUES,
   capabilityChipClass,
@@ -141,14 +143,15 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
     // row count so a shrinking result set can never reference an out-of-bounds row
     // for a frame (a post-commit clamp effect would leave one bad frame committed).
     const [activeState, setActive] = useState(0);
-    const [universe, setUniverse] = useState<SymbolEntry[]>([]);
+    const [universe, setUniverse] = useState<SymbolEntry[]>(BUNDLED_DIRECTORY);
+    const universeLoaded = useRef(false);
     const [movers, setMovers] = useState<Mover[]>([]);
     const [preview, setPreview] = useState<Quote | null>(null);
     // Venue scope: `all` = the bundled directory (instant), else a market string
     // enumerated live. `venues === null` means /api/venues has not answered yet.
     const [venues, setVenues] = useState<VenueInfo[] | null>(null);
     // Recent picks (localStorage, max 5, most recent first) — shown as their own
-    // section above the movers when the query is empty. Read once at mount; a
+    // section above the directory when the query is empty. Read once at mount; a
     // pick rewrites both the persisted list and this state.
     const [recents, setRecents] = useState<RecentPick[]>(() =>
       loadRecents(typeof window !== 'undefined' ? window.localStorage : null),
@@ -181,6 +184,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
       setActive(0);
       // A new visit re-reads quotes; only the in-visit keep-alive survives.
       previewCache.current.clear();
+      setMovers([]);
       // The venue LIST closes, but the chosen SCOPE persists across opens — a
       // trader working one venue should not re-pick it every ⌘K.
       setPickingVenue(false);
@@ -188,16 +192,33 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
 
     useImperativeHandle(ref, () => ({ open: doOpen, focus: doOpen }), [doOpen]);
 
-    // Fetch the universe ONCE (guarded, self-limiting) — kept separate from the
-    // movers effect so the universe response resolving doesn't re-trigger movers.
+    // Refresh the bundled symbols with the server's active capabilities once.
+    // The local directory already renders and searches on the very first visit;
+    // even an unavailable server cannot turn it into a loading/empty screen.
     useEffect(() => {
-      if (!open || universe.length !== 0) return;
+      if (!open || universeLoaded.current) return;
       const ctrl = new AbortController();
       void getJson<{ symbols: SymbolEntry[] }>('/api/universe?market=all&limit=1000', ctrl.signal).then(
-        (b) => b && setUniverse(b.symbols ?? []),
+        (b) => {
+          if (ctrl.signal.aborted || !b?.symbols?.length) return;
+          universeLoaded.current = true;
+          // Keep known symbols in their first-paint order while adopting fresh
+          // capabilities. Server-only entries (e.g. sim) append, rather than
+          // inserting above the row a keyboard user is about to select.
+          setUniverse((previous) => {
+            const refreshed = new Map(b.symbols.map((entry) => [`${entry.market}:${entry.symbol}`, entry]));
+            const retained = previous.flatMap((entry) => {
+              const key = `${entry.market}:${entry.symbol}`;
+              const fresh = refreshed.get(key);
+              refreshed.delete(key);
+              return fresh ? [fresh] : [];
+            });
+            return [...retained, ...refreshed.values()];
+          });
+        },
       );
       return () => ctrl.abort();
-    }, [open, universe.length]);
+    }, [open]);
 
     // Fetch the venue catalog ONCE. /api/venues is pure server-side (module
     // constants, no network), so this never delays the rows above — and it makes
@@ -256,19 +277,20 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
       return () => ctrl.abort();
     }, [open, scope, scopeAttempt]);
 
-    // Fetch today's movers + focus the input exactly once per open.
+    // Quotes enrich stable directory rows; each market answers independently, so
+    // a slow equity provider cannot hold crypto prices behind Promise.all.
     useEffect(() => {
       if (!open) return;
       const ctrl = new AbortController();
-      void Promise.all([
-        getJson<{ movers: Mover[] }>('/api/movers?market=crypto&limit=14', ctrl.signal),
-        getJson<{ movers: Mover[] }>('/api/movers?market=equity&limit=14', ctrl.signal),
-      ]).then(([c, e]) => {
-        const merged = [...(c?.movers ?? []), ...(e?.movers ?? [])].sort(
-          (a, b) => Math.abs(b.changePct ?? 0) - Math.abs(a.changePct ?? 0),
-        );
-        setMovers(merged);
-      });
+      for (const market of ['crypto', 'equity'] as const) {
+        void getJson<{ movers: Mover[] }>(`/api/movers?market=${market}&limit=14`, ctrl.signal).then((b) => {
+          if (ctrl.signal.aborted || !b) return;
+          setMovers((previous) => [
+            ...previous.filter((m) => marketGroup(m.market) !== market),
+            ...(b.movers ?? []),
+          ]);
+        });
+      }
       const t = window.setTimeout(() => inputRef.current?.focus(), 0);
       return () => {
         ctrl.abort();
@@ -277,9 +299,9 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
     }, [open]);
 
     // The visible rows. Scoped to a venue: that venue's own listing, browsable on
-    // an empty query. Scoped to `all`: recent picks + movers on an empty query
-    // (a recent that is also a mover renders ONCE, in Recent), fuzzy universe
-    // hits otherwise.
+    // an empty query. Scoped to `all`: recent picks + the COMPLETE directory on
+    // an empty query, deduped. Movers only fill quote columns, keeping keyboard
+    // targets stable while either provider is slow or unavailable.
     const rows = useMemo<Row[]>(() => {
       const byKey = new Map(movers.map((m) => [`${m.market}:${m.symbol}`, m] as const));
       if (scope !== ALL_VENUES) {
@@ -289,15 +311,16 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
         }));
       }
       if (query.trim() === '') {
+        const entriesByKey = new Map(universe.map((entry) => [`${entry.market}:${entry.symbol}`, entry]));
         const recentKeys = new Set(recents.map((r) => `${r.market}:${r.symbol}`));
         const recentRows: Row[] = recents.map((r) => ({
-          entry: { market: r.market, symbol: r.symbol, capability: {} },
+          entry: entriesByKey.get(`${r.market}:${r.symbol}`) ?? { market: r.market, symbol: r.symbol, capability: {} },
           quote: byKey.get(`${r.market}:${r.symbol}`),
         }));
-        const moverRows = movers
-          .filter((m) => !recentKeys.has(`${m.market}:${m.symbol}`))
-          .map((m) => ({ entry: { market: m.market, symbol: m.symbol, capability: {} }, quote: m }));
-        return [...recentRows, ...moverRows];
+        const directoryRows = universe
+          .filter((entry) => !recentKeys.has(`${entry.market}:${entry.symbol}`))
+          .map((entry) => ({ entry, quote: byKey.get(`${entry.market}:${entry.symbol}`) }));
+        return [...recentRows, ...directoryRows];
       }
       return fuzzyRank(universe, query, 60).map((entry) => ({
         entry,
@@ -400,7 +423,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
         if (!row) return;
         onSelect(row.entry.market, row.entry.symbol);
         // Record the pick as a recent (localStorage, max 5, deduped, MRU first)
-        // so the next empty-query open surfaces it above the movers.
+        // so the next empty-query open surfaces it above the directory.
         setRecents(
           pushRecent(
             typeof window !== 'undefined' ? window.localStorage : null,
@@ -525,7 +548,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
         ? 'reading venue list…'
         : `${venueRows.length} of ${allVenues.length} venues`
       : scope === ALL_VENUES
-        ? 'bundled directory — instant, curated'
+        ? `${universe.length} symbols — prices update separately`
         : scopeState === 'loading'
           ? 'listing…'
           : scopeState === 'failed'
@@ -707,11 +730,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
                           ? scopeState === 'empty'
                             ? `${scope} listed no symbols — the venue may be unreachable right now`
                             : `no ${scope} symbol matches “${query}”`
-                          : universe.length === 0
-                            ? 'loading…'
-                            : query.trim() === ''
-                              ? 'Top movers unavailable — type to search all crypto + equity symbols.'
-                              : `no symbols match “${query}”`}
+                          : `no symbols match “${query}”`}
                       </div>
                     ) : (
                       <>
@@ -719,7 +738,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
                           <div className="sympal__section">{`${scope} · ${scopeRows?.length ?? 0} symbols`}</div>
                         )}
                         {query.trim() === '' && scope === ALL_VENUES && recentCount === 0 && rows.length > 0 && (
-                          <div className="sympal__section">Top movers today</div>
+                          <div className="sympal__section">All markets</div>
                         )}
                         {rows.map((row, idx) => {
                         const g = marketGroup(row.entry.market);
@@ -728,14 +747,14 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
                         return (
                           <Fragment key={`${row.entry.market}:${row.entry.symbol}`}>
                           {/* Section headers ride INSIDE the map so they scroll with
-                              their rows: Recent first, then Top movers. */}
+                              their rows: Recent first, then All markets. */}
                           {idx === 0 && recentCount > 0 && (
                             <div className="sympal__section" data-testid="recent-section">
                               Recent
                             </div>
                           )}
                           {idx === recentCount && recentCount > 0 && (
-                            <div className="sympal__section">Top movers today</div>
+                            <div className="sympal__section">All markets</div>
                           )}
                           <div
                             id={`sympal-opt-${idx}`}

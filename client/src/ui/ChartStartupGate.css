@@ -22,6 +22,7 @@
 }
 
 .chart-startup__message strong { color: var(--text); font-weight: 500; }
+.chart-startup__detail { max-width: 42ch; line-height: 1.5; }
 .chart-startup__mark { width: 8px; height: 8px; border: 1px solid var(--accent); transform: rotate(45deg); }
 .chart-startup__instrument { color: var(--text-money); font: 11px var(--font-mono); }
 .chart-startup__instrument span { margin-left: 8px; color: var(--text-2); }

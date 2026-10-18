@@ -82,6 +82,7 @@ function body(url: string): unknown | Promise<unknown> {
 
 beforeEach(() => {
   calls = [];
+  window.localStorage.clear();
   releaseKraken = null;
   poloniexFailures = 0;
   resetVenueCatalog();
@@ -168,6 +169,151 @@ async function openVenueList(): Promise<HTMLElement> {
 }
 
 describe('SymbolSearch venue scope — the fast path stays fast', () => {
+  it('renders and selects the complete bundled directory before any network request answers', () => {
+    // Even a first-ever opening with every provider hanging must be useful.
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Promise(() => {});
+    }) as unknown as typeof fetch;
+    const selected = vi.fn();
+    const container = render(selected);
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+
+    const options = [...document.body.querySelectorAll('[data-testid="symbol-row"]')];
+    expect(options.length).toBe(260);
+    expect(options.filter((el) => el.getAttribute('data-market') === 'equity')).toHaveLength(220);
+    expect(options.filter((el) => el.getAttribute('data-market') === 'binance-spot')).toHaveLength(40);
+    expect(palette().querySelector('.sympal__empty, [data-testid="venue-loading"]')).toBeNull();
+    expect(calls.filter((url) => url.includes('/api/quote'))).toHaveLength(0);
+    press(palette().querySelector('[data-market="equity"][data-symbol="MSFT"]'));
+    expect(selected).toHaveBeenCalledWith('equity', 'MSFT');
+    expect(palette()).toBeNull();
+  });
+
+  it('keeps offline first-visit symbols searchable without waiting for the universe or movers', () => {
+    globalThis.fetch = vi.fn(() => new Promise(() => {})) as unknown as typeof fetch;
+    const selected = vi.fn();
+    const container = render(selected);
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    const input = palette().querySelector('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(input, 'aapl');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    expect(palette().querySelector('[data-symbol="AAPL"]')).not.toBeNull();
+    act(() => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(selected).toHaveBeenCalledWith('equity', 'AAPL');
+  });
+
+  it('enriches crypto rows even when equity movers never answer, without changing row order', async () => {
+    let releaseCrypto: ((payload: unknown) => void) | undefined;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes('/api/movers')) {
+        return new Promise((resolve) => {
+          if (url.includes('market=crypto')) {
+            releaseCrypto = (payload) => resolve({ ok: true, json: async () => payload } as Response);
+          }
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => body(url) } as Response);
+    }) as unknown as typeof fetch;
+    await open();
+    const identities = () => [...palette().querySelectorAll('[data-testid="symbol-row"]')]
+      .map((el) => `${el.getAttribute('data-market')}:${el.getAttribute('data-symbol')}`);
+    const before = identities();
+    act(() => releaseCrypto?.({ movers: [
+      { market: 'binance-spot', symbol: 'BTCUSDT', price: 81234, changePct: 2, spark: [1, 2] },
+    ] }));
+    await settle();
+    expect(identities()).toEqual(before);
+    expect(palette().querySelector('[data-symbol="BTCUSDT"] .sympal__px')!.textContent).toBe('81,234');
+  });
+
+  it('ignores a delayed universe response from an earlier closed visit', async () => {
+    const releases: Array<(symbols: unknown[]) => void> = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/universe')) {
+        return new Promise((resolve) => releases.push((symbols) => resolve({ ok: true, json: async () => ({ symbols }) } as Response)));
+      }
+      return Promise.resolve({ ok: true, json: async () => body(url) } as Response);
+    }) as unknown as typeof fetch;
+    const container = await open();
+    click(palette().querySelector('.sympal__esc'));
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    act(() => releases[1]?.(BUNDLED));
+    await settle();
+    act(() => releases[0]?.([{ market: 'equity', symbol: 'OLD-VISIT', capability: {} }]));
+    await settle();
+    expect(palette().querySelector('[data-symbol="OLD-VISIT"]')).toBeNull();
+    expect(palette().querySelector('[data-symbol="AAPL"]')).not.toBeNull();
+  });
+
+  it('keeps the highlighted BTC target when the server prepends SIM to its refreshed directory', async () => {
+    let releaseUniverse: ((symbols: unknown[]) => void) | undefined;
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/universe')) {
+        return new Promise((resolve) => {
+          releaseUniverse = (symbols) => resolve({ ok: true, json: async () => ({ symbols }) } as Response);
+        });
+      }
+      return Promise.resolve({ ok: true, json: async () => body(url) } as Response);
+    }) as unknown as typeof fetch;
+    const selected = vi.fn();
+    const container = render(selected);
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    const before = [...palette().querySelectorAll('[data-testid="symbol-row"]')].map((row) => ({
+      market: row.getAttribute('data-market')!,
+      symbol: row.getAttribute('data-symbol')!,
+      capability: { depth: row.getAttribute('data-market') === 'equity' ? 'SYNTH' : 'L2' },
+    }));
+    expect(palette().querySelector('.sympal__row.is-active')!.getAttribute('data-symbol')).toBe('BTCUSDT');
+
+    act(() => releaseUniverse?.([{ market: 'sim', symbol: 'SIM-DEMO', capability: { depth: 'L2' } }, ...before]));
+    await settle();
+
+    const after = [...palette().querySelectorAll('[data-testid="symbol-row"]')];
+    expect(after.map((row) => row.getAttribute('data-symbol'))).toEqual([...before.map((row) => row.symbol), 'SIM-DEMO']);
+    expect(after[0].querySelector('.cap')!.textContent).toBe('L2');
+    expect(palette().querySelector('.sympal__row.is-active')!.getAttribute('data-symbol')).toBe('BTCUSDT');
+    act(() => palette().querySelector('input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true })));
+    expect(selected).toHaveBeenCalledWith('binance-spot', 'BTCUSDT');
+  });
+
+  it('ignores delayed mover prices from an earlier closed visit', async () => {
+    const releases: Array<(movers: unknown[]) => void> = [];
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/movers')) {
+        return new Promise((resolve) => releases.push((movers) => resolve({ ok: true, json: async () => ({ movers }) } as Response)));
+      }
+      return Promise.resolve({ ok: true, json: async () => body(url) } as Response);
+    }) as unknown as typeof fetch;
+    const container = await open();
+    click(palette().querySelector('.sympal__esc'));
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    act(() => releases[2]?.([{ market: 'binance-spot', symbol: 'BTCUSDT', price: 81000, spark: [] }]));
+    await settle();
+    act(() => releases[0]?.([{ market: 'binance-spot', symbol: 'BTCUSDT', price: 99000, spark: [] }]));
+    await settle();
+    expect(palette().querySelector('[data-symbol="BTCUSDT"] .sympal__px')!.textContent).toBe('81,000');
+  });
+
+  it('requests only the highlighted preview while all 260 initial symbols are visible', async () => {
+    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return new Promise(() => {});
+    }) as unknown as typeof fetch;
+    await open();
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 220)); });
+    expect(palette().querySelectorAll('[data-testid="symbol-row"]')).toHaveLength(260);
+    expect(calls.filter((url) => url.includes('/api/quote'))).toHaveLength(1);
+    expect(calls.filter((url) => url.includes('/api/movers'))).toHaveLength(2);
+  });
+
   it('opens on the bundled market=all universe without enumerating any venue', async () => {
     await open();
     expect(calls.some((u) => u.includes('/api/universe?market=all&limit=1000'))).toBe(true);
@@ -267,6 +413,20 @@ describe('SymbolSearch venue enumeration — the opt-in slow path', () => {
 
     expect(calls.filter((u) => u.includes('market=kraken')).length).toBe(listed);
     expect(document.body.querySelectorAll('[data-testid="symbol-row"]').length).toBe(2);
+  });
+
+  it('keeps All markets visible when a previously chosen venue answers late', async () => {
+    await openVenueList();
+    press(palette().querySelector('[data-testid="venue-row"][data-market="kraken"]'));
+    await settle();
+    click(palette().querySelector('[data-testid="venue-picker-toggle"]'));
+    await settle();
+    press(palette().querySelector('[data-testid="venue-row"][data-market="all"]'));
+    act(() => releaseKraken?.());
+    await settle();
+    expect(palette().querySelector('[data-testid="venue-scope"]')!.textContent).toBe('All markets');
+    expect(palette().querySelector('[data-symbol="AAPL"]')).not.toBeNull();
+    expect(palette().querySelector('[data-symbol="XBT/USD"]')).toBeNull();
   });
 
   it('says a venue listed nothing instead of looking like an empty search', async () => {
@@ -432,7 +592,7 @@ describe('SymbolSearch recents + keyboard navigation', () => {
     });
   }
 
-  it('shows seeded recents (marked) above the movers on an empty query', async () => {
+  it('shows seeded recents (marked) above the complete directory on an empty query', async () => {
     window.localStorage.setItem(RECENTS_KEY, JSON.stringify(['kraken:XBT/USD']));
     await open();
     const section = palette().querySelector('[data-testid="recent-section"]');
@@ -467,32 +627,11 @@ describe('SymbolSearch recents + keyboard navigation', () => {
   });
 
   it('moves the highlight with Home/End (wrapping arrows already covered)', async () => {
-    // Three movers give the listbox more than one row to traverse.
-    globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes('/api/movers')) {
-        // Only the crypto call carries rows — the palette fetches crypto AND
-        // equity, and this stub must not double the list.
-        const movers = url.includes('market=equity')
-          ? []
-          : [
-              { market: 'sim', symbol: 'AAA', price: 1, changePct: 1, spark: [] },
-              { market: 'sim', symbol: 'BBB', price: 1, changePct: 1, spark: [] },
-              { market: 'sim', symbol: 'CCC', price: 1, changePct: 1, spark: [] },
-            ];
-        return Promise.resolve({ ok: true, json: async () => ({ movers }) } as unknown as Response);
-      }
-      if (url.includes('/api/venues')) return Promise.resolve({ ok: true, json: async () => ({ venues: VENUES }) } as unknown as Response);
-      if (url.includes('market=all')) return Promise.resolve({ ok: true, json: async () => ({ symbols: BUNDLED }) } as unknown as Response);
-      if (url.includes('/api/quote')) return Promise.resolve({ ok: true, json: async () => ({ market: 'x', symbol: 'y', price: 1, changePct: 0, spark: [] }) } as unknown as Response);
-      return Promise.resolve({ ok: true, json: async () => ({ symbols: [] }) } as unknown as Response);
-    }) as unknown as typeof fetch;
-
     await open();
     const input = document.body.querySelector('[data-testid="symbol-search-input"]')!;
     expect(input.getAttribute('aria-activedescendant')).toBe('sympal-opt-0');
     key(input, 'End');
-    expect(input.getAttribute('aria-activedescendant')).toBe('sympal-opt-2');
+    expect(input.getAttribute('aria-activedescendant')).toBe('sympal-opt-1');
     key(input, 'Home');
     expect(input.getAttribute('aria-activedescendant')).toBe('sympal-opt-0');
   });

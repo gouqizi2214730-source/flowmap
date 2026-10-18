@@ -9,7 +9,8 @@ let element: HTMLDivElement;
 let root: Root;
 let callbacks: Map<number, FrameRequestCallback>;
 let nextId: number;
-let renderer: { marketFrameReady: boolean };
+let renderer: { marketFrameReady: boolean; residentRange?: () => { count: number } | null };
+let residentCount: number;
 let rendererRef: { current: typeof renderer | null };
 
 beforeEach(() => {
@@ -24,7 +25,8 @@ beforeEach(() => {
     status: 'live', feedState: 'live', noFeed: false, sessionId: 'btc-session', sessionRevision: 0,
     subscription: { market: 'binance-spot', symbol: 'BTCUSDT', band: 'deep', mode: 'live' },
   });
-  renderer = { marketFrameReady: false };
+  residentCount = 16;
+  renderer = { marketFrameReady: false, residentRange: () => residentCount ? { count: residentCount } : null };
   rendererRef = { current: renderer };
   element = document.createElement('div');
   root = createRoot(element);
@@ -111,6 +113,61 @@ it('reveals real recorded history when the market is closed', () => {
   expect(element.querySelector('[role="status"]')).not.toBeNull();
   reveal();
   expect(element.querySelector('[role="status"]')).toBeNull();
+});
+
+it('reports unavailable history for an attached closed feed with no retained columns', () => {
+  residentCount = 0;
+  act(() => useFlowMapStore.setState({ feedState: 'closed' }));
+  frame(100);
+  expect(element.querySelector('strong')?.textContent).toBe('Historical data unavailable');
+  expect(element.textContent).toContain('No recorded or provider history is available. Choose another symbol or try again.');
+  expect(element.querySelector('.chart-startup__mark')).toBeNull();
+  expect(element.textContent).toContain('BTCUSDT');
+  frame(100_000);
+  expect(element.querySelector('strong')?.textContent).toBe('Historical data unavailable');
+});
+
+it('keeps closed history pending presentation distinct from an unavailable provider', () => {
+  residentCount = 0;
+  act(() => useFlowMapStore.setState({ feedState: 'closed' }));
+  frame(100);
+  expect(element.textContent).toContain('Historical data unavailable');
+  // A closed Status can arrive immediately before its real historical columns.
+  residentCount = 10;
+  frame(116);
+  expect(element.textContent).toContain('MARKET CLOSED');
+  expect(element.textContent).not.toContain('Historical data unavailable');
+  renderer.marketFrameReady = true;
+  frame(132);
+  frame(148);
+  frame(164);
+  expect(element.querySelector('[role="status"]')).not.toBeNull();
+  frame(180);
+  expect(element.querySelector('[role="status"]')).toBeNull();
+});
+
+it('does not call a GPU rebuild unavailable history after real columns were retained', () => {
+  act(() => useFlowMapStore.setState({ feedState: 'closed' }));
+  reveal();
+  renderer.marketFrameReady = false;
+  residentCount = 0; // the graphics restore temporarily re-creates an empty ring
+  frame(300);
+  expect(element.textContent).toContain('MARKET CLOSED');
+  expect(element.textContent).not.toContain('Historical data unavailable');
+});
+
+it('requires a connected session and a known empty range before reporting unavailable history', () => {
+  residentCount = 0;
+  act(() => useFlowMapStore.setState({ feedState: 'closed', sessionId: null }));
+  frame(100);
+  expect(element.textContent).not.toContain('Historical data unavailable');
+  act(() => useFlowMapStore.setState({ sessionId: 'btc-session', status: 'reconnecting' }));
+  frame(200);
+  expect(element.textContent).not.toContain('Historical data unavailable');
+  delete renderer.residentRange;
+  act(() => useFlowMapStore.setState({ status: 'live' }));
+  frame(300);
+  expect(element.textContent).not.toContain('Historical data unavailable');
 });
 
 it('reveals a successfully drawn market on a slow display without requiring 25 FPS', () => {

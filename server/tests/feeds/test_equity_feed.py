@@ -33,7 +33,7 @@ from crocodile.core.scheduler.calendar import MARKET_TZ
 
 from flowmap_server.config import Config
 from flowmap_server.core.grid import Grid, GridCfg
-from flowmap_server.feeds.base import BookState, Feed, FeedEvent
+from flowmap_server.feeds.base import BarSample, BookState, Feed, FeedEvent
 from flowmap_server.feeds.equity import (
     DEFAULT_PROFILE_TICK,
     EQUITY_MARKET,
@@ -421,6 +421,40 @@ async def test_closed_with_no_bars_still_marks_session_break():
     assert len(markers) == 1 and markers[0].kind == "session_break"
     assert markers[0].ts_ns == sat
     assert feed.feed_state == "closed"
+
+
+async def test_weekend_warmup_publishes_native_price_samples_without_prints():
+    friday = _et_ns(2026, 7, 17, 15, 57)
+    saturday = _et_ns(2026, 7, 18, 12, 0)
+    bars = [
+        _bar(friday, 100.0, 102.0, 99.0, 101.0, 50.0),
+        _bar(friday + 60 * 10**9, 101.0, 104.0, 100.0, 103.0, 75.0),
+    ]
+    feed = EquityFeed("AAPL", Config(), now_ns_fn=lambda: saturday, bars_fn=_make_bars_fn(bars))
+    events = await _collect(feed, 100)
+    assert [type(ev) for ev in events] == [BookState, BarSample, BookState, BarSample, Marker]
+    samples = [ev for ev in events if isinstance(ev, BarSample)]
+    assert [ev.ts_ns for ev in samples] == [friday, friday + 60 * 10**9]
+    assert [(ev.o, ev.h, ev.l, ev.c, ev.volume) for ev in samples] == [
+        (100.0, 102.0, 99.0, 101.0, 50.0), (101.0, 104.0, 100.0, 103.0, 75.0),
+    ]
+    assert not any(isinstance(ev, Trade) for ev in events)
+
+
+async def test_closed_history_preparation_remains_finite_if_market_opens_during_fetch():
+    clock = {"now": _et_ns(2026, 7, 20, 9, 29)}
+
+    async def delayed_history():
+        clock["now"] = _et_ns(2026, 7, 20, 9, 31)
+        return [_bar(_et_ns(2026, 7, 17, 15, 59), 100, 101, 99, 100, 10)]
+
+    async def forbidden_poll():
+        raise AssertionError("preparation entered unbounded live poll")
+
+    feed = EquityFeed("AAPL", Config(), now_ns_fn=lambda: clock["now"], bars_fn=delayed_history, price_fn=forbidden_poll)
+    assert feed.is_closed_now()
+    events = [event async for event in feed.closed_history_events()]
+    assert [type(event) for event in events] == [BookState, BarSample, Marker]
 
 
 # --- 5. market open ------------------------------------------------------------

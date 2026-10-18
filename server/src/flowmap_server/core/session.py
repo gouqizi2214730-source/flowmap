@@ -100,9 +100,9 @@ from flowmap_server.core.overview import (
 from flowmap_server.core.record import Recorder, SessionRecorder, TailData
 from flowmap_server.core.pyramid import metadata_page, pyramid_for
 from flowmap_server.core.stats import SessionStats
-from flowmap_server.feeds.base import BookState, Feed
+from flowmap_server.feeds.base import BarSample, BookState, Feed
 from flowmap_server.feeds.crypto import is_crypto_market
-from flowmap_server.feeds.equity import EQUITY_MARKETS
+from flowmap_server.feeds.equity import EQUITY_MARKETS, EquityFeed
 from flowmap_server.feeds.replay import ReplayFeed
 from flowmap_server.feeds.router import build_feed
 from flowmap_server.proto import events, wire
@@ -476,6 +476,8 @@ class Session:
         self.conn_stats: Callable[[], dict] | None = None
         self._cols_since_flush = 0
         self._flush_task: asyncio.Task | None = None
+        self._recording_close_task: asyncio.Task | None = None
+        self._recording_finish_lock = asyncio.Lock()
         # Stall watchdog state (see _REC_STALL_S): when the in-flight flush
         # task was created, and whether its stall was already reported.
         self._flush_started_ns: int | None = None
@@ -492,6 +494,12 @@ class Session:
         self._backfill_max_cols = backfill_max_cols
         self._backfill_stretch = backfill_stretch
         self._history_reconstructed = False
+        # A keyless equity feed replays its provider warmup on every attach.
+        # A preloaded tail already owns those timestamps; never append the
+        # same session again after it with increasing seq and decreasing time.
+        self._equity_warmup_before_ns = 0
+        self._preparing_closed_history = False
+        self._closed_history_prepared = False
 
         self._clients: set[ClientTx] = set()
         self._grace_handle: TimerHandle | None = None
@@ -547,6 +555,8 @@ class Session:
                     # instead of running with recording/rehydration silently off.
                     await self._boot()
                     self._boot_done = True
+                elif not self._closed_history_prepared:
+                    await self._prepare_closed_history()
                 if self._closed:
                     return None
                 self.run_task = asyncio.create_task(self.run(), name=f"session-{self.session_id}")
@@ -616,11 +626,50 @@ class Session:
         if not tail_applied:
             await self._run_backfill()
 
+        await self._prepare_closed_history()
+
         # Initial epoch params (cold: epoch 0; rehydrated/backfilled: the
         # seeded current epoch — duplicates across part files are fine, load
         # dedups by key). No-op without a recorder.
         params = self._grid.current_epoch_params()
         self._record(lambda r: r.record_epoch(params))
+
+    async def _prepare_closed_history(self) -> None:
+        if not (
+            isinstance(self._feed, EquityFeed)
+            and self._feed.tier == "keyless"
+            and self._feed.is_closed_now()
+        ):
+            return
+        # Closed warmup is a finite boot operation. During a retry existing
+        # subscribers keep their old frame until a single bounded replacement
+        # snapshot is ready; no historical packet flood enters their outboxes.
+        self._preparing_closed_history = True
+        try:
+            initial_epoch = self._grid.current_epoch_params()
+            self._record(lambda r: r.record_epoch(initial_epoch))
+            async for ev in self._feed.closed_history_events():
+                if isinstance(ev, BookState):
+                    if ev.ts_ns >= self._equity_warmup_before_ns:
+                        self._on_book(ev)
+                elif isinstance(ev, BarSample):
+                    if ev.ts_ns >= self._equity_warmup_before_ns:
+                        self._grid.on_bar_sample(ev.ts_ns, ev.o, ev.h, ev.l, ev.c, ev.volume)
+                        self._equity_warmup_before_ns = ev.ts_ns + 1
+                elif isinstance(ev, events.Marker):
+                    self._markers.append(ev)
+                    self._record(lambda r, m=ev: r.record_marker(m))
+            self._emit_closed_if_needed()
+            self._closed_history_prepared = True
+        finally:
+            self._preparing_closed_history = False
+        # Existing clients (a second subscriber can trigger recovery) need the
+        # same protected attach snapshot, with epoch parameters before bars.
+        if self._clients:
+            frames = self._snapshot_frames()
+            for client in self._clients:
+                for frame in frames:
+                    client.offer(frame, col_msg=False, protected=True)
 
     async def _run_backfill(self) -> None:
         """Seed the ring with reconstructed candle history (GOAL 1).
@@ -671,6 +720,8 @@ class Session:
         self._history_reconstructed = True
         dt = self._grid.cfg.dt_ns
         end_ns = columns[-1].t0_ns + dt
+        if isinstance(self._feed, EquityFeed) and self._feed.tier == "keyless":
+            self._equity_warmup_before_ns = end_ns
         gap = events.Marker(
             ts_ns=end_ns - 1,
             kind="gap",
@@ -735,6 +786,18 @@ class Session:
         Returns True only when the grid actually took the tail; a False return
         (unusable recording) leaves the grid virgin so the caller still runs
         the candle backfill."""
+        if (
+            isinstance(self._feed, EquityFeed)
+            and self._feed.tier == "keyless"
+            and self._feed.capability.get("depth") == "SYNTH"
+            and tail.columns
+            and not any(math.isfinite(col.bar.c) and col.bar.c > 0.0 for col in tail.columns)
+        ):
+            # Old keyless recordings contain synthetic density but no sampled
+            # prices. Regenerate that derived view, retaining the old files and
+            # the new recorder UUID so restarted seq 0 cannot collide with it.
+            logger.info("legacy equity tail has no price bars; rebuilding %s", self.session_id)
+            return False
         try:
             self._grid.preload(tail.columns, tail.epochs)
         except Exception:
@@ -762,6 +825,8 @@ class Session:
         self._markers.extend(tail.markers)
         dt = self._grid.cfg.dt_ns
         end_ns = tail.newest_t0_ns + dt
+        if isinstance(self._feed, EquityFeed) and self._feed.tier == "keyless":
+            self._equity_warmup_before_ns = end_ns
         # ts is the last ns of the recorded range so the marker is inside the
         # snapshot's [first_t0, last_t0+dt) marker window from the very first
         # attach (live columns only ever extend that window rightward).
@@ -810,7 +875,7 @@ class Session:
         After a flush FAILURE the retry waits out a cooldown (exponential
         backoff, see _REC_RETRY_*): rows keep buffering and nothing is lost,
         so a transient disk/AV hiccup costs a delayed part, not the recording."""
-        if self._rec is None:
+        if self._rec is None or self._closed:
             return
         if self._rec_retry_at is not None and self._clock() < self._rec_retry_at:
             return  # cooldown after a failed flush: keep buffering, retry later
@@ -896,6 +961,11 @@ class Session:
         self._schedule_summary_work()
 
     async def flush_recording_now(self) -> None:
+        """Serialize durable flushes with recorder retirement and shutdown."""
+        async with self._recording_finish_lock:
+            await self._flush_recording_now()
+
+    async def _flush_recording_now(self) -> None:
         """Flush buffered recording rows and WAIT for the Parquet write.
 
         Runs on every run-loop exit and from the server-shutdown flush
@@ -911,7 +981,7 @@ class Session:
         task, self._flush_task = self._flush_task, None
         if task is not None and not task.done():
             try:
-                await task
+                await self._drain_recording_work(task)
             except asyncio.CancelledError:
                 pass
         self._flush_started_ns = None
@@ -922,7 +992,9 @@ class Session:
         if bufs is None:
             return
         try:
-            await asyncio.to_thread(self._rec.flush_buffers, bufs)
+            await self._drain_recording_work(asyncio.create_task(
+                asyncio.to_thread(self._rec.flush_buffers, bufs)
+            ))
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -965,12 +1037,29 @@ class Session:
                 self._prewarm_overview_index(), name=f"history-summary-{self.session_id}"
             )
 
-    def _close_recording(self) -> None:
+    @staticmethod
+    async def _drain_recording_work(task: asyncio.Task):
+        """Own admitted disk work through cancellation before closing its writer."""
+        while True:
+            try:
+                return await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if task.done():
+                    return task.result()
+
+    async def _close_recording(self) -> None:
+        # Boot can be retired before run_task exists but after a cadence write
+        # started. Share ownership with run-finally and shutdown flush_all.
+        await self.flush_recording_now()
+        async with self._recording_finish_lock:
+            await self._close_recording_locked()
+
+    async def _close_recording_locked(self) -> None:
         if self._rec is None:
             return
         rec, self._rec = self._rec, None
         try:
-            rec.close()
+            await self._drain_recording_work(asyncio.create_task(asyncio.to_thread(rec.close)))
         except Exception:
             logger.exception("recording close failed for session %s", self.session_id)
             if self._stats is not None:
@@ -978,18 +1067,19 @@ class Session:
             return
         if self._stats is not None:
             self._stats.note_recording(self.session_id, False)
-        self._enforce_retention()
+        await self._enforce_retention_async()
 
-    def _enforce_retention(self) -> None:
-        # Retention failure is non-fatal: recording itself stays enabled.
-        # (Synchronous: only the rare teardown path uses this; the cadence
-        # path after every flush is _enforce_retention_async below.)
-        if self._recorder_root is None:
-            return
-        try:
-            self._recorder_root.enforce_retention()
-        except Exception:
-            logger.exception("recording retention enforcement failed")
+    async def _finish_recording_teardown(self) -> None:
+        # The cancelled feed's finally owns the in-flight cadence write and
+        # buffered final flush. Do not close its writer while that work runs.
+        if self.run_task is not None and not self.run_task.done():
+            try:
+                await self._drain_recording_work(self.run_task)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("feed exit failed during recording teardown")
+        await self._close_recording()
 
     async def _enforce_retention_async(self) -> None:
         """Off-loop retention walk, gated by a wall-clock min-interval.
@@ -1075,10 +1165,13 @@ class Session:
             self.run_task.cancel()
         if self._overview_prewarm_task is not None:
             self._overview_prewarm_task.cancel()
-        # Teardown closes the recorder (flushes any buffered rows). The
-        # cancelled run task's finally also flushes — idempotent, whichever
-        # runs second sees an already-cleared recorder.
-        self._close_recording()
+        # Retire the writer asynchronously after the cancelled feed has
+        # drained its admitted flush. Disk close and the retention walk must
+        # never run in this timer callback on the server's event loop.
+        if self._rec is not None or self.run_task is not None:
+            self._recording_close_task = asyncio.create_task(
+                self._finish_recording_teardown(), name=f"recording-close-{self.session_id}"
+            )
         if self._on_teardown is not None:
             self._on_teardown()
 
@@ -1192,6 +1285,13 @@ class Session:
         try:
             while True:
                 try:
+                    if self._closed_history_prepared:
+                        self._closed_history_prepared = False
+                        # Do not immediately retry an empty/failed preparation
+                        # after attach. A later subscriber retries before its
+                        # bounded snapshot; an opening market resumes live.
+                        if isinstance(self._feed, EquityFeed) and self._feed.is_closed_now():
+                            return
                     await self._consume()
                     if (
                         is_crypto_market(self._feed.market)
@@ -1237,7 +1337,7 @@ class Session:
                 pass
             await self.flush_recording_now()
             if self._closed:
-                self._close_recording()
+                await self._close_recording()
 
     async def _partial_flusher(self) -> None:
         """Clock-driven right-edge flush (FLUSH_INTERVAL_NS, ~60 Hz default).
@@ -1287,11 +1387,15 @@ class Session:
 
     async def _consume(self) -> None:
         async for ev in self._feed.events():
+            if isinstance(ev, (BookState, BarSample)) and ev.ts_ns < self._equity_warmup_before_ns:
+                continue
             if self._stats is not None:
                 # Liveness: age of the last feed-event ARRIVAL (wall clock, so
                 # venue stamps can't fake freshness) feeds stats.staleness_ms.
                 self._stats.note_live_sample(self.session_id)
-            if self._feed_state != "live":  # first event after a restart
+            if self._feed_state != "live" and not (
+                isinstance(ev, events.Marker) and getattr(self._feed, "feed_state", None) == "closed"
+            ):  # first actual event after a restart, not a repeated closed marker
                 self._recovery_start_ns = self._clock()
                 self._recovery_events = 0
                 self._set_feed_state("live")
@@ -1305,7 +1409,19 @@ class Session:
                 ):
                     self._backoff_s = self._backoff_base_s
             if isinstance(ev, BookState):
+                if ev.ts_ns < self._equity_warmup_before_ns:
+                    continue
                 self._on_book(ev)
+            elif isinstance(ev, BarSample):
+                if ev.ts_ns < self._equity_warmup_before_ns:
+                    continue
+                self._grid.on_bar_sample(ev.ts_ns, ev.o, ev.h, ev.l, ev.c, ev.volume)
+                if isinstance(self._feed, EquityFeed) and self._feed.tier == "keyless":
+                    # A closed feed can be restarted on reattach. Its provider
+                    # warmup is immutable at each sampled bar timestamp: do not
+                    # integrate that same bar volume or append it a second time.
+                    # The +1ns cutoff leaves every later live book admissible.
+                    self._equity_warmup_before_ns = ev.ts_ns + 1
             elif isinstance(ev, events.Trade):
                 if not isinstance(self._feed, ReplayFeed):
                     self._grid.on_trade(ev.ts_ns, ev.price, ev.size, ev.side)
@@ -1501,6 +1617,11 @@ class Session:
         """
         if getattr(self._feed, "feed_state", None) != "closed":
             return
+        # Warmup can finish in less than one flush interval. Publish the last
+        # sampled close before stopping the periodic flusher on a closed feed.
+        self._flush_partial()
+        if self._feed_state == "closed":
+            return
         # Direct broadcast (not _set_feed_state) so next_open_ts rides along; a
         # later restart's first event flips _feed_state back to live.
         self._feed_state = "closed"
@@ -1562,6 +1683,8 @@ class Session:
         t0_ns: int | None = None,
         is_partial: bool = False,
     ) -> None:
+        if self._preparing_closed_history:
+            return
         for client in self._clients:
             client.offer(frame, col_msg=col, t0_ns=t0_ns, is_partial=is_partial)
 
@@ -1625,8 +1748,26 @@ class Session:
             frames.append(b"".join(parts))
 
         tail: list[bytes] = []
-        if cols:
-            lo, hi = cols[0].t0_ns, cols[-1].t0_ns + ep.dt_ns
+        partial = None
+        if (
+            isinstance(self._feed, EquityFeed)
+            and self._feed.tier == "keyless"
+            and self._feed_state == "closed"
+        ):
+            partial = self._grid.current_partial()
+            if partial is not None:
+                tail.extend((wire.encode(partial), wire.encode(self._grid.bar_partial())))
+            latency_ms, skew_ms = self._conn_latency_skew()
+            tail.append(wire.encode(events.Status(
+                feed_state="closed", capability=self._capability(),
+                latency_ms=latency_ms, clock_skew_ms=skew_ms,
+                next_open_ts=self._feed.next_open_ts,
+            )))
+        if cols or partial is not None:
+            lo = cols[0].t0_ns if cols else partial.t0_ns
+            hi = cols[-1].t0_ns + ep.dt_ns if cols else lo + ep.dt_ns
+            if partial is not None:
+                hi = max(hi, partial.t0_ns + ep.dt_ns)
             tail.extend(wire.encode(m) for m in self._markers if lo <= m.ts_ns < hi)
         tail.extend(wire.encode(t) for t in self._tape)
         if self._instant_book is not None:
@@ -2197,6 +2338,7 @@ class SessionManager:
         # window is identity (see _subscribe). The band is part of the grid
         # geometry, so two bands are genuinely two grids.
         self._sessions: dict[tuple, Session] = {}
+        self._retiring_sessions: set[Session] = set()
 
     def _default_feed_factory(self, sub: events.Subscribe) -> Feed:
         # Test path: the sim feed is unpaced so tests own the clock. Routing
@@ -2585,6 +2727,16 @@ class SessionManager:
 
     def _make_remover(self, key: tuple, session: Session) -> Callable[[], None]:
         def _remove() -> None:
+            close_task = session._recording_close_task
+            if close_task is not None:
+                self._retiring_sessions.add(session)
+
+                def closed(done: asyncio.Task) -> None:
+                    self._retiring_sessions.discard(session)
+                    if not done.cancelled():
+                        done.exception()
+
+                close_task.add_done_callback(closed)
             # Identity-guarded: a stale grace timer from a torn-down session
             # must never evict a fresh session that reused the key.
             if self._sessions.get(key) is session:
@@ -2612,3 +2764,7 @@ class SessionManager:
                 *(s.flush_recording_now() for s in sessions),
                 return_exceptions=True,
             )
+        closing = [s._recording_close_task for s in self._retiring_sessions
+                   if s._recording_close_task is not None]
+        if closing:
+            await asyncio.gather(*(asyncio.shield(task) for task in closing), return_exceptions=True)

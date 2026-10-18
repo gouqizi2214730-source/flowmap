@@ -25,6 +25,9 @@ delivers) and get back the merged ``(sim + crypto + equity)`` universe. Both
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 __all__ = [
     "CRYPTO_SYMBOLS",
     "CRYPTO_MARKET",
@@ -33,58 +36,12 @@ __all__ = [
     "filter_directory",
 ]
 
-CRYPTO_MARKET = "binance-spot"
-
-# Curated high-volume Binance USDT spot pairs. BTC/ETH/SOL lead (kept first for
-# the legacy shortlist tests); the rest broaden the searchable universe.
-CRYPTO_SYMBOLS: tuple[str, ...] = (
-    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT",
-    "DOGEUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT", "MATICUSDT", "TRXUSDT",
-    "LTCUSDT", "BCHUSDT", "ATOMUSDT", "UNIUSDT", "ETCUSDT", "XLMUSDT",
-    "NEARUSDT", "APTUSDT", "FILUSDT", "ARBUSDT", "OPUSDT", "INJUSDT",
-    "SUIUSDT", "SEIUSDT", "TIAUSDT", "AAVEUSDT", "RUNEUSDT", "ALGOUSDT",
-    "FTMUSDT", "SANDUSDT", "MANAUSDT", "AXSUSDT", "GRTUSDT", "PEPEUSDT",
-    "WIFUSDT", "SHIBUSDT", "ORDIUSDT", "JUPUSDT",
-)
-
-# Curated large-cap US equity tickers (static reference; edit to refresh).
-EQUITY_TICKERS: tuple[str, ...] = (
-    # mega/large-cap tech
-    "AAPL", "MSFT", "NVDA", "GOOGL", "GOOG", "AMZN", "META", "TSLA", "AVGO",
-    "ORCL", "ADBE", "CRM", "AMD", "INTC", "CSCO", "QCOM", "TXN", "IBM", "NOW",
-    "INTU", "AMAT", "MU", "LRCX", "ADI", "KLAC", "SNPS", "CDNS", "PANW", "ANET",
-    "PLTR", "CRWD", "FTNT", "MRVL", "DELL", "HPQ", "WDAY", "TEAM", "DDOG",
-    "SNOW", "NET", "ZS", "MDB", "SHOP", "UBER", "ABNB", "SQ", "PYPL", "COIN",
-    # communication / media
-    "NFLX", "DIS", "CMCSA", "T", "VZ", "TMUS", "WBD", "CHTR", "EA", "TTWO",
-    "SPOT", "ROKU", "PINS", "SNAP",
-    # financials
-    "BRK-B", "JPM", "BAC", "WFC", "GS", "MS", "C", "SCHW", "AXP", "BLK", "SPGI",
-    "V", "MA", "BX", "KKR", "CB", "PGR", "MMC", "ICE", "CME", "COF", "USB",
-    "PNC", "TFC",
-    # healthcare
-    "UNH", "JNJ", "LLY", "MRK", "ABBV", "PFE", "TMO", "ABT", "DHR", "BMY",
-    "AMGN", "GILD", "CVS", "MDT", "ISRG", "VRTX", "REGN", "ZTS", "BSX", "HCA",
-    "CI", "ELV", "MRNA",
-    # consumer
-    "WMT", "COST", "PG", "KO", "PEP", "MCD", "NKE", "SBUX", "HD", "LOW", "TGT",
-    "CL", "MDLZ", "MO", "PM", "EL", "KMB", "GIS", "KHC", "MNST", "CMG", "YUM",
-    "LULU", "ROST", "TJX", "DG", "DLTR", "ORLY", "AZO",
-    # industrials / energy / materials
-    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "PSX", "OXY", "WMB", "KMI",
-    "CAT", "DE", "BA", "GE", "HON", "UNP", "UPS", "FDX", "LMT", "RTX", "GD",
-    "NOC", "MMM", "EMR", "ETN", "ITW", "CSX", "NSC", "PH", "LIN", "APD", "SHW",
-    "FCX", "NEM", "NUE", "DOW",
-    # utilities / real estate / staples-adjacent
-    "NEE", "DUK", "SO", "D", "AEP", "EXC", "SRE", "PLD", "AMT", "EQIX", "CCI",
-    "PSA", "O", "SPG", "WELL", "DLR",
-    # autos / travel / misc
-    "F", "GM", "RIVN", "LCID", "DAL", "UAL", "AAL", "LUV", "MAR", "HLT", "BKNG",
-    "GEV", "VST", "SMCI", "ARM", "MSTR",
-    # broad-market / sector ETFs (display-only, same equity feed path)
-    "SPY", "QQQ", "IWM", "DIA", "VTI", "VOO", "XLK", "XLF", "XLE", "XLV",
-    "SMH", "SOXX", "ARKK", "GLD",
-)
+# Shared with the client so the first symbol-picker paint needs no HTTP round
+# trip. Capabilities stay feed-derived in build_directory, never in this data.
+_BUNDLED = json.loads(Path(__file__).with_name("universe.json").read_text(encoding="utf-8"))
+CRYPTO_MARKET: str = _BUNDLED["crypto_market"]
+CRYPTO_SYMBOLS: tuple[str, ...] = tuple(_BUNDLED["crypto_symbols"])
+EQUITY_TICKERS: tuple[str, ...] = tuple(_BUNDLED["equity_tickers"])
 
 
 def build_directory(

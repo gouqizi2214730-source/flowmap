@@ -25,16 +25,23 @@ import asyncio
 import logging
 import threading
 import time
+import datetime
+from types import SimpleNamespace
 
 import numpy as np
+import msgspec
+import pytest
 
 import flowmap_server.core.session as session_mod
 from flowmap_server.core.grid import Grid, GridCfg
 from flowmap_server.core.record import Recorder, SessionRecorder
+from flowmap_server.core.record import TailData
 from flowmap_server.core.session import ClientTx, Session
 from flowmap_server.core.stats import SessionStats
 from flowmap_server.feeds.base import BookState
 from flowmap_server.feeds.sim import SimFeed
+from flowmap_server.feeds.equity import EquityFeed
+from flowmap_server.config import Config
 from flowmap_server.proto import wire
 from flowmap_server.proto.events import (
     MODE_L2,
@@ -173,6 +180,60 @@ def _prerecord_tail(root: Recorder, cfg: GridCfg, n_cols: int = 20):
         rec.record_trade(t)
     rec.close()
     return cols
+
+
+@pytest.mark.parametrize("finite_prices", [False, True])
+def test_keyless_equity_legacy_missing_price_tail_rebuilds_without_adopting_recording_id(
+    tmp_path, finite_prices,
+):
+    cfg = _cfg()
+    source = Grid(cfg)
+    source.on_book(0, *_book(100.0))
+    if finite_prices:
+        source.on_bar_sample(0, 100.0, 100.0, 100.0, 100.0, 1.0)
+    columns = source.on_book(DT, *_book(100.0))
+    old = TailData([source.current_epoch_params()], columns, [], [], 0, recording_id="old-id")
+    root = Recorder(tmp_path / "legacy-equity", 20.0)
+    sess = Session("eq-legacy", feed=EquityFeed("AAPL", Config()), grid=Grid(cfg), recorder=root)
+    sess._rec = root.open_session("equity", "AAPL")
+    new_id = sess._rec.recording_id
+    assert new_id != "old-id"
+    assert sess._apply_tail(old) is finite_prices
+    if finite_prices:
+        assert sess._rec.recording_id == "old-id"
+        assert sess._grid.history(10**18, 10)[0].bar.c == 100.0
+    else:
+        assert sess._rec.recording_id == new_id
+        assert sess._grid.history(10**18, 10) == []
+        assert np.isnan(old.columns[0].bar.c)
+    # A narrow guard: a valid price in even one column retains the recording.
+    if not finite_prices:
+        valid = msgspec.structs.replace(columns[0], bar=msgspec.structs.replace(columns[0].bar, c=100.0))
+        mixed = msgspec.structs.replace(old, columns=[valid])
+        assert sess._apply_tail(mixed)
+        assert sess._rec.recording_id == "old-id"
+
+
+async def test_closed_preparation_records_initial_epoch_before_any_reanchor(tmp_path):
+    start = int(datetime.datetime(2026, 7, 17, 14, 0, tzinfo=datetime.timezone.utc).timestamp()) * 10**9
+
+    async def bars():
+        return [SimpleNamespace(
+            source_ts=start + i * 60 * 10**9, local_ts=start + i * 60 * 10**9,
+            open=price, high=price, low=price, close=price, volume=100.0,
+        ) for i, price in enumerate((100.0, 200.0, 200.0))]
+
+    feed = EquityFeed("AAPL", Config(), bars_fn=bars, now_ns_fn=lambda: start + 2 * 24 * 3600 * 10**9)
+    recorder = Recorder(tmp_path / "closed-epochs", 20.0)
+    sess = Session("closed-epochs", feed=feed, grid=Grid(_cfg()), recorder=recorder)
+    await sess.start()
+    await sess.run_task
+    tail = recorder.load_tail("equity", "AAPL", max_age_ns=10**18,
+                              now_ns=start + 10 * 60 * 10**9, limit_cols=1024)
+    assert tail is not None
+    assert {column.epoch for column in tail.columns} == {0, 1}
+    assert {epoch.epoch for epoch in tail.epochs} == {0, 1}
+    assert all(np.isfinite(column.bar.c) for column in tail.columns)
 
 
 async def _wait_for(predicate, timeout=10.0):
@@ -934,7 +995,10 @@ async def test_time_based_flush_lands_rows_below_column_cadence(tmp_path):
     clock["now"] = int(0.06 * 1e9)
     feed.q.put_nowait(BookState(3 * DT, *_book(100.0)))
     await _wait_for(
-        lambda: bool(list((tmp_path / "rec").rglob("*-columns-*.parquet"))) or None
+        lambda: (
+            bool(list((tmp_path / "rec").rglob("*-columns-*.parquet")))
+            and sess._flush_task is not None and sess._flush_task.done()
+        ) or None
     )
     # The cadence anchor restarted at the successful flush.
     assert sess._rec_cadence_ns == clock["now"] or sess._cols_since_flush == 0
@@ -1146,3 +1210,114 @@ async def test_restart_backoff_doubles_with_full_jitter():
     assert sess._backoff_s == 4.0
     feed.q.put_nowait(None)
     await asyncio.wait_for(sess.run_task, timeout=5)
+
+
+async def test_retired_session_close_and_retention_never_block_subscribe_or_shutdown(tmp_path, monkeypatch):
+    from flowmap_server.core.session import SessionManager
+    from flowmap_server.proto.events import Subscribe
+
+    root = Recorder(tmp_path / "retired", 20.0)
+    timer = FakeTimer()
+    feeds = {}
+
+    def factory(sub):
+        feed = DrivenFeed()
+        feed.symbol = sub.symbol
+        feeds[sub.symbol] = feed
+        return feed
+
+    manager = SessionManager(Config(max_rows=256, ring_columns=1024), recorder=root,
+                             feed_factory=factory, timer=timer)
+    first = ClientTx()
+    session = await manager.subscribe(Subscribe(market="sim", symbol="FIRST", mode="live"), first)
+    feeds["FIRST"].q.put_nowait(None)
+    await session.run_task  # done run_task still owns an open recorder
+    session._last_retention_ns = None
+    entered, release = threading.Event(), threading.Event()
+    real_retention = Recorder.enforce_retention
+    real_close = SessionRecorder.close
+    closes = []
+
+    def held_retention(self):
+        entered.set()
+        assert release.wait(3), "test watchdog: retention was not released"
+        return real_retention(self)
+
+    def close(self):
+        closes.append(self.recording_id)
+        return real_close(self)
+
+    monkeypatch.setattr(Recorder, "enforce_retention", held_retention)
+    monkeypatch.setattr(SessionRecorder, "close", close)
+    watchdog = threading.Timer(2.0, release.set)
+    watchdog.start()
+    try:
+        await manager.unsubscribe(session, first)
+        before = time.monotonic()
+        timer.entries[-1].fire()
+        assert time.monotonic() - before < 0.1
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert session in manager._retiring_sessions
+        shutdown = asyncio.create_task(manager.flush_all())
+        await asyncio.sleep(0)
+        assert not shutdown.done()
+        # Both a heartbeat and a new subscription progress while the retired
+        # recorder's retention scan is still deliberately held in its worker.
+        await asyncio.wait_for(asyncio.sleep(0), 0.1)
+        second = ClientTx()
+        next_session = await asyncio.wait_for(manager.subscribe(
+            Subscribe(market="sim", symbol="NEXT", mode="live"), second,
+        ), 0.5)
+        assert not release.is_set()
+        release.set()
+        await asyncio.wait_for(shutdown, 2)
+        assert session._recording_close_task.done()
+        assert closes.count(closes[0]) == 1
+        next_session.detach(second)
+        timer.entries[-1].fire()
+        await manager.flush_all()
+    finally:
+        release.set()
+        watchdog.cancel()
+
+
+async def test_boot_retirement_drains_failed_inflight_flush_before_one_close(tmp_path, monkeypatch):
+    root = Recorder(tmp_path / "boot-retire", 20.0)
+    session = Session("boot-retire", feed=DrivenFeed(), grid=Grid(_cfg()), recorder=root,
+                      timer=FakeTimer())
+    await session._boot()
+    assert session.run_task is None
+    entered, release = threading.Event(), threading.Event()
+    real_flush, real_close = SessionRecorder.flush_buffers, SessionRecorder.close
+    calls = []
+    closes = []
+
+    def flush(self, buffers):
+        calls.append(True)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(3)
+            raise OSError("injected first flush failure")
+        return real_flush(self, buffers)
+
+    def close(self):
+        assert release.is_set()
+        closes.append(True)
+        return real_close(self)
+
+    monkeypatch.setattr(SessionRecorder, "flush_buffers", flush)
+    monkeypatch.setattr(SessionRecorder, "close", close)
+    session._on_book(BookState(0, *_book(100.0)))
+    session._on_book(BookState(DT, *_book(100.0)))
+    session._flush_recording()
+    assert await asyncio.to_thread(entered.wait, 1)
+    try:
+        session.teardown_now()
+        await asyncio.sleep(0)
+        assert not session._recording_close_task.done() and not closes
+    finally:
+        release.set()
+    await asyncio.wait_for(session._recording_close_task, 3)
+    assert len(calls) == 2 and closes == [True]
+    tail = root.load_tail(MARKET, SYMBOL, max_age_ns=10**18, now_ns=10**18, limit_cols=100)
+    assert tail is not None and [column.col_seq for column in tail.columns] == [0]
