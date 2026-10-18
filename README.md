@@ -63,6 +63,10 @@ Anything a session shows can be recorded to parquet on disk and replayed with se
   if it dies mid-session, and enforces a single running instance, for macOS (Apple Silicon /
   Intel), Windows x64 / ARM64, and Linux (deb / AppImage).
 
+## Real life example
+
+![Annotated live SANDUSDT heatmap showing a sell wall start and selling pressure](docs/media/sandusdt-real-life-example.png)
+
 ## Ultra wide view — 16 hours of market data
 
 ![Ultra wide SANDUSDT heatmap showing 16 hours of market data](docs/media/ultra-wide-16-hours.png)
