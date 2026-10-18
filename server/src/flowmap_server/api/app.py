@@ -136,6 +136,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         if prewarm is not None:
             prewarm.cancel()
             await asyncio.gather(prewarm, return_exceptions=True)
+        close_cache = getattr(market_cache, "aclose", None)
+        if callable(close_cache):
+            await close_cache()
         manager = getattr(app.state, "manager", None)
         flush_all = getattr(manager, "flush_all", None)
         if flush_all is not None:
@@ -169,8 +172,17 @@ def create_app(
     # provider seams, called on /api/movers|/api/quote reads and by the lifespan
     # prewarm task (see _lifespan).
     if market_cache is None:
+        async def shared_quote(market: str, symbol: str):
+            # Movers and hover previews share observation ownership; successful
+            # workers warm previews before the complete ranking is available.
+            return await market_cache.quote(market, symbol, wait_for_refresh=True)
+
+        async def shared_movers(market: str, limit: int):
+            return await default_movers_fn(market, limit, quote_fn=shared_quote)
+
         market_cache = MarketDataCache(
-            quote_fn=default_quote_fn, movers_fn=default_movers_fn
+            quote_fn=default_quote_fn, movers_fn=shared_movers,
+            stale_while_revalidate=True,
         )
     app = FastAPI(
         title="flowmap-server",

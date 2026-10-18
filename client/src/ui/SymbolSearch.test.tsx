@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SymbolSearch, type SymbolSearchHandle } from './SymbolSearch';
 import { resetVenueCatalog, type VenueInfo } from './symbols';
+import { PREVIEW_QUOTES_KEY } from './previewQuotes';
 
 (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 // jsdom has no layout, so the palette's keep-the-highlight-visible effect needs a stub.
@@ -184,7 +185,7 @@ describe('SymbolSearch venue scope — the fast path stays fast', () => {
     expect(options.filter((el) => el.getAttribute('data-market') === 'equity')).toHaveLength(220);
     expect(options.filter((el) => el.getAttribute('data-market') === 'binance-spot')).toHaveLength(40);
     expect(palette().querySelector('.sympal__empty, [data-testid="venue-loading"]')).toBeNull();
-    expect(calls.filter((url) => url.includes('/api/quote'))).toHaveLength(0);
+    expect(calls.filter((url) => url.includes('/api/quote')).length).toBeLessThanOrEqual(3);
     press(palette().querySelector('[data-market="equity"][data-symbol="MSFT"]'));
     expect(selected).toHaveBeenCalledWith('equity', 'MSFT');
     expect(palette()).toBeNull();
@@ -283,7 +284,7 @@ describe('SymbolSearch venue scope — the fast path stays fast', () => {
     expect(selected).toHaveBeenCalledWith('binance-spot', 'BTCUSDT');
   });
 
-  it('ignores delayed mover prices from an earlier closed visit', async () => {
+  it('keeps a real mover preview across close and reopen without another response', async () => {
     const releases: Array<(movers: unknown[]) => void> = [];
     globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
       const url = String(input);
@@ -293,16 +294,16 @@ describe('SymbolSearch venue scope — the fast path stays fast', () => {
       return Promise.resolve({ ok: true, json: async () => body(url) } as Response);
     }) as unknown as typeof fetch;
     const container = await open();
+    act(() => releases[0]?.([{ market: 'binance-spot', symbol: 'BTCUSDT', price: 81000, changePct: 1, spark: [80000, 81000] }]));
+    await settle();
     click(palette().querySelector('.sympal__esc'));
     click(container.querySelector('[data-testid="symbol-search-trigger"]'));
-    act(() => releases[2]?.([{ market: 'binance-spot', symbol: 'BTCUSDT', price: 81000, spark: [] }]));
-    await settle();
-    act(() => releases[0]?.([{ market: 'binance-spot', symbol: 'BTCUSDT', price: 99000, spark: [] }]));
-    await settle();
     expect(palette().querySelector('[data-symbol="BTCUSDT"] .sympal__px')!.textContent).toBe('81,000');
+    expect(palette().querySelector('.sympal__pv-spark path')).not.toBeNull();
+    expect(releases).toHaveLength(2);
   });
 
-  it('requests only the highlighted preview while all 260 initial symbols are visible', async () => {
+  it('bounds cold preview requests while all 260 initial symbols are visible', async () => {
     globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
       calls.push(String(input));
       return new Promise(() => {});
@@ -310,7 +311,7 @@ describe('SymbolSearch venue scope — the fast path stays fast', () => {
     await open();
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 220)); });
     expect(palette().querySelectorAll('[data-testid="symbol-row"]')).toHaveLength(260);
-    expect(calls.filter((url) => url.includes('/api/quote'))).toHaveLength(1);
+    expect(calls.filter((url) => url.includes('/api/quote'))).toHaveLength(3);
     expect(calls.filter((url) => url.includes('/api/movers'))).toHaveLength(2);
   });
 
@@ -398,7 +399,7 @@ describe('SymbolSearch venue enumeration — the opt-in slow path', () => {
     await settle();
     act(() => releaseKraken?.());
     await settle();
-    const listed = calls.filter((u) => u.includes('market=kraken')).length;
+    const listed = calls.filter((u) => u.includes('/api/universe?') && u.includes('market=kraken')).length;
     expect(listed).toBe(1);
 
     // Switch away and back: the session cache answers, no second round trip.
@@ -411,7 +412,7 @@ describe('SymbolSearch venue enumeration — the opt-in slow path', () => {
     press(document.body.querySelector('[data-testid="venue-row"][data-market="kraken"]'));
     await settle();
 
-    expect(calls.filter((u) => u.includes('market=kraken')).length).toBe(listed);
+    expect(calls.filter((u) => u.includes('/api/universe?') && u.includes('market=kraken')).length).toBe(listed);
     expect(document.body.querySelectorAll('[data-testid="symbol-row"]').length).toBe(2);
   });
 
@@ -474,7 +475,7 @@ describe('SymbolSearch venue enumeration — a failed listing', () => {
   }
 
   function listings(market: string): number {
-    return calls.filter((u) => u.includes(`market=${market}`)).length;
+    return calls.filter((u) => u.includes('/api/universe?') && u.includes(`market=${market}`)).length;
   }
 
   it('reads as FAILED, not as an empty venue', async () => {
@@ -643,6 +644,32 @@ describe('SymbolSearch recents + keyboard navigation', () => {
 // that identity aborted the in-flight `/api/quote` (request #1 always wasted;
 // BTCUSDT's preview arrived 4-8 s late). These tests pin the keyed keep-alive.
 describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
+  it('shows persisted real graphs on the first render and keeps identity while all HTTP is pending', () => {
+    const fetchedAt = Date.now() - 60_000;
+    window.localStorage.setItem('flowmap.recents', JSON.stringify(['equity:AAPL', 'binance-spot:BTCUSDT']));
+    window.localStorage.setItem(PREVIEW_QUOTES_KEY, JSON.stringify({ version: 1, entries: [
+      { fetchedAt, quote: { market: 'equity', symbol: 'AAPL', price: 343.46, changePct: 1,
+        spark: [340, 345, 343.46], asOf: 1792180800000000000 } },
+      { fetchedAt, quote: { market: 'binance-spot', symbol: 'BTCUSDT', price: 81000, changePct: -1,
+        spark: [82000, 81500, 81000], asOf: 1792340000000000000 } },
+    ] }));
+    globalThis.fetch = vi.fn(() => new Promise(() => {})) as unknown as typeof fetch;
+    const container = render();
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    expect(palette().querySelector('.sympal__pv-sym')!.textContent).toBe('AAPL');
+    expect(palette().querySelector('.sympal__pv-px')!.textContent).toBe('343.46');
+    expect(palette().querySelector('.sympal__pv-stale')).not.toBeNull();
+    const equityPath = palette().querySelector('.sympal__pv-spark path')!.getAttribute('d');
+    key(palette().querySelector('input')!, 'ArrowDown');
+    expect(palette().querySelector('.sympal__pv-sym')!.textContent).toBe('BTCUSDT');
+    expect(palette().querySelector('.sympal__pv-px')!.textContent).toBe('81,000');
+    expect(palette().querySelector('.sympal__pv-spark path')!.getAttribute('d')).not.toBe(equityPath);
+    click(palette().querySelector('.sympal__esc'));
+    click(container.querySelector('[data-testid="symbol-search-trigger"]'));
+    expect(palette().querySelector('.sympal__pv-px')!.textContent).toBe('343.46');
+    expect(palette().querySelector('.sympal__pv-spark path')).not.toBeNull();
+  });
+
   function type(el: Element, value: string): void {
     act(() => {
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!;
@@ -654,13 +681,6 @@ describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
   function key(el: Element, k: string): void {
     act(() => {
       el.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
-    });
-  }
-
-  /** Wait past the 160 ms quote debounce (real timers, like the rest of the file). */
-  async function pastDebounce(): Promise<void> {
-    await act(async () => {
-      await new Promise((r) => setTimeout(r, 220));
     });
   }
 
@@ -682,6 +702,9 @@ describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
         });
       }
       if (url.includes('/api/quote')) {
+        if (!url.includes('symbol=BTCUSDT')) {
+          return Promise.resolve({ ok: true, json: async () => null } as Response);
+        }
         quoteCalls += 1;
         const idx = quoteCalls - 1;
         const signal = (init?.signal ?? null) as AbortSignal | null;
@@ -707,10 +730,7 @@ describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
     const input = document.body.querySelector('[data-testid="symbol-search-input"]')!;
     type(input, 'btc');
     await settle();
-    expect(quoteCalls).toBe(0); // still inside the debounce window
-
-    await pastDebounce();
-    expect(quoteCalls).toBe(1); // request #1 is in flight...
+    expect(quoteCalls).toBe(1); // Already prepared; no 160 ms debounce.
 
     // ...when the movers answer lands and rebuilds `rows` (object identity
     // churn). The in-flight request must NOT be aborted and no second one
@@ -744,8 +764,11 @@ describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
         return Promise.resolve({ ok: true, json: async () => ({ movers: [] }) } as unknown as Response);
       }
       if (url.includes('/api/quote')) {
-        quoteCalls += 1;
         const symbol = new URL(url, 'http://x').searchParams.get('symbol') ?? '';
+        if (symbol !== 'AAA' && symbol !== 'AAB') {
+          return Promise.resolve({ ok: true, json: async () => null } as Response);
+        }
+        quoteCalls += 1;
         return new Promise((resolve) => {
           quoteWaiters.set(symbol, (q) =>
             resolve({ ok: true, json: async () => q } as unknown as Response),
@@ -766,19 +789,17 @@ describe('SymbolSearch preview keep-alive (QA12 M-5)', () => {
     type(input, 'a');
     await settle();
     const firstSym = document.body.querySelector('[data-testid="symbol-row"][data-symbol]')!.getAttribute('data-symbol')!;
-    await pastDebounce();
-    expect(quoteCalls).toBe(1);
+    expect(quoteCalls).toBe(2); // Both nearby results are already being prepared.
     act(() => quoteWaiters.get(firstSym)?.({ market: 'sim', symbol: firstSym, price: 1.5, changePct: 1, spark: [1, 2] }));
     await settle();
     expect(palette().querySelector('.sympal__pv-px')!.textContent).toBe('1.50');
 
-    // Move to the second row: a fresh request for the other symbol.
+    // Move to the second row: reuse its prefetch rather than duplicate it.
     key(input, 'ArrowDown');
     await settle();
     const secondSym = document.body
       .querySelectorAll('[data-testid="symbol-row"][data-symbol]')[1]!
       .getAttribute('data-symbol')!;
-    await pastDebounce();
     expect(quoteCalls).toBe(2);
     act(() => quoteWaiters.get(secondSym)?.({ market: 'sim', symbol: secondSym, price: 2.5, changePct: -1, spark: [2, 1] }));
     await settle();

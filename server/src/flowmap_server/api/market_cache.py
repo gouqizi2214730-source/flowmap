@@ -20,16 +20,23 @@ Semantics:
   a stale or market-closed equity value is surfaced as ``stale``, never as a live
   print.
 - **Background prewarm.** :meth:`run_background` periodically refreshes
-  movers so the first UI read is warm; ``create_app``'s lifespan starts it
+  both markets concurrently so the first UI read is warm. Production movers
+  fetch through the same quote cache, warming each symbol as it finishes;
+  ``create_app``'s lifespan starts it
   for the production cache and cancels it on shutdown, and httpx's
   ASGITransport does not run lifespan events, so plain-ASGI tests never spin
   it up.
+- **Optional stale-while-revalidate.** Production quote reads immediately
+  return usable expired observations with their original timestamps while
+  one bounded refresh runs. ``wait_for_refresh`` makes movers prewarm await
+  the fresh shared fetch. :meth:`aclose` drains owned background tasks.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable, Sequence
 
@@ -129,6 +136,9 @@ class MarketDataCache:
         max_entries: int = DEFAULT_MAX_ENTRIES,
         clock: Clock = time.monotonic_ns,
         wall_clock: Clock = time.time_ns,
+        stale_while_revalidate: bool = False,
+        max_quote_refreshes: int = 8,
+        quote_refresh_timeout_s: float = 15.0,
     ) -> None:
         self._quote_fn = quote_fn
         self._movers_fn = movers_fn
@@ -140,14 +150,55 @@ class MarketDataCache:
         self._quote_locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._movers: dict[str, tuple[int, list[QuoteData]]] = {}
         self._movers_locks: dict[str, asyncio.Lock] = {}
+        self._stale_while_revalidate = stale_while_revalidate
+        self._max_quote_refreshes = max(1, int(max_quote_refreshes))
+        self._quote_refresh_timeout_s = max(0.01, float(quote_refresh_timeout_s))
+        self._quote_refreshes: dict[tuple[str, str], asyncio.Task] = {}
+        self._closed = False
 
     # -- quotes ----------------------------------------------------------------
 
-    async def quote(self, market: str, symbol: str) -> QuoteData:
+    async def quote(self, market: str, symbol: str, *, wait_for_refresh: bool = False) -> QuoteData:
         key = (market, symbol.upper())
         cached = self._quotes.get(key)
         if cached is not None and self._fresh(cached[0]):
             return cached[1]
+        if self._closed:
+            return self._fallback_quote(market, key[1], cached)
+        if (
+            self._stale_while_revalidate and not wait_for_refresh
+            and cached is not None and self._usable_quote(cached[1])
+        ):
+            self._refresh_quote_later(key)
+            # Keep the real provider timestamp and its last known reachability.
+            return msgspec.structs.replace(cached[1], stale=True)
+        return await self._fetch_quote(key)
+
+    @staticmethod
+    def _usable_quote(quote: QuoteData) -> bool:
+        return quote.price is not None and math.isfinite(quote.price) and quote.price > 0.0
+
+    def _refresh_quote_later(self, key: tuple[str, str]) -> None:
+        if self._closed or key in self._quote_refreshes or len(self._quote_refreshes) >= self._max_quote_refreshes:
+            return
+
+        async def refresh() -> None:
+            try:
+                async with asyncio.timeout(self._quote_refresh_timeout_s):
+                    await self._fetch_quote(key)
+            except TimeoutError:
+                cached = self._quotes.get(key)
+                if cached is not None:
+                    self._quotes[key] = (self._clock(), self._fallback_quote(*key, cached))
+            finally:
+                self._quote_refreshes.pop(key, None)
+
+        task = asyncio.create_task(refresh(), name=f"quote-refresh:{key[0]}:{key[1]}")
+        self._quote_refreshes[key] = task
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+
+    async def _fetch_quote(self, key: tuple[str, str]) -> QuoteData:
+        market, symbol = key
         lock = self._quote_locks.setdefault(key, asyncio.Lock())
         try:
             async with lock:
@@ -158,7 +209,17 @@ class MarketDataCache:
                     q = await self._quote_fn(market, symbol.upper())
                 except Exception:  # noqa: BLE001 — never raise into the handler
                     logger.debug("quote fetch failed for %s:%s", market, symbol, exc_info=True)
-                    return self._fallback_quote(market, symbol.upper(), cached)
+                    fallback = self._fallback_quote(market, symbol, cached)
+                    if self._stale_while_revalidate and cached is not None:
+                        # A failed refresh has its own TTL, avoiding a new
+                        # request on every hover while preserving useful data.
+                        self._quotes[key] = (self._clock(), fallback)
+                    return fallback
+                if (
+                    self._stale_while_revalidate and cached is not None
+                    and self._usable_quote(cached[1]) and not self._usable_quote(q)
+                ):
+                    q = msgspec.structs.replace(cached[1], stale=True, reachable=q.reachable)
                 self._quotes[key] = (self._clock(), q)
                 self._evict(self._quotes)
                 return q
@@ -251,13 +312,20 @@ class MarketDataCache:
         shutdown); every cycle is wrapped so one bad refresh never stops the
         loop. Refreshes the full ``_MOVERS_MAX`` cache row set so every
         caller's slice is served warm."""
-        while True:
-            for market in markets:
-                try:
-                    await self.movers(market, limit=_MOVERS_MAX)
-                except Exception:  # noqa: BLE001
-                    logger.debug("background movers refresh failed for %s", market, exc_info=True)
+        while not self._closed:
+            # A slow crypto sweep must not prevent equities warming at all.
+            await asyncio.gather(*(self.movers(market, limit=_MOVERS_MAX) for market in markets))
             await asyncio.sleep(interval_s)
+
+    async def aclose(self) -> None:
+        """Stop admission, cancel and drain every owned quote-refresh task."""
+        self._closed = True
+        tasks = list(self._quote_refreshes.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._quote_refreshes.clear()
 
     def _fresh(self, at_ns: int) -> bool:
         return self._clock() - at_ns < self._ttl_ns
@@ -331,7 +399,7 @@ async def _bounded_quote_sweep(
     return results
 
 
-async def default_movers_fn(market: str, limit: int) -> list[QuoteData]:
+async def default_movers_fn(market: str, limit: int, *, quote_fn: QuoteFn | None = None) -> list[QuoteData]:
     """Production movers seam: rank a bounded candidate set by 24 h %change.
 
     Crypto: the curated shortlist. Equity: a bounded head of the curated ticker
@@ -349,6 +417,8 @@ async def default_movers_fn(market: str, limit: int) -> list[QuoteData]:
         fetch = lambda s: _crypto_quote("binance-spot", s)  # noqa: E731
         mkt = "binance-spot"
         max_in_flight = CRYPTO_MOVERS_CONCURRENCY
+    if quote_fn is not None:
+        fetch = lambda symbol: quote_fn(mkt, symbol)  # noqa: E731
     results = await _bounded_quote_sweep(
         fetch, candidates, MOVERS_DEADLINE_S, max_in_flight=max_in_flight
     )

@@ -69,6 +69,7 @@ import {
 import { loadRecents, pushRecent, type RecentPick } from './recents';
 import { pushOverlay } from './overlayStack';
 import { fmtPct, fmtPrice, sparkDirection, sparkPath } from './spark';
+import { PreviewQuotes, type PreviewQuote } from './previewQuotes';
 
 export interface SymbolSearchHandle {
   /** Open the palette (bound to the `/` and ⌘K/Ctrl-K global shortcuts). */
@@ -83,34 +84,19 @@ interface SymbolSearchProps {
   onSelect: (market: string, symbol: string) => void;
 }
 
-interface Quote {
-  market: string;
-  symbol: string;
-  price: number | null;
-  changePct: number | null;
-  spark: number[];
-  stale?: boolean;
-  reachable?: boolean;
-}
-
-interface Mover extends Quote {
-  stale: boolean;
-}
-
 const GROUP_LABEL: Record<string, string> = {
   crypto: 'Crypto',
   equity: 'Equity',
   sim: 'Sim',
   all: 'All',
 };
-const QUOTE_DEBOUNCE_MS = 160;
 /** Live venue enumeration is uncapped-ish; the server clamps `limit` at 1000. */
 const VENUE_LIMIT = 1000;
 
 /** A single search result: a directory entry, optionally enriched with a quote. */
 interface Row {
   entry: SymbolEntry;
-  quote?: Quote;
+  quote?: PreviewQuote;
 }
 
 /**
@@ -135,6 +121,14 @@ async function getJson<T>(path: string, signal: AbortSignal): Promise<T | null> 
   }
 }
 
+function previewStorage(): Storage | null {
+  try {
+    return typeof window === 'undefined' ? null : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
 export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
   function SymbolSearch({ current, onSelect }, ref) {
     const [open, setOpen] = useState(false);
@@ -145,8 +139,15 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
     const [activeState, setActive] = useState(0);
     const [universe, setUniverse] = useState<SymbolEntry[]>(BUNDLED_DIRECTORY);
     const universeLoaded = useRef(false);
-    const [movers, setMovers] = useState<Mover[]>([]);
-    const [preview, setPreview] = useState<Quote | null>(null);
+    const [, setQuoteRevision] = useState(0);
+    const [previewQuotes] = useState(() => new PreviewQuotes({
+      storage: previewStorage(),
+      fetchQuote: (market, symbol, signal) => getJson<PreviewQuote>(
+        `/api/quote?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}`,
+        signal,
+      ),
+      onChange: () => setQuoteRevision((revision) => revision + 1),
+    }));
     // Venue scope: `all` = the bundled directory (instant), else a market string
     // enumerated live. `venues === null` means /api/venues has not answered yet.
     const [venues, setVenues] = useState<VenueInfo[] | null>(null);
@@ -169,11 +170,6 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
     // Holds ANSWERS ONLY — a failed listing is deliberately absent, so the next
     // attempt refetches instead of inheriting a fabricated empty list forever.
     const scopeCache = useRef(new Map<string, SymbolEntry[]>());
-    // Per-`market:symbol` memo of `/api/quote` answers for ONE palette visit, so
-    // arrowing away and back (or a mover landing under the highlighted row) never
-    // re-issues a request. Cleared on open: a later visit must re-read a live
-    // price rather than show a minutes-old one as current.
-    const previewCache = useRef(new Map<string, Quote>());
     const inputRef = useRef<HTMLInputElement>(null);
     const triggerRef = useRef<HTMLButtonElement>(null);
     const listRef = useRef<HTMLDivElement>(null);
@@ -182,15 +178,31 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
       setOpen(true);
       setQuery('');
       setActive(0);
-      // A new visit re-reads quotes; only the in-visit keep-alive survives.
-      previewCache.current.clear();
-      setMovers([]);
       // The venue LIST closes, but the chosen SCOPE persists across opens — a
       // trader working one venue should not re-pick it every ⌘K.
       setPickingVenue(false);
     }, []);
 
     useImperativeHandle(ref, () => ({ open: doOpen, focus: doOpen }), [doOpen]);
+
+    useEffect(() => {
+      previewQuotes.resume();
+      return () => previewQuotes.dispose();
+    }, [previewQuotes]);
+
+    // Prepare the current and recent symbols before the trader opens search.
+    // The bounded scheduler shares requests with hover and never clears a good
+    // chart while it refreshes. Sim has no provider preview to warm.
+    useEffect(() => {
+      const separator = current.indexOf(':');
+      const picks = separator > 0
+        ? [{ market: current.slice(0, separator), symbol: current.slice(separator + 1) }, ...recents]
+        : recents;
+      for (const pick of picks) {
+        if (marketGroup(pick.market) !== 'sim') previewQuotes.request(pick.market, pick.symbol, true);
+      }
+      for (const entry of universe.slice(0, 6)) previewQuotes.request(entry.market, entry.symbol);
+    }, [current, recents, universe, previewQuotes]);
 
     // Refresh the bundled symbols with the server's active capabilities once.
     // The local directory already renders and searches on the very first visit;
@@ -277,37 +289,42 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
       return () => ctrl.abort();
     }, [open, scope, scopeAttempt]);
 
-    // Quotes enrich stable directory rows; each market answers independently, so
-    // a slow equity provider cannot hold crypto prices behind Promise.all.
+    // Warm display data while search is closed too. Retain completed answers
+    // across visits and feed the same cache used by the highlighted preview.
     useEffect(() => {
-      if (!open) return;
       const ctrl = new AbortController();
-      for (const market of ['crypto', 'equity'] as const) {
-        void getJson<{ movers: Mover[] }>(`/api/movers?market=${market}&limit=14`, ctrl.signal).then((b) => {
-          if (ctrl.signal.aborted || !b) return;
-          setMovers((previous) => [
-            ...previous.filter((m) => marketGroup(m.market) !== market),
-            ...(b.movers ?? []),
-          ]);
-        });
-      }
-      const t = window.setTimeout(() => inputRef.current?.focus(), 0);
+      const refresh = () => {
+        const requestedAt = Date.now();
+        for (const market of ['crypto', 'equity'] as const) {
+          void getJson<{ movers: PreviewQuote[] }>(`/api/movers?market=${market}&limit=100`, ctrl.signal).then((b) => {
+            if (ctrl.signal.aborted || !b) return;
+            for (const quote of b.movers ?? []) previewQuotes.put(quote, requestedAt);
+          });
+        }
+      };
+      refresh();
+      const interval = window.setInterval(refresh, 30_000);
       return () => {
         ctrl.abort();
-        window.clearTimeout(t);
+        window.clearInterval(interval);
       };
+    }, [previewQuotes]);
+
+    useEffect(() => {
+      if (!open) return;
+      const t = window.setTimeout(() => inputRef.current?.focus(), 0);
+      return () => window.clearTimeout(t);
     }, [open]);
 
     // The visible rows. Scoped to a venue: that venue's own listing, browsable on
     // an empty query. Scoped to `all`: recent picks + the COMPLETE directory on
     // an empty query, deduped. Movers only fill quote columns, keeping keyboard
     // targets stable while either provider is slow or unavailable.
-    const rows = useMemo<Row[]>(() => {
-      const byKey = new Map(movers.map((m) => [`${m.market}:${m.symbol}`, m] as const));
+    const rows: Row[] = (() => {
       if (scope !== ALL_VENUES) {
         return fuzzyRank(scopeRows ?? [], query, 120).map((entry) => ({
           entry,
-          quote: byKey.get(`${entry.market}:${entry.symbol}`),
+          quote: previewQuotes.get(`${entry.market}:${entry.symbol}`),
         }));
       }
       if (query.trim() === '') {
@@ -315,18 +332,18 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
         const recentKeys = new Set(recents.map((r) => `${r.market}:${r.symbol}`));
         const recentRows: Row[] = recents.map((r) => ({
           entry: entriesByKey.get(`${r.market}:${r.symbol}`) ?? { market: r.market, symbol: r.symbol, capability: {} },
-          quote: byKey.get(`${r.market}:${r.symbol}`),
+          quote: previewQuotes.get(`${r.market}:${r.symbol}`),
         }));
         const directoryRows = universe
           .filter((entry) => !recentKeys.has(`${entry.market}:${entry.symbol}`))
-          .map((entry) => ({ entry, quote: byKey.get(`${entry.market}:${entry.symbol}`) }));
+          .map((entry) => ({ entry, quote: previewQuotes.get(`${entry.market}:${entry.symbol}`) }));
         return [...recentRows, ...directoryRows];
       }
       return fuzzyRank(universe, query, 60).map((entry) => ({
         entry,
-        quote: byKey.get(`${entry.market}:${entry.symbol}`),
+        quote: previewQuotes.get(`${entry.market}:${entry.symbol}`),
       }));
-    }, [query, movers, universe, scope, scopeRows, recents]);
+    })();
 
     // How many LEADING rows are the Recent section (0 unless the empty-query
     // bundled-directory view) — the render uses it to place section headers.
@@ -363,49 +380,21 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
     const activeRowRef = useRef<Row | undefined>(activeRow);
     activeRowRef.current = activeRow;
 
-    // Live preview for the active row: reuse its mover quote if we have one, else
-    // fetch /api/quote (debounced) so scanning the list doesn't hammer the server.
-    // Keyed on `market:symbol` so mover/universe churn cannot abort a request,
-    // and memoised for the visit so re-highlighting a row is instant.
+    // A cached preview is read during render, so selection never waits for an
+    // effect, debounce, or HTTP response. Missing/stale data refreshes through
+    // the bounded queue; moving away leaves useful requests alive in the cache.
     useEffect(() => {
-      if (!open || !activeKey) {
-        setPreview(null);
-        return;
-      }
+      if (!open || !activeKey) return;
       const row = activeRowRef.current;
-      if (row?.quote) {
-        setPreview(row.quote);
-        return;
+      if (row) previewQuotes.request(row.entry.market, row.entry.symbol, true);
+    }, [open, activeKey, previewQuotes]);
+
+    useEffect(() => {
+      if (!open || pickingVenue) return;
+      for (const row of rows.slice(Math.max(0, active - 1), active + 4)) {
+        previewQuotes.request(row.entry.market, row.entry.symbol);
       }
-      const cached = previewCache.current.get(activeKey);
-      if (cached) {
-        setPreview(cached);
-        return;
-      }
-      // Drop the previous row's quote immediately so a symbol NAME never renders
-      // over another symbol's live-looking price/%/sparkline during the debounce.
-      setPreview(null);
-      const { market, symbol } = row!.entry;
-      const ctrl = new AbortController();
-      const t = window.setTimeout(() => {
-        void getJson<Quote>(
-          `/api/quote?market=${encodeURIComponent(market)}&symbol=${encodeURIComponent(symbol)}`,
-          ctrl.signal,
-        ).then((q) => {
-          if (ctrl.signal.aborted) return; // a newer row superseded this fetch
-          // On an unreachable/failed provider, resolve to an explicit
-          // reachable:false so the honest "data unavailable" state renders —
-          // never leave a stale quote standing (§7).
-          const quote = q ?? { market, symbol, price: null, changePct: null, spark: [], reachable: false };
-          previewCache.current.set(activeKey, quote);
-          setPreview(quote);
-        });
-      }, QUOTE_DEBOUNCE_MS);
-      return () => {
-        ctrl.abort();
-        window.clearTimeout(t);
-      };
-    }, [open, activeKey]);
+    }, [open, pickingVenue, active, rows, previewQuotes]);
 
     const close = useCallback(() => {
       setOpen(false);
@@ -530,10 +519,12 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
       listRef.current?.querySelector(`#sympal-opt-${active}`)?.scrollIntoView({ block: 'nearest' });
     }, [active, open]);
 
-    // The mover quote is already in hand when the row is one of the day's movers;
-    // prefer it (it updates with each /api/movers answer) over the fetched copy.
-    const shownPreview = activeRow?.quote ?? preview;
+    const shownPreview = activeKey ? previewQuotes.get(activeKey) : undefined;
     const previewDir = shownPreview ? sparkDirection(shownPreview.spark) : 0;
+    const previewDate = shownPreview?.asOf ? new Date(shownPreview.asOf / 1e6) : null;
+    const previewAsOf = previewDate && Number.isFinite(previewDate.getTime())
+      ? previewDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : null;
     const scopeLabel = scopeOption?.label ?? scope;
     const scopeDepth = scopeOption?.depth ? scopeOption.depth.toUpperCase() : '';
     const placeholder = pickingVenue
@@ -856,7 +847,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
                           </svg>
                         ) : (
                           <div className="sympal__pv-note">
-                            {shownPreview?.reachable === false ? 'data unavailable' : 'no preview'}
+                            {shownPreview?.reachable === false ? 'data unavailable' : 'loading preview…'}
                           </div>
                         )}
                         <div className="sympal__pv-caps">
@@ -867,6 +858,7 @@ export const SymbolSearch = forwardRef<SymbolSearchHandle, SymbolSearchProps>(
                           ))}
                         </div>
                         {shownPreview?.stale && <div className="sympal__pv-stale">stale — market closed or last known</div>}
+                        {previewAsOf && <div className="sympal__pv-note">As of {previewAsOf}</div>}
                       </>
                     ) : (
                       <div className="sympal__pv-note">
