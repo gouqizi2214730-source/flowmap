@@ -12,6 +12,8 @@ import re
 import shutil
 import sys
 
+sys.stdout.reconfigure(encoding='utf-8')
+sys.stderr.reconfigure(encoding='utf-8')
 HERE = pathlib.Path(__file__).resolve().parent
 root = pathlib.Path(sys.argv[1]).resolve()
 version, zh_repo = sys.argv[2], sys.argv[3]
