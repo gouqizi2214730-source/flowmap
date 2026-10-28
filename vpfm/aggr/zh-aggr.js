@@ -133,7 +133,23 @@
     '💡 Stuck here ?': '💡 卡在这里了？', 'Never see again': '不再显示', 'Next': '下一步', 'Submit': '提交', 'Open': '打开',
     'Or': '或', 'Thank you': '谢谢', 'Show preview': '显示预览', 'Default color': '默认颜色', 'Save color': '保存颜色',
     'Transparent': '透明', 'Rotate': '旋转', 'Color space thumb': '色域滑块',
+    // 脚本里拼出来的提示
+    'Show more': '显示更多', 'Show less': '收起', 'Accept and Proceed': '同意并继续',
+    'There is no current workspace': '当前没有工作区', 'This action will override ALL your aggr data.': '这个操作会覆盖你所有的 aggr 数据。',
+    'Please remove one or more existing panes to create space before adding a new pane': '请先删掉一个或几个面板，腾出位置再添加新面板',
+    'Determine how loud it should be (0 to 1 to avoid saturation)': '音量大小（0 到 1，避免失真）',
+    'Direct link to song (.mp3, .wav, .ogg) or name of already imported file': '音频文件直链（.mp3、.wav、.ogg）或已导入文件的名称',
+    'Duration of the IN transition (in seconds, default is 0)': '淡入时长（秒，默认 0）',
+    'Duration of the OUT transition (in seconds, default is 1)': '淡出时长（秒，默认 1）',
+    'Final gain (after fadeOut)': '最终增益（淡出之后）', 'Initial gain (before fadeIn)': '初始增益（淡入之前）',
+    'Hold the note for n seconds (default 0)': '音符保持 n 秒（默认 0）',
+    'Offset the start of the song at second n (to play only a part of it)': '从第 n 秒开始播放（只放其中一段）',
+    'Type of wave used for the note (can be triangle, square, sawtooth, sin etc)': '音符的波形（triangle、square、sawtooth、sin 等）',
+    'Wait n seconds before play the note': '等 n 秒再播放', 'Aggr server seems down 💀': 'aggr 服务器连不上 💀',
+    'quote currency': '计价币', 'base currency': '基础币', 'DONATE': '捐助', 'Price': '价格', 'Volume': '成交量',
+    'Go fullscreen': '全屏', 'Exit fullscreen': '退出全屏',
   };
+  var UNIT = { s: '秒', m: '分钟', h: '小时', d: '天', w: '周', mo: '个月', y: '年' };
 
   // 动态拼接的句子
   var PATTERNS = [
@@ -147,16 +163,38 @@
     [/^Unrecognized pane type "(.+)"$/, '无法识别的面板类型“$1”'],
     [/^matching "(.+)"$/, '匹配“$1”'],
     [/^Last used : (.+)$/, '上次使用：$1'],
+    [/^Waiting for trades >\s*(.+)$/, '等待大于 $1 的成交'],
+    [/^Waiting for liquidations >\s*(.+)$/, '等待大于 $1 的爆仓'],
+    [/^Failed to format (.+)'s products$/, '整理 $1 的交易对列表失败'],
+    [/^Reconnecting (.+)$/, '正在重连 $1'],
+    [/^Deleted indicator (.+)$/, '已删除指标 $1'],
+    [/^Duplicated pane (.+)$/, '已复制面板 $1'],
+    [/^Saved indicator (.+)$/, '已保存指标 $1'],
+    [/^Imported workspace (.+)$/, '已导入工作区 $1'],
+    [/^Imported sound (.+)$/, '已导入声音 $1'],
+    [/^Imported (.+) as preset for (.+)$/, '已把 $1 导入为 $2 的预设'],
+    [/^Workspace "(.+)" already exists$/, '工作区“$1”已存在'],
+    [/^This preset "(.+)" already exists\.$/, '预设“$1”已存在。'],
+    [/^Pane (.+) doesn't exists$/, '面板 $1 不存在'],
+    [/^Indicator (.+) doesn't exist in your library, nothing to rollback to\.$/, '库里没有指标 $1，无法回退。'],
+    [/^Failed to load sound buffer (.+)$/, '加载声音 $1 失败'],
+    [/^Please check that (.+) audio script is syntactically correct\.$/, '请检查 $1 的声音脚本语法是否正确。'],
+    [/^Preset doesn't match with pane type \((.+) is not (.+)\)$/, '预设和面板类型不匹配（$1 不是 $2）'],
+    [/^(\d+)\s*ms aggregation$/, '$1ms 聚合'],
+    [/^created (\d+)\s*(s|m|h|d|w|mo|y) ago$/, function (_, n, u) { return '创建于 ' + n + ' ' + UNIT[u] + '前'; }],
+    [/^(\d+)\s*(s|m|h|d|w|mo|y) ago$/, function (_, n, u) { return n + ' ' + UNIT[u] + '前'; }],
+    [/^Removed (.+)$/, '已删除 $1'],
   ];
 
-  var SKIP = 'SCRIPT,STYLE,TEXTAREA,CODE,PRE';
-  var ATTRS = ['title', 'placeholder', 'aria-label', 'alt', 'data-tippy-content'];
+  var SKIP = { SCRIPT: 1, STYLE: 1, TEXTAREA: 1, CODE: 1, PRE: 1 };
+  // on / off：aggr 的开关按钮用 CSS 把这两个属性的值显示成文字
+  var ATTRS = ['title', 'placeholder', 'aria-label', 'alt', 'data-tippy-content', 'on', 'off'];
   var LOWER = {};
   for (var k in EXACT) if (Object.prototype.hasOwnProperty.call(EXACT, k)) LOWER[k.toLowerCase()] = EXACT[k];
 
   function translateText(s) {
     if (!s) return null;
-    var t = s.trim();
+    var t = s.trim().replace(/\u00a0/g, ' '); // aggr 常用 &nbsp; 连接数字和单位
     if (!t || t.length > 300) return null;
     var hit = EXACT[t] || LOWER[t.toLowerCase()];
     if (!hit) {
@@ -172,11 +210,11 @@
   function doNode(node) {
     if (node.nodeType === 3) {
       var p = node.parentElement;
-      if (!p || SKIP.indexOf(p.tagName) >= 0 || inEditor(p)) return;
+      if (!p || SKIP[p.tagName] || inEditor(p)) return;
       var r = translateText(node.nodeValue);
       if (r !== null) node.nodeValue = r;
     } else if (node.nodeType === 1) {
-      if (SKIP.indexOf(node.tagName) >= 0 || inEditor(node)) return;
+      if (SKIP[node.tagName] || inEditor(node)) return;
       for (var i = 0; i < ATTRS.length; i++) {
         var v = node.getAttribute(ATTRS[i]);
         if (v) { var r2 = translateText(v); if (r2 !== null) node.setAttribute(ATTRS[i], r2.trim()); }

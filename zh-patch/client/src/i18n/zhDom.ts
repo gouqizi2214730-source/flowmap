@@ -387,6 +387,17 @@ const EXACT: Record<string, string> = {
     '快照深度 — 每次整本重新读取订单簿（ccxt 轮询），不是交易所增量推送',
   'top of book only — the real best bid/ask, extruded into a band; there is no depth ladder behind it':
     '只有盘口 — 真实的最优买卖价被拉成一条带；后面没有深度阶梯',
+  // VPFM 构建里补充的连接状态文字
+  'reconnecting': '重新连接中',
+  'RECONNECTING': '重新连接中',
+  'reconnecting · degraded': '重新连接中（数据降级）',
+  'disconnected': '已断开',
+  'connecting': '连接中',
+  'STALE': '过期',
+  'LIVE': '实时',
+  'TAPE': '逐笔',
+  'N/A': '无',
+  'waiting for the feed —': '等待数据源 —',
 };
 
 /** 带变量的句子：英文正则 → 中文模板（$1、$2 为捕获组）。 */
