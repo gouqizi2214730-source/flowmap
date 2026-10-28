@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>期权 GEX</title>
+<link rel="stylesheet" href="../common/base.css">
+<link rel="stylesheet" href="../common/module.css">
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>期权 GEX</h1>
+  <div class="seg" id="cur" role="group" aria-label="币种"><button type="button" data-v="BTC">BTC</button><button type="button" data-v="ETH">ETH</button></div>
+  <div class="exp-pick">
+    <span class="dim">到期</span>
+    <div class="seg" id="expMode" role="group" aria-label="到期范围">
+      <button type="button" data-v="all">全部</button><button type="button" data-v="7">7 天内</button><button type="button" data-v="30">30 天内</button><button type="button" data-v="one">单个</button>
+    </div>
+    <select class="field" id="expOne" aria-label="选择到期日" hidden></select>
+  </div>
+  <div class="spacer"></div>
+  <span class="status" id="status">加载中…</span>
+</header>
+
+<div class="scroll" id="scroll">
+  <section class="kpis kpi-strip" id="kpis" aria-label="关键指标"></section>
+
+  <div class="og">
+    <section class="pane gex" style="height:390px">
+      <div class="pane-head">
+        <h3 id="gexTitle">各行权价 Gamma 敞口</h3>
+        <div class="seg small" id="gexMode"><button type="button" data-v="net">净 GEX</button><button type="button" data-v="split">看涨/看跌</button><button type="button" data-v="oi">持仓量</button></div>
+        <div class="seg small" id="range"><button type="button" data-v="0.1">±10%</button><button type="button" data-v="0.2">±20%</button><button type="button" data-v="0.35">±35%</button></div>
+        <span class="tip-i" title="GEX = Gamma × 持仓量 × 价格² × 1%，表示价格每变动 1%，做市商为对冲需要买卖的金额。按常见假设：做市商持有客户卖出的看涨（正 Gamma）、卖给客户的看跌（负 Gamma）。正 Gamma 区间做市商高抛低吸、行情偏稳；负 Gamma 区间追涨杀跌、波动放大。">?</span>
+      </div>
+      <div class="pane-body" id="gexChart"></div>
+    </section>
+    <section class="pane profile" style="height:390px">
+      <div class="pane-head"><h3>总 GEX 随价格变化</h3><span class="tip-i" title="假设隐含波动率不变，把标的价格平移后重新计算全部期权的 GEX。曲线穿过零的位置就是 Gamma 翻转价：价格在它上方时整体正 Gamma，下方时负 Gamma。">?</span></div>
+      <div class="pane-body" id="profileChart"></div>
+    </section>
+    <section class="pane smile" style="height:300px">
+      <div class="pane-head"><h3>波动率微笑</h3><select class="field small" id="smileExp" aria-label="微笑曲线的到期日"></select><div class="legend" id="lg-smile"></div></div>
+      <div class="pane-body" id="smileChart"></div>
+    </section>
+    <section class="pane term" style="height:300px">
+      <div class="pane-head"><h3>期限结构</h3><div class="legend" id="lg-term"></div><span class="tip-i" title="ATM IV：最接近远期价格的行权价的隐含波动率。25Δ 风险逆转（RR）= 25 Delta 看涨 IV − 25 Delta 看跌 IV，正值说明市场更愿意为上涨付溢价。">?</span></div>
+      <div class="pane-body" id="termChart"></div>
+    </section>
+  </div>
+
+  <div class="og2">
+    <section class="block">
+      <div class="block-head"><h2>按到期日</h2><span class="dim">最大痛点 = 让期权买方到期总收益最小的结算价</span></div>
+      <div class="table-wrap"><table class="grid" id="expTable"><thead><tr>
+        <th>到期日</th><th>剩余</th><th>看涨持仓</th><th>看跌持仓</th><th>持仓 PCR</th><th>最大痛点</th><th>ATM IV</th><th>25Δ RR</th><th>25Δ 蝶式</th><th>预期波动 ±1σ</th>
+      </tr></thead><tbody></tbody></table></div>
+    </section>
+    <section class="block">
+      <div class="block-head"><h2>大额期权成交</h2>
+        <select class="field small" id="bigMin" aria-label="最小名义金额"><option value="100000">≥ $10万</option><option value="500000">≥ $50万</option><option value="1000000">≥ $100万</option><option value="5000000">≥ $500万</option></select>
+      </div>
+      <ol class="trades" id="trades"></ol>
+    </section>
+  </div>
+</div>
+
+<script src="../common/vpfm.js"></script>
+<script src="../common/plot.js"></script>
+<script src="options.js"></script>
+</body>
+</html>

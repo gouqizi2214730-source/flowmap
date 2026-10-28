@@ -1,0 +1,6 @@
+/* aggr 原本从 Google Fonts 加载这两款字体；VPFM 改为本地文件，离线也能正常显示 */
+@font-face { font-family: 'Barlow Semi Condensed'; font-weight: 400; font-display: swap; src: url(fonts/barlow-semi-condensed-latin-400-normal.woff2) format('woff2'); }
+@font-face { font-family: 'Barlow Semi Condensed'; font-weight: 700; font-display: swap; src: url(fonts/barlow-semi-condensed-latin-700-normal.woff2) format('woff2'); }
+@font-face { font-family: 'Spline Sans Mono'; font-weight: 400; font-display: swap; src: url(fonts/spline-sans-mono-latin-400-normal.woff2) format('woff2'); }
+@font-face { font-family: 'Spline Sans Mono'; font-weight: 500; font-display: swap; src: url(fonts/spline-sans-mono-latin-500-normal.woff2) format('woff2'); }
+@font-face { font-family: 'Spline Sans Mono'; font-weight: 600; font-display: swap; src: url(fonts/spline-sans-mono-latin-600-normal.woff2) format('woff2'); }

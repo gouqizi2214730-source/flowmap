@@ -1,0 +1,54 @@
+.kpi-strip { padding: 10px 14px 10px; border-bottom: 1px solid var(--line); }
+.kpi .v .tag { font: 500 11px var(--font-ui); color: var(--text-faint); margin-left: 6px; }
+
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; align-items: start; }
+.charts { min-width: 0; border-right: 1px solid var(--line); }
+
+/* 实时爆仓 */
+.liqs {
+  position: sticky; top: 0; height: calc(100vh - 49px); display: flex; flex-direction: column; min-height: 0;
+  background: var(--bg);
+}
+.liq-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px 6px; }
+.liq-head h3 { margin: 0 auto 0 0; font-size: 12.5px; font-weight: 600; }
+.liq-head .field { height: 26px; font-size: 12px; }
+.liq-feeds { display: flex; gap: 10px; padding: 0 12px 6px; font-size: 11px; color: var(--text-faint); }
+.liq-feeds span::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 4px; background: var(--text-faint); vertical-align: 1px; }
+.liq-feeds span.open::before { background: var(--ok); }
+.liq-feeds span.retry::before { background: var(--bad); }
+.liq-sum { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 2px 12px 6px; }
+.liq-sum div { padding: 6px 8px; border-radius: var(--r); background: var(--bg-raised); }
+.liq-sum .k { font-size: 11px; color: var(--text-faint); }
+.liq-sum .v { font: 600 16px/1.2 var(--font-num); font-variant-numeric: tabular-nums; }
+.liq-bars { display: block; width: calc(100% - 24px); margin: 0 12px 6px; height: 84px; }
+.liq-list { list-style: none; margin: 0; padding: 0 0 12px; overflow-y: auto; flex: 1; min-height: 0; border-top: 1px solid var(--line); }
+.liq-list li {
+  display: grid; grid-template-columns: 52px 46px 1fr auto; gap: 6px; align-items: center;
+  padding: 4px 12px; border-bottom: 1px solid rgba(27, 38, 54, .6); font-size: 12px;
+}
+.liq-list li.long { box-shadow: inset 3px 0 0 var(--down); }
+.liq-list li.short { box-shadow: inset 3px 0 0 var(--up); }
+.liq-list li.huge { background: rgba(242, 179, 61, .07); }
+.liq-list .t { color: var(--text-faint); font-family: var(--font-num); }
+.liq-list .ex { font-size: 10.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.liq-list .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.liq-list .what b { font-family: var(--font-num); font-weight: 600; }
+.liq-list .usd { font: 600 13px var(--font-num); font-variant-numeric: tabular-nums; }
+.liq-list .long .usd { color: var(--down); }
+.liq-list .short .usd { color: var(--up); }
+.liq-empty { color: var(--text-faint); padding: 18px 12px; font-size: 12px; }
+
+/* 资金费率表 */
+.board { border-top: 1px solid var(--line); }
+.board-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding: 12px 14px 8px; }
+.board-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
+.board-wrap { overflow-x: auto; padding: 0 0 30px; }
+#board td.f { min-width: 92px; }
+#board td.f span { display: inline-block; padding: 1px 6px; border-radius: 3px; }
+#board td.miss { color: var(--text-faint); }
+
+@media (max-width: 980px) {
+  .layout { grid-template-columns: 1fr; }
+  .liqs { position: static; height: 520px; border-top: 1px solid var(--line); }
+  .charts { border-right: 0; }
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>结构分析</title>
+<link rel="stylesheet" href="../common/base.css">
+<link rel="stylesheet" href="../common/module.css">
+<link rel="stylesheet" href="structure.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>结构分析</h1>
+  <div class="coin-pick">
+    <input class="field" id="coin" list="coinList" spellcheck="false" autocomplete="off" aria-label="币种" title="输入币种后回车，例如 BTC、ETH、SOL">
+    <datalist id="coinList"></datalist>
+    <div class="chips" id="quick"></div>
+  </div>
+  <div class="seg" id="tf" role="group" aria-label="周期"></div>
+  <div class="seg" id="mkt" role="group" aria-label="市场"><button type="button" data-v="futures">合约</button><button type="button" data-v="spot">现货</button></div>
+  <div class="spacer"></div>
+  <span class="status" id="status">加载中…</span>
+</header>
+
+<div class="st-main">
+  <section class="st-chart">
+    <div class="st-legend" id="legend"></div>
+    <div class="st-canvas" id="chart"></div>
+    <div class="pane-msg" id="chartMsg">加载中…</div>
+  </section>
+  <aside class="st-side" aria-label="图层与信号">
+    <div class="side-tabs seg" id="sideTabs"><button type="button" data-v="layers">图层</button><button type="button" data-v="now">当前</button><button type="button" data-v="stats">统计</button></div>
+    <div class="side-body" id="side-layers"></div>
+    <div class="side-body" id="side-now" hidden></div>
+    <div class="side-body" id="side-stats" hidden></div>
+  </aside>
+</div>
+
+<script src="../vendor/lightweight-charts.standalone.production.js"></script>
+<script src="../common/vpfm.js"></script>
+<script src="smc.js"></script>
+<script src="structure.js"></script>
+</body>
+</html>

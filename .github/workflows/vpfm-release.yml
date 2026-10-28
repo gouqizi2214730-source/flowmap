@@ -1,0 +1,275 @@
+name: VPFM：同步上游并发布
+
+# 每天检查三个上游项目有没有新提交：
+#   FlowMap（深度热力图 + 桌面外壳 + 内置服务器）nazmiefearmutcu/flowmap
+#   aggr（聚合成交 / 爆仓）Tucsky/aggr
+#   Liquidity Mapper Fast（流动性地图 / 足迹图）liquiditymapperfast/liquiditymapperfast.github.io
+# 有更新（或本仓库的 vpfm/、zh-patch/ 有改动）就拉最新源码、套上汉化和 VPFM 补丁、
+# 编译 Windows 安装包并发布 Release。已安装的 VPFM 会读取本仓库 vpfm-v 开头的最新版本，
+# 校验 SHA-256 后自动安装。
+on:
+  schedule:
+    - cron: '37 1 * * *'   # 每天 UTC 01:37（北京时间 09:37）
+  workflow_dispatch:
+    inputs:
+      force:
+        description: '即使上游没有更新也重新构建'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ['vpfm/**', 'zh-patch/**', '.github/workflows/vpfm-release.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vpfm-release
+  cancel-in-progress: false
+
+env:
+  FLOWMAP: nazmiefearmutcu/flowmap
+  AGGR: Tucsky/aggr
+  LMAP: liquiditymapperfast/liquiditymapperfast.github.io
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      build: ${{ steps.decide.outputs.build }}
+      fm: ${{ steps.decide.outputs.fm }}
+      ag: ${{ steps.decide.outputs.ag }}
+      lm: ${{ steps.decide.outputs.lm }}
+      key: ${{ steps.decide.outputs.key }}
+      version: ${{ steps.decide.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: 比较上游最新提交与上次发布
+        id: decide
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          FM=$(git ls-remote "https://github.com/$FLOWMAP.git" HEAD | cut -f1)
+          AG=$(git ls-remote "https://github.com/$AGGR.git" HEAD | cut -f1)
+          LM=$(git ls-remote "https://github.com/$LMAP.git" HEAD | cut -f1)
+          PATCH=$(find vpfm zh-patch .github/workflows/vpfm-release.yml -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-10)
+          KEY="${FM:0:10}-${AG:0:10}-${LM:0:10}-$PATCH"
+          LAST_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 60 --json tagName -q '.[].tagName' 2>/dev/null | grep '^vpfm-v' | head -1 || true)
+          LAST=""
+          if [ -n "$LAST_TAG" ]; then
+            LAST=$(gh release view "$LAST_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body | sed -n 's/.*build-key: \([0-9a-f-]*\).*/\1/p' | head -1 || true)
+          fi
+          echo "flowmap=$FM aggr=$AG lmap=$LM patch=$PATCH last=$LAST ($LAST_TAG)"
+          BUILD=true
+          if [ "$LAST" = "$KEY" ] && [ "$FORCE" != "true" ]; then BUILD=false; fi
+          VERSION="2.0.$GITHUB_RUN_NUMBER"
+          {
+            echo "build=$BUILD"; echo "fm=$FM"; echo "ag=$AG"; echo "lm=$LM"; echo "key=$KEY"; echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "### 构建：$BUILD（版本 $VERSION）" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      VERSION: ${{ needs.check.outputs.version }}
+      PYTHONUTF8: '1'
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fork
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.FLOWMAP }}
+          ref: ${{ needs.check.outputs.fm }}
+          path: flowmap
+          fetch-depth: 30
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AGGR }}
+          ref: ${{ needs.check.outputs.ag }}
+          path: aggr
+          fetch-depth: 30
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.LMAP }}
+          ref: ${{ needs.check.outputs.lm }}
+          path: lmap
+          fetch-depth: 30
+
+      - name: 套用汉化与 VPFM 补丁
+        run: |
+          set -o pipefail
+          python fork/zh-patch/apply.py flowmap "$VERSION" "$GITHUB_REPOSITORY" 2>&1 | tee -a build.log
+          python fork/vpfm/apply_vpfm.py flowmap "$VERSION" "$GITHUB_REPOSITORY" 2>&1 | tee -a build.log
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: flowmap/app/src-tauri -> target
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: astral-sh/setup-uv@v5
+
+      - name: 编译深度热力图（FlowMap 前端）
+        working-directory: flowmap/client
+        run: |
+          set -o pipefail
+          { npm ci && npx vite build --base=/wb/flowmap/; } 2>&1 | tee -a ../../build.log
+
+      - name: 编译聚合成交（aggr）
+        working-directory: aggr
+        run: |
+          set -o pipefail
+          # aggr 依赖的图表库写的是 git+ssh 地址，构建机上改用 https 拉取
+          git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
+          git config --global --add url."https://github.com/".insteadOf "git@github.com:"
+          # 历史数据服务、社区指标库、推送提醒都是作者的在线服务：关掉；跨域请求走 VPFM 本地转发
+          printf '%s\n' 'VITE_APP_PROXY_URL=/api/wb/proxy/' 'VITE_APP_API_URL=' 'VITE_APP_LIB_URL=' \
+            'VITE_APP_PUBLIC_VAPID_KEY=' 'VITE_APP_BASE_PATH=/wb/aggr/' > .env.production.local
+          { { npm ci --no-audit --no-fund || npm install --no-audit --no-fund; } && npx vite build --base=/wb/aggr/; } 2>&1 | tee -a ../build.log
+          python ../fork/vpfm/aggr/patch_aggr.py dist 2>&1 | tee -a ../build.log
+
+      - name: 编译流动性地图（Liquidity Mapper Fast）
+        working-directory: lmap
+        env:
+          HLM_SOURCEMAP: 'off'
+        run: |
+          set -o pipefail
+          { npm ci --no-audit --no-fund && npx vite build --config vite.config.mts; } 2>&1 | tee -a ../build.log
+
+      - name: 组装界面文件（wb）
+        env:
+          FM: ${{ needs.check.outputs.fm }}
+          AG: ${{ needs.check.outputs.ag }}
+          LM: ${{ needs.check.outputs.lm }}
+        run: |
+          set -euo pipefail
+          WB=flowmap/app/src-tauri/resources/wb
+          rm -rf "$WB"; mkdir -p "$WB"
+          cp -r fork/vpfm/web/. "$WB/"
+          cp -r flowmap/client/dist "$WB/flowmap"
+          cp -r aggr/dist "$WB/aggr"
+          cp -r lmap/dist "$WB/lmap"
+          mkdir -p "$WB/licenses"
+          cp flowmap/LICENSE "$WB/licenses/FlowMap-Apache-2.0.txt"
+          cp aggr/LICENSE "$WB/licenses/aggr-GPL-3.0.txt"
+          cp lmap/LICENSE "$WB/licenses/LiquidityMapperFast-MIT.txt"
+          d() { git -C "$1" log -1 --format=%cs; }
+          python - "$WB/version.json" "$VERSION" "$FM" "$(d flowmap)" "$AG" "$(d aggr)" "$LM" "$(d lmap)" <<'EOF'
+          import json, sys, datetime
+          out, ver, fm, fmd, ag, agd, lm, lmd = sys.argv[1:]
+          json.dump({"version": ver, "built": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "upstreams": {"flowmap": {"sha": fm, "date": fmd}, "aggr": {"sha": ag, "date": agd}, "lmap": {"sha": lm, "date": lmd}}},
+                    open(out, "w", encoding="utf-8"), ensure_ascii=False)
+          EOF
+          du -sh "$WB" "$WB"/* | tee -a build.log
+
+      - name: 打包内置 Python 运行时
+        working-directory: flowmap
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          bash app/scripts/bundle-python.sh x86_64-pc-windows-msvc 2>&1 | tee -a ../build.log
+
+      - name: 生成图标并编译安装包
+        working-directory: flowmap/app/src-tauri
+        run: |
+          set -o pipefail
+          npx --yes @tauri-apps/cli@2 icon ../../../fork/vpfm/icons/icon-1024.png 2>&1 | tail -5 | tee -a ../../../build.log
+          npx --yes @tauri-apps/cli@2 build --bundles nsis 2>&1 | tee -a ../../../build.log
+
+      - name: 冒烟测试内置服务器与界面
+        working-directory: flowmap
+        run: |
+          set -euo pipefail
+          ROOT="$PWD"
+          PY="$ROOT/app/src-tauri/resources/pyruntime/python.exe"
+          "$PY" app/scripts/import-gate.py
+          PORT=8799; DATA_DIR="$(mktemp -d)"
+          # 内置服务器的工作目录就是数据目录（和桌面版一致）
+          pushd "$DATA_DIR" >/dev/null
+          FLOWMAP_HOST=127.0.0.1 FLOWMAP_PORT="$PORT" FLOWMAP_RECORDING_ENABLED=0 FLOWMAP_DATA_DIR="$DATA_DIR" "$PY" -m flowmap_server &
+          SRV=$!
+          popd >/dev/null
+          ok=0
+          for _ in $(seq 1 90); do
+            if curl -fsS "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"status":"ok"'; then ok=1; break; fi
+            sleep 1
+          done
+          fail() { echo "冒烟测试失败：$1" | tee -a ../build.log; kill "$SRV" 2>/dev/null || true; exit 1; }
+          [ "$ok" = 1 ] || fail "服务器健康检查超时"
+          B="http://127.0.0.1:$PORT"
+          curl -fsS "$B/wb/" -o page.html || fail "/wb/ 打不开"
+          grep -F 'VPFM' page.html >/dev/null || fail "/wb/ 外壳页面内容不对"
+          for m in flowmap aggr lmap derivs options structure tools; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' "$B/wb/$m/")
+            [ "$code" = 200 ] || fail "/wb/$m/ 返回 $code"
+          done
+          curl -fsS "$B/wb/aggr/" -o page.html || fail "/wb/aggr/ 打不开"
+          grep -F 'zh-aggr.js' page.html >/dev/null || fail "aggr 没有加上中文脚本"
+          ct=$(curl -sI "$B/wb/shell.js" | tr -d '\r' | grep -i '^content-type:' | cut -d' ' -f2- || true)
+          echo "shell.js content-type: $ct" | tee -a ../build.log
+          case "$ct" in *javascript*) ;; *) fail "脚本的 MIME 类型不对：$ct" ;; esac
+          curl -fsS "$B/api/wb/info" -o info.json || fail "/api/wb/info 打不开"
+          cat info.json | tee -a ../build.log
+          grep -F '"app":"VPFM"' info.json >/dev/null || fail "/api/wb/info 内容不对"
+          echo | tee -a ../build.log
+          # 转发接口：构建机在美国，部分交易所会拒绝，只记录不判失败
+          for u in "https://www.deribit.com/api/v2/public/get_time" "https://www.okx.com/api/v5/public/time" "https://api.bybit.com/v5/market/time"; do
+            echo "proxy $u -> $(curl -s -o /dev/null -w '%{http_code}' "$B/api/wb/proxy/$u")" | tee -a ../build.log
+          done
+          kill "$SRV" 2>/dev/null || true
+          echo "冒烟测试通过" | tee -a ../build.log
+
+      - name: 发布 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          KEY: ${{ needs.check.outputs.key }}
+        run: |
+          set -euo pipefail
+          B=flowmap/app/src-tauri/target/release/bundle/nsis
+          EXE=$(ls "$B"/*-setup.exe | head -1)
+          NAME="VPFM_${VERSION}_x64-setup.exe"
+          mkdir -p out
+          cp "$EXE" "out/$NAME"
+          (cd out && sha256sum "$NAME" > "$NAME.sha256")
+          up() { echo "- $1 \`$(git -C "$2" log -1 --format=%h)\`（$(git -C "$2" log -1 --format=%cs)）：$(git -C "$2" log -3 --format=%s | awk 'NR>1{printf "；"} {printf "%s", $0}')"; }
+          {
+            echo "包含的上游版本："
+            up "FlowMap 深度热力图" flowmap
+            up "aggr 聚合成交" aggr
+            up "Liquidity Mapper 流动性地图" lmap
+            echo
+            echo "安装包约 $(( $(stat -c %s "out/$NAME") / 1048576 )) MB，已安装的 VPFM 会自动提示更新。"
+            echo
+            echo "<!-- build-key: $KEY -->"
+          } > out/notes.md
+          gh release create "vpfm-v$VERSION" "out/$NAME" "out/$NAME.sha256" \
+            --repo "$GITHUB_REPOSITORY" --title "VPFM $VERSION" --notes-file out/notes.md --latest
+          echo "已发布 vpfm-v$VERSION" | tee -a build.log
+
+      - name: 把构建日志保存到 vpfm-build-log 分支
+        if: always()
+        run: |
+          LOGF="$GITHUB_WORKSPACE/build.log"
+          STATUS="${{ job.status }}"
+          cd fork
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q --orphan vpfm-build-log
+          git rm -rfq . >/dev/null 2>&1 || true
+          if [ -f "$LOGF" ]; then tail -c 3000000 "$LOGF" > build.log; else echo "(无日志)" > build.log; fi
+          echo "$STATUS $VERSION run=$GITHUB_RUN_ID $(date -u +%FT%TZ)" > status.txt
+          git add build.log status.txt
+          git commit -qm "build log $VERSION ($STATUS)"
+          git push -qf origin vpfm-build-log

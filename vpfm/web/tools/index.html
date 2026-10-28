@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>工具箱</title>
+<link rel="stylesheet" href="../common/base.css">
+<link rel="stylesheet" href="../common/module.css">
+<link rel="stylesheet" href="tools.css">
+</head>
+<body>
+<header class="topbar"><h1>工具箱</h1><span class="dim">计算都在本机完成，输入会自动记住</span></header>
+<div class="scroll">
+  <div class="tools">
+    <section class="tool journal">
+      <div class="journal-mark" aria-hidden="true">复</div>
+      <div class="journal-body">
+        <h2>复盘本 FupanBook</h2>
+        <p class="dim">交易日志的中文桌面版：同步券商成交、盈亏日历、交易回放、每日复盘笔记和 AI 复盘。单独安装，数据保存在你自己的电脑上。</p>
+        <p class="journal-state" id="fbState">正在查找…</p>
+        <div class="row-btns">
+          <button class="btn primary" id="fbOpen" type="button" hidden>打开复盘本</button>
+          <button class="btn" id="fbGet" type="button" hidden>下载复盘本</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="tool" id="sizeTool">
+      <h2>仓位计算</h2>
+      <p class="dim">按止损距离和愿意承担的亏损，算出该开多大的仓位。</p>
+      <div class="form">
+        <label>账户资金（USDT）<input class="field num" data-k="bal" inputmode="decimal"></label>
+        <label>单笔风险 <span class="unit-switch seg"><button type="button" data-u="pct">%</button><button type="button" data-u="usd">USDT</button></span><input class="field num" data-k="risk" inputmode="decimal"></label>
+        <label>方向<span class="seg side"><button type="button" data-side="long">做多</button><button type="button" data-side="short">做空</button></span></label>
+        <label>开仓价<input class="field num" data-k="entry" inputmode="decimal"></label>
+        <label>止损价<input class="field num" data-k="stop" inputmode="decimal"></label>
+        <label>止盈价（可不填）<input class="field num" data-k="tp" inputmode="decimal"></label>
+        <label>手续费率（单边 %）<input class="field num" data-k="fee" inputmode="decimal"></label>
+      </div>
+      <div class="out" id="sizeOut"></div>
+    </section>
+
+    <section class="tool" id="liqTool">
+      <h2>强平价估算</h2>
+      <p class="dim">逐仓 USDT 永续的近似强平价（不含已实现盈亏和资金费）。</p>
+      <div class="form">
+        <label>方向<span class="seg side"><button type="button" data-side="long">做多</button><button type="button" data-side="short">做空</button></span></label>
+        <label>开仓价<input class="field num" data-k="entry" inputmode="decimal"></label>
+        <label>杠杆（倍）<input class="field num" data-k="lev" inputmode="decimal"></label>
+        <label>维持保证金率（%）<input class="field num" data-k="mmr" inputmode="decimal"></label>
+      </div>
+      <div class="out" id="liqOut"></div>
+    </section>
+
+    <section class="tool" id="fundTool">
+      <h2>资金费成本</h2>
+      <p class="dim">持仓期间要付（或收）的资金费。费率填当前或预期的每次结算费率。</p>
+      <div class="form">
+        <label>仓位名义价值（USDT）<input class="field num" data-k="notional" inputmode="decimal"></label>
+        <label>每次结算费率（%）<input class="field num" data-k="rate" inputmode="decimal"></label>
+        <label>结算间隔（小时）<input class="field num" data-k="every" inputmode="decimal"></label>
+        <label>打算持有（小时）<input class="field num" data-k="hours" inputmode="decimal"></label>
+      </div>
+      <div class="out" id="fundOut"></div>
+    </section>
+
+    <section class="tool" id="clockTool">
+      <h2>时段时钟</h2>
+      <p class="dim">按纽约时间划分的交易时段，换算成你电脑的本地时间。</p>
+      <div class="clock" id="clock"></div>
+    </section>
+  </div>
+</div>
+<script src="../common/vpfm.js"></script>
+<script src="../structure/smc.js"></script>
+<script src="tools.js"></script>
+</body>
+</html>

@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>VPFM</title>
+<link rel="icon" type="image/svg+xml" href="common/vpfm-mark.svg">
+<link rel="stylesheet" href="common/base.css">
+<link rel="stylesheet" href="shell.css">
+<script>try{var p=JSON.parse(localStorage.getItem('vpfm.prefs')||'{}');if(p.updown==='red-up')document.documentElement.dataset.updown='red-up'}catch(e){}</script>
+</head>
+<body>
+<nav class="rail" aria-label="模块">
+  <button class="brand" type="button" data-go="settings" title="VPFM 设置与关于">
+    <img src="common/vpfm-mark.svg" alt="VPFM" width="30" height="30">
+  </button>
+  <div class="rail-items" id="rail" role="tablist" aria-orientation="vertical"></div>
+  <div class="rail-foot">
+    <button type="button" class="link-state" id="linkState" data-go="settings" title="本地服务">
+      <i class="dot"></i><span id="linkText">连接中</span>
+    </button>
+    <button type="button" class="rail-item" id="settingsBtn" data-go="settings" title="设置（Ctrl+,）">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+      <span>设置</span>
+    </button>
+  </div>
+</nav>
+
+<main id="stage">
+  <div class="banner" id="banner" hidden></div>
+
+  <section class="settings" id="settings" hidden aria-labelledby="settingsTitle">
+    <div class="settings-inner">
+      <header class="set-head">
+        <img src="common/vpfm-mark.svg" alt="" width="44" height="44">
+        <div>
+          <h1 id="settingsTitle">VPFM</h1>
+          <p class="dim" id="verLine">读取版本信息…</p>
+        </div>
+      </header>
+
+      <section class="set-group">
+        <h2>网络代理</h2>
+        <p class="dim">网页里的实时连接跟随 Windows 系统代理；内置服务器（深度热力图的行情、数据转发、检查更新）按这里的设置走代理。</p>
+        <div class="set-row">
+          <label class="check"><input type="radio" name="proxyMode" value="system"> 跟随系统代理</label>
+          <label class="check"><input type="radio" name="proxyMode" value="custom"> 自定义</label>
+          <input class="field num" id="proxyInput" placeholder="http://127.0.0.1:7890" spellcheck="false" autocomplete="off">
+          <label class="check"><input type="radio" name="proxyMode" value="off"> 不用代理</label>
+          <button class="btn" id="proxySave" type="button">保存</button>
+        </div>
+        <p class="set-note" id="proxyNow"></p>
+      </section>
+
+      <section class="set-group">
+        <h2>界面</h2>
+        <div class="set-row">
+          <span class="set-label">涨跌颜色</span>
+          <div class="seg" id="updownSeg">
+            <button type="button" data-v="green-up">绿涨红跌</button>
+            <button type="button" data-v="red-up">红涨绿跌</button>
+          </div>
+          <span class="dim">作用于衍生品、期权、结构和工具箱</span>
+        </div>
+        <div class="set-row">
+          <span class="set-label">启动时打开</span>
+          <select class="field" id="startSel"></select>
+        </div>
+        <div class="set-row">
+          <span class="set-label">币种联动</span>
+          <label class="check"><input type="checkbox" id="linkChk"> 在聚合成交里点击交易对时，衍生品数据和结构分析跟着切换到这个币</label>
+        </div>
+        <div class="set-row">
+          <span class="set-label">省资源</span>
+          <label class="check"><input type="checkbox" id="saverChk"> 切到别的模块 5 分钟后，关闭后台的模块（再次打开会重新加载）</label>
+        </div>
+        <div class="set-row top">
+          <span class="set-label">左侧显示</span>
+          <div class="mod-list" id="modList"></div>
+        </div>
+      </section>
+
+      <section class="set-group">
+        <h2>更新</h2>
+        <p class="dim">启动后和每隔 6 小时会自动检查一次，有新版本会弹窗询问，确认后自动下载、校验、安装并重新打开。</p>
+        <div class="set-row">
+          <button class="btn primary" id="updateBtn" type="button">检查更新</button>
+          <span class="dim" id="buildLine"></span>
+        </div>
+        <div class="set-note" id="upstreams"></div>
+      </section>
+
+      <section class="set-group">
+        <h2>数据</h2>
+        <div class="set-row">
+          <button class="btn" id="openData" type="button">打开数据目录</button>
+          <span class="dim num" id="dataDir"></span>
+        </div>
+        <p class="dim">深度热力图的录制数据、软件设置和日志都在这里。各模块自己的布局和设置保存在软件内置的浏览器存储里。</p>
+      </section>
+
+      <section class="set-group">
+        <h2>快捷键</h2>
+        <dl class="keys" id="keys"></dl>
+      </section>
+
+      <section class="set-group">
+        <h2>组成部分</h2>
+        <p class="dim">VPFM 把下面这些开源项目合进一个窗口，行情全部由本机直接从交易所获取，不经过任何第三方网站。</p>
+        <ul class="credits" id="credits"></ul>
+      </section>
+    </div>
+  </section>
+</main>
+
+<div class="vp-toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script src="shell.js"></script>
+</body>
+</html>

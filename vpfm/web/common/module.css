@@ -1,0 +1,93 @@
+/* 自研模块的公共布局：顶栏、指标条、图表面板、表格、加载/出错状态 */
+body { display: flex; flex-direction: column; overflow: hidden; }
+.topbar {
+  flex: none; display: flex; align-items: center; gap: 14px 18px; flex-wrap: wrap;
+  min-height: 48px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--bg);
+}
+.topbar h1 { margin: 0; font-size: 15px; font-weight: 600; white-space: nowrap; }
+.topbar .spacer { flex: 1; }
+.status { color: var(--text-faint); font-size: 12px; white-space: nowrap; }
+.status.bad { color: var(--bad); }
+.scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+
+/* 币种选择 */
+.coin-pick { display: inline-flex; align-items: center; gap: 6px; }
+.coin-pick input { width: 92px; text-transform: uppercase; font-family: var(--font-num); font-weight: 600; font-size: 15px; }
+.chips { display: inline-flex; gap: 4px; }
+.chip {
+  height: 24px; padding: 0 8px; border-radius: 12px; border: 1px solid var(--line-strong);
+  background: transparent; color: var(--text-dim); cursor: pointer; font-family: var(--font-num); font-weight: 600;
+}
+.chip:hover { color: var(--text); border-color: var(--text-faint); }
+.chip[aria-pressed="true"] { color: var(--amber); border-color: var(--amber-dim); background: rgba(242, 179, 61, .08); }
+
+/* 指标条 */
+.kpis { display: flex; flex-wrap: wrap; gap: 4px 22px; align-items: flex-end; }
+.kpi { display: flex; flex-direction: column; min-width: 0; }
+.kpi .k { font-size: 11px; color: var(--text-faint); white-space: nowrap; }
+.kpi .v { font: 600 17px/1.15 var(--font-num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.kpi .v small { font-size: 12px; font-weight: 500; margin-left: 4px; }
+.kpi.big .v { font-size: 21px; }
+
+/* 图表面板 */
+.pane { position: relative; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+.pane-head { display: flex; align-items: center; gap: 12px; padding: 6px 12px 2px; min-height: 28px; }
+.pane-head h3 { margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.pane-head .note { color: var(--text-faint); font-size: 11.5px; }
+.legend { display: flex; flex-wrap: wrap; gap: 2px 12px; font-size: 11.5px; color: var(--text-dim); }
+.legend span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.legend i { display: inline-block; width: 10px; height: 3px; border-radius: 2px; }
+.legend b { font: 600 12px var(--font-num); color: var(--text); font-variant-numeric: tabular-nums; }
+.pane-body { position: relative; flex: 1; min-height: 0; }
+.pane-msg {
+  position: absolute; inset: 0; display: grid; place-items: center; z-index: 3;
+  color: var(--text-faint); font-size: 12.5px; text-align: center; padding: 10px; pointer-events: none;
+}
+.pane-msg.err { color: #ffb3c1; pointer-events: auto; }
+.pane-msg .btn { margin-top: 8px; }
+.pane-msg[hidden] { display: none; }
+
+/* 表格 */
+table.grid { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+table.grid th {
+  position: sticky; top: 0; z-index: 1; background: var(--bg-raised); color: var(--text-dim);
+  font-weight: 500; text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--line-strong); white-space: nowrap;
+}
+table.grid th:first-child, table.grid td:first-child { text-align: left; }
+table.grid th[data-sort] { cursor: pointer; }
+table.grid th[data-sort]:hover { color: var(--text); }
+table.grid th[aria-sort] { color: var(--amber); }
+table.grid td {
+  text-align: right; padding: 5px 10px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  font-family: var(--font-num); font-variant-numeric: tabular-nums; font-size: 13px;
+}
+table.grid td.txt { font-family: var(--font-ui); font-size: 12.5px; }
+table.grid tbody tr:hover td { background: var(--bg-hover); }
+table.grid td.sym { font-weight: 600; cursor: pointer; }
+table.grid td.sym:hover { color: var(--amber); }
+
+.badge {
+  display: inline-block; padding: 0 5px; border-radius: 3px; font-size: 10.5px; line-height: 16px;
+  font-weight: 600; color: #0b111b;
+}
+.empty { color: var(--text-faint); padding: 24px; text-align: center; }
+.tip-i {
+  display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%;
+  border: 1px solid var(--line-strong); color: var(--text-faint); font-size: 10px; cursor: help; font-style: normal;
+}
+@media (max-width: 760px) {
+  .kpis { gap: 4px 14px; }
+  .kpi .v { font-size: 15px; }
+}
+
+/* 画布图表的悬停提示 */
+.plot-tip {
+  position: absolute; left: 0; top: 0; z-index: 5; pointer-events: none;
+  background: rgba(17, 26, 39, .96); border: 1px solid var(--line-strong); border-radius: 5px;
+  padding: 6px 9px; font-size: 12px; line-height: 1.5; white-space: nowrap; color: var(--text);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .4);
+}
+.plot-tip[hidden] { display: none; }
+.plot-tip b { font-family: var(--font-num); font-weight: 600; }
+.plot-tip .row { display: flex; justify-content: space-between; gap: 14px; }
+.plot-tip .row span:first-child { color: var(--text-dim); }
