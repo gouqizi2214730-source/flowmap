@@ -27,23 +27,23 @@
 
   <div class="layout">
     <section class="charts">
-      <div class="pane" id="p-price" style="height:330px">
+      <div class="pane" id="p-price" style="flex:330 0 330px">
         <div class="pane-head"><h3>价格</h3><span class="note" id="priceSrc"></span><div class="legend" id="lg-price"></div></div>
         <div class="pane-body"></div>
       </div>
-      <div class="pane" id="p-cvd" style="height:170px">
+      <div class="pane" id="p-cvd" style="flex:170 0 170px">
         <div class="pane-head"><h3>累计主动买卖差（CVD）</h3><div class="legend" id="lg-cvd"></div><span class="tip-i" title="每根 K 线的主动买入量减主动卖出量，按收盘价折成美元后从最左边开始累加。合约和现货分开算：两条线背离时，说明涨跌主要由哪个市场推动。">?</span></div>
         <div class="pane-body"></div>
       </div>
-      <div class="pane" id="p-oi" style="height:190px">
+      <div class="pane" id="p-oi" style="flex:190 0 190px">
         <div class="pane-head"><h3>持仓量（美元，堆叠）</h3><div class="legend" id="lg-oi"></div><span class="tip-i" title="币安和 Bybit 是该交易对的持仓（单边计），OKX 是该币全部合约的持仓。持仓上升代表新开仓，下降代表平仓或爆仓。">?</span></div>
         <div class="pane-body"></div>
       </div>
-      <div class="pane" id="p-funding" style="height:170px">
+      <div class="pane" id="p-funding" style="flex:170 0 170px">
         <div class="pane-head"><h3>资金费率（折算到 8 小时）</h3><div class="legend" id="lg-funding"></div><span class="tip-i" title="每次结算的资金费率。有的币每 1 或 4 小时结算一次，这里统一折算成 8 小时的费率方便比较。正数表示多头付钱给空头。">?</span></div>
         <div class="pane-body"></div>
       </div>
-      <div class="pane" id="p-ls" style="height:170px">
+      <div class="pane" id="p-ls" style="flex:170 0 170px">
         <div class="pane-head"><h3>多空比</h3><div class="legend" id="lg-ls"></div><span class="tip-i" title="人数比：持有多单的账户数 ÷ 持有空单的账户数。大户持仓比：保证金最多的前 20% 账户的多单持仓 ÷ 空单持仓。">?</span></div>
         <div class="pane-body"></div>
       </div>

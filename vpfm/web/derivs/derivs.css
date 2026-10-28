@@ -2,7 +2,8 @@
 .kpi .v .tag { font: 500 11px var(--font-ui); color: var(--text-faint); margin-left: 6px; }
 
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 330px; align-items: start; }
-.charts { min-width: 0; border-right: 1px solid var(--line); }
+.charts { min-width: 0; border-right: 1px solid var(--line); align-self: stretch; display: flex; flex-direction: column; }
+/* 屏幕比较高时，右边爆仓栏会把这一行撑高：各图按原来的高度比例分掉多出来的空间 */
 
 /* 实时爆仓 */
 .liqs {

@@ -8,7 +8,7 @@
 - 桌面外壳：产品名 VPFM、独立的应用标识、启动页改成等待本地服务后跳到工作台；
 - 自动更新换成 vpfm_update.rs（只认 vpfm-v 开头的版本、走代理、界面按钮触发）；
 - 本地端口优先用固定端口，网页里保存的设置和布局才能跨重启保留；
-- 安装包带上 wb 目录（各模块的静态文件）。
+- 安装包带上 wb 目录（各模块的静态文件），并加上 NSIS 钩子（更新模式下首次安装也建快捷方式）。
 锚点找不到时立即报错退出，工作流失败而不会发布坏包。
 """
 import json
@@ -117,10 +117,16 @@ def wconf(s):
     if isinstance(res, list):
         sys.exit('[vpfm] tauri.windows.conf.json 的 resources 变成了列表格式')
     res['resources/wb/'] = 'wb/'
+    # 安装包钩子：从 FlowMap 中文版升级过来时（旧更新器用 /UPDATE 运行）补建开始菜单和桌面快捷方式
+    nsis = c['bundle'].setdefault('windows', {}).setdefault('nsis', {})
+    if nsis.get('installerHooks'):
+        sys.exit('[vpfm] 上游已经有 NSIS 安装钩子（installerHooks），需要合并 vpfm-hooks.nsh')
+    nsis['installerHooks'] = 'vpfm-hooks.nsh'
     return json.dumps(c, ensure_ascii=False, indent=2) + '\n'
 
 
 edit('app/src-tauri/tauri.windows.conf.json', wconf)
+shutil.copy2(HERE / 'nsis/vpfm-hooks.nsh', root / 'app/src-tauri/vpfm-hooks.nsh')
 
 # 资源目录先放一个占位，工作流后面会把各模块的构建结果放进来
 (root / 'app/src-tauri/resources/wb').mkdir(parents=True, exist_ok=True)

@@ -254,6 +254,20 @@
   const okxOk = j => { if (j.code !== '0') throw new FetchError('OKX：' + (j.msg || j.code), 0); return j.data; };
   const bitgetOk = j => { if (j.code !== '00000') throw new FetchError('Bitget：' + (j.msg || j.code), 0); return j.data; };
   const deribitOk = j => { if (j.error) throw new FetchError('Deribit：' + j.error.message, 0); return j.result; };
+  // OKX 统计接口的周期：界面周期换成 5m / 1H / 1D，本来就是这三个的原样用
+  const okPeriod = p => (TF[p] && TF[p].okRubik) || p;
+  /** Bybit 列表接口按 nextPageCursor 往前翻页，凑够 want 条或没有更多为止（最多 6 页）。
+      返回的游标已经是 URL 编码过的，和官方 SDK 一样原样放回查询串 */
+  async function bybitPaged(url, pageSize, want) {
+    let out = [], cursor = '';
+    for (let page = 0; page < 6 && out.length < want; page++) {
+      const r = bybitOk(await VP.get(`${url}&limit=${Math.min(pageSize, want - out.length)}${cursor ? '&cursor=' + cursor : ''}`, { ttl: 30000 }));
+      out = out.concat(r.list || []);
+      cursor = r.nextPageCursor;
+      if (!cursor || !(r.list || []).length) break;
+    }
+    return out;
+  }
 
   /** K 线统一成 {t(秒), o, h, l, c, v(币), qv(计价币), tb(主动买入量，币)} */
   const bnKline = k => ({ t: k[0] / 1000, o: n(k[1]), h: n(k[2]), l: n(k[3]), c: n(k[4]), v: n(k[5]), qv: n(k[7]), tb: n(k[9]) });
@@ -282,11 +296,12 @@
       fundingInfo: () => VP.get(BN + '/fapi/v1/fundingInfo', { ttl: 3600e3 }),
       ticker24: sym => VP.get(BN + '/fapi/v1/ticker/24hr' + (sym ? '?symbol=' + sym : ''), { ttl: sym ? 4000 : 15000 }),
       openInterest: sym => VP.get(BN + '/fapi/v1/openInterest?symbol=' + sym, { ttl: 8000 }),
-      oiHist: (sym, tf, limit = 500) => VP.get(`${BN}/futures/data/openInterestHist?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}`, { ttl: 30000 }),
+      // /futures/data 系列：每次最多 500 条，只保留最近 30 天；end（毫秒）用来往前翻页
+      oiHist: (sym, tf, limit = 500, end) => VP.get(`${BN}/futures/data/openInterestHist?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}${end ? '&endTime=' + end : ''}`, { ttl: 30000 }),
       fundingHist: (sym, limit = 200) => VP.get(`${BN}/fapi/v1/fundingRate?symbol=${sym}&limit=${limit}`, { ttl: 60000 }),
-      lsAccounts: (sym, tf, limit = 500) => VP.get(`${BN}/futures/data/globalLongShortAccountRatio?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}`, { ttl: 30000 }),
-      lsTopPos: (sym, tf, limit = 500) => VP.get(`${BN}/futures/data/topLongShortPositionRatio?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}`, { ttl: 30000 }),
-      taker: (sym, tf, limit = 500) => VP.get(`${BN}/futures/data/takerlongshortRatio?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}`, { ttl: 30000 }),
+      lsAccounts: (sym, tf, limit = 500, end) => VP.get(`${BN}/futures/data/globalLongShortAccountRatio?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}${end ? '&endTime=' + end : ''}`, { ttl: 30000 }),
+      lsTopPos: (sym, tf, limit = 500, end) => VP.get(`${BN}/futures/data/topLongShortPositionRatio?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}${end ? '&endTime=' + end : ''}`, { ttl: 30000 }),
+      taker: (sym, tf, limit = 500, end) => VP.get(`${BN}/futures/data/takerlongshortRatio?symbol=${sym}&period=${TF[tf].bnOi}&limit=${limit}${end ? '&endTime=' + end : ''}`, { ttl: 30000 }),
     },
     bybit: {
       sym: base => base + 'USDT',
@@ -297,18 +312,19 @@
       async tickers(sym) {
         return bybitOk(await VP.get(`${BY}/v5/market/tickers?category=linear${sym ? '&symbol=' + sym : ''}`, { ttl: sym ? 4000 : 15000 })).list;
       },
-      async oiHist(sym, tf, limit = 200) {
-        return bybitOk(await VP.get(`${BY}/v5/market/open-interest?category=linear&symbol=${sym}&intervalTime=${TF[tf].byOi}&limit=${limit}`, { ttl: 30000 })).list
-          .map(x => ({ t: n(x.timestamp) / 1000, oi: n(x.singleOpenInterest ?? x.openInterest) })).reverse();
+      // 持仓历史：每页最多 200 条，按游标往前翻，直到凑够 want 条
+      async oiHist(sym, tf, want = 200) {
+        const rows = await bybitPaged(`${BY}/v5/market/open-interest?category=linear&symbol=${sym}&intervalTime=${TF[tf].byOi}`, 200, want);
+        return rows.map(x => ({ t: n(x.timestamp) / 1000, oi: n(x.singleOpenInterest ?? x.openInterest) })).sort((a, b) => a.t - b.t);
       },
       async fundingHist(sym, limit = 200) {
         return bybitOk(await VP.get(`${BY}/v5/market/funding/history?category=linear&symbol=${sym}&limit=${limit}`, { ttl: 60000 })).list
           .map(x => ({ t: n(x.fundingRateTimestamp) / 1000, rate: n(x.fundingRate) })).reverse();
       },
-      async lsAccounts(sym, tf, limit = 500) {
-        const period = { '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h', '1d': '1d' }[tf];
-        return bybitOk(await VP.get(`${BY}/v5/market/account-ratio?category=linear&symbol=${sym}&period=${period}&limit=${limit}`, { ttl: 30000 })).list
-          .map(x => ({ t: n(x.timestamp) / 1000, long: n(x.buyRatio), short: n(x.sellRatio) })).reverse();
+      async lsAccounts(sym, tf, want = 500) {
+        const period = { '1m': '5min', '5m': '5min', '15m': '15min', '1h': '1h', '4h': '4h', '1d': '1d', '1w': '1d', '1M': '1d' }[tf];
+        const rows = await bybitPaged(`${BY}/v5/market/account-ratio?category=linear&symbol=${sym}&period=${period}`, 500, want);
+        return rows.map(x => ({ t: n(x.timestamp) / 1000, long: n(x.buyRatio), short: n(x.sellRatio) })).sort((a, b) => a.t - b.t);
       },
     },
     okx: {
@@ -326,16 +342,17 @@
         return okxOk(await VP.get(`${OK}/api/v5/public/funding-rate-history?instId=${inst}&limit=${limit}`, { ttl: 60000 }))
           .map(x => ({ t: n(x.fundingTime) / 1000, rate: n(x.realizedRate || x.fundingRate) })).reverse();
       },
+      // 统计接口的 period 只有 5m / 1H / 1D：传界面周期（15m 等）会换成对应的统计周期，也可以直接传这三个值
       async oiVolHist(ccy, tf) {
-        return okxOk(await VP.get(`${OK}/api/v5/rubik/stat/contracts/open-interest-volume?ccy=${ccy}&period=${TF[tf].okRubik}`, { ttl: 30000 }))
+        return okxOk(await VP.get(`${OK}/api/v5/rubik/stat/contracts/open-interest-volume?ccy=${ccy}&period=${okPeriod(tf)}`, { ttl: 30000 }))
           .map(x => ({ t: n(x[0]) / 1000, oiUsd: n(x[1]), volUsd: n(x[2]) })).reverse();
       },
       async lsHist(ccy, tf) {
-        return okxOk(await VP.get(`${OK}/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy=${ccy}&period=${TF[tf].okRubik}`, { ttl: 30000 }))
+        return okxOk(await VP.get(`${OK}/api/v5/rubik/stat/contracts/long-short-account-ratio?ccy=${ccy}&period=${okPeriod(tf)}`, { ttl: 30000 }))
           .map(x => ({ t: n(x[0]) / 1000, ratio: n(x[1]) })).reverse();
       },
       async takerHist(ccy, tf) {
-        return okxOk(await VP.get(`${OK}/api/v5/rubik/stat/taker-volume?ccy=${ccy}&instType=CONTRACTS&period=${TF[tf].okRubik}`, { ttl: 30000 }))
+        return okxOk(await VP.get(`${OK}/api/v5/rubik/stat/taker-volume?ccy=${ccy}&instType=CONTRACTS&period=${okPeriod(tf)}`, { ttl: 30000 }))
           .map(x => ({ t: n(x[0]) / 1000, sell: n(x[1]), buy: n(x[2]) })).reverse();
       },
       instruments: async () => okxOk(await VP.get(`${OK}/api/v5/public/instruments?instType=SWAP`, { ttl: 3600e3 })),

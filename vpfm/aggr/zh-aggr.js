@@ -148,6 +148,7 @@
     'Wait n seconds before play the note': '等 n 秒再播放', 'Aggr server seems down 💀': 'aggr 服务器连不上 💀',
     'quote currency': '计价币', 'base currency': '基础币', 'DONATE': '捐助', 'Price': '价格', 'Volume': '成交量',
     'Go fullscreen': '全屏', 'Exit fullscreen': '退出全屏',
+    'Choose what to include in preset': '选择预设要包含的内容', 'Please wait a moment...': '请稍候…',
   };
   var UNIT = { s: '秒', m: '分钟', h: '小时', d: '天', w: '周', mo: '个月', y: '年' };
 
@@ -156,8 +157,14 @@
     [/^Connecting to (.+?)\.?$/, '正在连接 $1'],
     [/^Can't connect to (.+?)\.?$/, '无法连接 $1'],
     [/^(\d+) markets?$/, '$1 个市场'],
+    [/^(\d+) indicators?$/, '$1 个指标'],
     [/^(\d+) results?$/, '$1 个结果'],
+    [/^(\d+) options?$/, '$1 个选项'],
     [/^(.+) options$/, '$1 选项'],
+    [/^Saved (\d+) (.+)'s products$/, '已保存 $2 的 $1 个交易对'],
+    [/^BUCKETS \((\d+)\)$/, '统计项（$1）'],
+    [/^over (.+) window$/, '在 $1 时间段内'],
+    [/^Wave type \($/, '波形（'],
     [/^Refresh chart every (.+)$/, '图表每 $1 刷新一次'],
     [/^Removed gifs about "(.+)"$/, '已删除关于“$1”的 GIF'],
     [/^Unrecognized pane type "(.+)"$/, '无法识别的面板类型“$1”'],

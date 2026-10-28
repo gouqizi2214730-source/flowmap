@@ -7,6 +7,8 @@ name: VPFM：同步上游并发布
 # 有更新（或本仓库的 vpfm/、zh-patch/ 有改动）就拉最新源码、套上汉化和 VPFM 补丁、
 # 编译 Windows 安装包并发布 Release。已安装的 VPFM 会读取本仓库 vpfm-v 开头的最新版本，
 # 校验 SHA-256 后自动安装。
+# 另外维护一个固定标签 zh-v2.0.0 的发布（标记为 Latest，里面始终是最新的 VPFM 安装包）：
+# 旧的 FlowMap 中文版只看 Latest 发布、只认 zh-v 开头的版本号，靠它提示用户升级到 VPFM。
 on:
   schedule:
     - cron: '37 1 * * *'   # 每天 UTC 01:37（北京时间 09:37）
@@ -212,6 +214,25 @@ jobs:
           npx --yes @tauri-apps/cli@2 icon ../../../fork/vpfm/icons/icon-1024.png 2>&1 | tail -5 | tee -a ../../../build.log
           npx --yes @tauri-apps/cli@2 build --bundles nsis 2>&1 | tee -a ../../../build.log
 
+      - name: 测试安装包（模拟 FlowMap 中文版升级：更新模式下的首次安装）
+        env:
+          MSYS_NO_PATHCONV: '1'   # 不让 Git Bash 把 /S、/UPDATE 当成路径改写
+        run: |
+          set -euo pipefail
+          EXE=$(ls flowmap/app/src-tauri/target/release/bundle/nsis/*-setup.exe | head -1)
+          fail() { echo "安装测试失败：$1" | tee -a build.log; exit 1; }
+          # 旧版更新器的参数是 /P /UPDATE /R；这里用 /S（静默）代替 /P，并且不自动打开程序
+          "$EXE" /S /UPDATE || fail "安装包返回错误"
+          LA=$(cygpath -u "$LOCALAPPDATA"); AD=$(cygpath -u "$APPDATA")
+          DESK=$(cygpath -u "$(powershell -NoProfile -Command "[Environment]::GetFolderPath('Desktop')" | tr -d '\r')")
+          for _ in $(seq 1 60); do [ -f "$LA/VPFM/VPFM.exe" ] && break; sleep 1; done
+          [ -f "$LA/VPFM/VPFM.exe" ] || fail "没有装到 LOCALAPPDATA/VPFM"
+          [ -f "$LA/VPFM/wb/index.html" ] && [ -f "$LA/VPFM/wb/structure/structure.js" ] || fail "安装目录里缺界面文件"
+          [ -f "$AD/Microsoft/Windows/Start Menu/Programs/VPFM.lnk" ] || fail "没有开始菜单快捷方式"
+          [ -f "$DESK/VPFM.lnk" ] || fail "没有桌面快捷方式"
+          echo "安装测试通过：$(du -sh "$LA/VPFM" | cut -f1)" | tee -a build.log
+          "$LA/VPFM/uninstall.exe" /S || true
+
       - name: 冒烟测试内置服务器与界面
         working-directory: flowmap
         run: |
@@ -289,8 +310,30 @@ jobs:
             echo "<!-- build-key: $KEY -->"
           } > out/notes.md
           gh release create "vpfm-v$VERSION" "out/$NAME" "out/$NAME.sha256" \
-            --repo "$GITHUB_REPOSITORY" --title "VPFM $VERSION" --notes-file out/notes.md --latest
+            --repo "$GITHUB_REPOSITORY" --title "VPFM $VERSION" --notes-file out/notes.md --latest=false
           echo "已发布 vpfm-v$VERSION" | tee -a build.log
+
+          # FlowMap 中文版的升级通道：固定标签、标记为 Latest、换上这次的安装包
+          BRIDGE=zh-v2.0.0
+          {
+            echo "FlowMap 中文版已经升级为 VPFM。"
+            echo "VPFM 包含原来的深度热力图，另外整合了聚合成交、流动性地图、衍生品数据、期权 GEX、结构分析和工具箱，全中文，自动更新。"
+            echo "点“立即更新”会安装 VPFM（和 FlowMap 中文版是两个独立的程序），装好后自动打开 VPFM，开始菜单和桌面都有它的图标。"
+            echo "确认 VPFM 能正常使用后，可以在 Windows“设置 → 应用”里卸载 FlowMap 中文版，它以后不会再单独更新。"
+            echo
+            echo "这里放的始终是最新的 VPFM 安装包（当前 $VERSION），直接下载安装也可以；各版本的更新说明见 vpfm-v 开头的发布。"
+          } > out/bridge.md
+          if gh release view "$BRIDGE" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$BRIDGE" "out/$NAME" "out/$NAME.sha256" --repo "$GITHUB_REPOSITORY" --clobber
+            for a in $(gh release view "$BRIDGE" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'); do
+              case "$a" in "$NAME"|"$NAME.sha256") ;; *) gh release delete-asset "$BRIDGE" "$a" --repo "$GITHUB_REPOSITORY" -y ;; esac
+            done
+            gh release edit "$BRIDGE" --repo "$GITHUB_REPOSITORY" --title "VPFM 最新版（FlowMap 中文版升级通道）" --notes-file out/bridge.md --latest
+          else
+            gh release create "$BRIDGE" "out/$NAME" "out/$NAME.sha256" --repo "$GITHUB_REPOSITORY" \
+              --title "VPFM 最新版（FlowMap 中文版升级通道）" --notes-file out/bridge.md --latest
+          fi
+          echo "升级通道 $BRIDGE 已更新到 $VERSION" | tee -a build.log
 
       - name: 把构建日志保存到 vpfm-build-log 分支
         if: always()

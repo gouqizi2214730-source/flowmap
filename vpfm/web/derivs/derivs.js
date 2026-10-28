@@ -217,30 +217,45 @@
     });
   }
 
-  // 时间轴对齐：取 ≤ t 的最近一个值（向前填充，最多容忍 maxGap 秒）
+  // 时间轴对齐：取 ≤ t 的最近一个值（向前填充，最多容忍 maxGap 秒；粗粒度补上的点按自己的间隔 span 放宽）
   function lookup(series, maxGap) {
     let i = 0;
     return t => {
       while (i + 1 < series.length && series[i + 1].t <= t) i++;
       const p = series[i];
-      return p && p.t <= t && t - p.t <= maxGap ? p : null;
+      return p && p.t <= t && t - p.t <= Math.max(maxGap, 2 * (p.span || 0)) ? p : null;
     };
   }
   const uniq = arr => { const out = []; let last = -Infinity; for (const x of arr) { if (x.time > last) { out.push(x); last = x.time; } } return out; };
   const LT = VP.localTime;
 
-  async function bybitOiDeep(sym, limit) {
-    // Bybit 每页最多 200 条，用游标翻页
-    let out = [], cursor = '';
-    for (let page = 0; page < 3 && out.length < limit; page++) {
-      const url = `https://api.bybit.com/v5/market/open-interest?category=linear&symbol=${sym}&intervalTime=${VP.TF[tf].byOi}&limit=200${cursor ? '&cursor=' + encodeURIComponent(cursor) : ''}`;
-      const j = await VP.get(url, { ttl: 30000 });
-      if (j.retCode !== 0) throw new Error('Bybit：' + j.retMsg);
-      out = out.concat(j.result.list.map(x => ({ t: n(x.timestamp) / 1000, oi: n(x.singleOpenInterest ?? x.openInterest) })));
-      cursor = j.result.nextPageCursor;
-      if (!cursor) break;
+  // 历史要盖住整段 K 线（1000 根）：
+  // 币安 /futures/data 每次最多 500 条（只存最近 30 天），按 endTime 往前再翻；
+  async function bnDeep(fn, sym, want = 1000) {
+    let out = await fn(sym, tf, 500);
+    while (out.length && out.length < want) {
+      const older = await fn(sym, tf, 500, n(out[0].timestamp) - 1);
+      const fresh = older.filter(x => n(x.timestamp) < n(out[0].timestamp));
+      if (!fresh.length) break;
+      out = fresh.concat(out);
+      if (older.length < 500) break;
     }
-    return out.sort((a, b) => a.t - b.t);
+    return out;
+  }
+  // OKX 统计接口 5 分钟粒度只有最近 2 天、1 小时 30 天、1 天 180 天：细的优先，更早的部分用粗一级补上
+  const OK_PERIODS = { '1m': ['5m'], '5m': ['5m', '1H'], '15m': ['5m', '1H'], '1h': ['1H', '1D'], '4h': ['1H', '1D'], '1d': ['1D'], '1w': ['1D'], '1M': ['1D'] };
+  const OK_SPAN = { '5m': 300, '1H': 3600, '1D': 86400 };
+  async function okxDeep(fn, ccy) {
+    const periods = OK_PERIODS[tf] || ['1D'];
+    const got = await Promise.allSettled(periods.map(p => fn(ccy, p)));
+    let out = [];
+    got.forEach((g, k) => {
+      if (g.status !== 'fulfilled' || !g.value.length) return;
+      const rows = g.value.map(x => ({ ...x, span: OK_SPAN[periods[k]] }));
+      out = out.length ? rows.filter(x => x.t < out[0].t).concat(out) : rows;
+    });
+    if (!out.length && got[0].status === 'rejected') throw got[0].reason;
+    return out;
   }
   const fundingHours = new Map();
   const bitgetHours = new Map();
@@ -268,16 +283,16 @@
     const [r, errs] = await settle({
       fk: m.bn ? ex.binance.klinesDeep(m.bn.sym, tf, 1000) : ex.bybit.klines(m.by.sym, tf, 1000),
       sk: ex.binance.klinesDeep(spotSym, tf, 1000, { spot: true }),
-      bnOi: m.bn ? ex.binance.oiHist(m.bn.sym, tf, 500) : skip(),
-      byOi: m.by ? bybitOiDeep(m.by.sym, 600) : skip(),
-      okOi: m.ok ? ex.okx.oiVolHist(coin, tf) : skip(),
+      bnOi: m.bn ? bnDeep(ex.binance.oiHist, m.bn.sym) : skip(),
+      byOi: m.by ? ex.bybit.oiHist(m.by.sym, tf, 1000) : skip(),
+      okOi: m.ok ? okxDeep(ex.okx.oiVolHist, coin) : skip(),
       bnF: m.bn ? ex.binance.fundingHist(m.bn.sym, 300) : skip(),
       byF: m.by ? ex.bybit.fundingHist(m.by.sym, 200) : skip(),
       okF: m.ok ? ex.okx.fundingHist(m.ok.inst, 100) : skip(),
-      bnLs: m.bn ? ex.binance.lsAccounts(m.bn.sym, tf, 500) : skip(),
-      bnTop: m.bn ? ex.binance.lsTopPos(m.bn.sym, tf, 500) : skip(),
-      byLs: m.by ? ex.bybit.lsAccounts(m.by.sym, tf, 500) : skip(),
-      okLs: m.ok ? ex.okx.lsHist(coin, tf) : skip(),
+      bnLs: m.bn ? bnDeep(ex.binance.lsAccounts, m.bn.sym) : skip(),
+      bnTop: m.bn ? bnDeep(ex.binance.lsTopPos, m.bn.sym) : skip(),
+      byLs: m.by ? ex.bybit.lsAccounts(m.by.sym, tf, 1000) : skip(),
+      okLs: m.ok ? okxDeep(ex.okx.lsHist, coin) : skip(),
     });
     if (want !== coin + '|' + tf) return; // 期间切换了币种或周期
     // 没上线的交易所、没有现货的币（币安返回 400）不算失败
@@ -322,7 +337,7 @@
     const unit = m.bn ? (m.by?.mult || 1) / (m.bn.mult || 1) : 1;
     const bnOi = (r.bnOi || []).map(x => ({ t: n(x.timestamp) / 1000, usd: n(x.sumOpenInterestValue) }));
     const byOi = (r.byOi || []).map(x => { const p = priceAt(x.t); return p ? { t: x.t, usd: x.oi * p.c * unit } : null; }).filter(Boolean);
-    const okOi = (r.okOi || []).map(x => ({ t: x.t, usd: x.oiUsd }));
+    const okOi = (r.okOi || []).map(x => ({ t: x.t, usd: x.oiUsd, span: x.span }));
     const base = bnOi.length ? bnOi : byOi.length ? byOi : okOi;
     const gap = Math.max(sec * 2, 3 * 3600 * (tf === '4h' ? 1 : 0), 3600);
     const fBy = lookup(byOi, gap), fOk = lookup(okOi, gap);

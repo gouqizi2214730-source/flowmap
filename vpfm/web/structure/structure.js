@@ -308,13 +308,27 @@
 
   const LABEL_W = 96; // 最后一根 K 线右边：先留一列放价位标签，再画高周期 K 线
   const font = (px, w = 500) => `${w} ${px}px ` + getComputedStyle(document.body).fontFamily;
-  function tag(g, text, x, y, color, { bg = null, align = 'left', base = 'middle' } = {}) {
+  // 文字标签互相避让：先画的占住位置，后画的被挡住就沿 dir 方向（-1 往上、1 往下、0 两边都试）挪一两行；
+  // 还是放不下时，optional 的次要标签（失效、已触及之类）直接不画，其余照原位置画。
+  // 背景层的标签先记在 bgTags 里，等前景层的标签画完再画，这样前景的摆动点、BOS 不会被它们挡住。
+  let placed = [], bgTags = [];
+  function tag(g, text, x, y, color, { bg = null, align = 'left', dir = 0, optional = false } = {}) {
+    if (y == null || !isFinite(y) || x == null || !isFinite(x)) return;
     g.font = font(10.5);
     const w = g.measureText(text).width;
     const x0 = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
-    if (bg) { g.fillStyle = bg; g.fillRect(x0 - 3, y - 7.5, w + 6, 15); }
-    g.fillStyle = color; g.textBaseline = base; g.textAlign = 'left'; g.fillText(text, x0, y);
+    const free = yy => !placed.some(r => x0 - 2 < r[1] && x0 + w + 2 > r[0] && yy - 6 < r[3] && yy + 6 > r[2]);
+    let yy = y;
+    if (!free(y)) {
+      const alt = (dir ? [dir * 12, dir * 24] : [-12, 12, -24, 24]).map(d => y + d).find(free);
+      if (alt != null) yy = alt;
+      else if (optional) return;
+    }
+    placed.push([x0 - 2, x0 + w + 2, yy - 6, yy + 6]);
+    if (bg) { g.fillStyle = bg; g.fillRect(x0 - 3, yy - 7.5, w + 6, 15); }
+    g.fillStyle = color; g.textBaseline = 'middle'; g.textAlign = 'left'; g.fillText(text, x0, yy);
   }
+  const later = (_g, ...args) => bgTags.push(args); // 只记文字和位置，画的时候用前景层的画布
   const alpha = (hex, a) => hex + Math.round(a * 255).toString(16).padStart(2, '0');
 
   function paint(g, W, Hh, layer) {
@@ -339,12 +353,13 @@
     };
 
     if (layer === 'bg') {
+      bgTags = [];
       // 交易时段
       if (L.sessions) for (const s of R.sessions) {
         if (!inView(s.start, s.end)) continue;
         const col = SESSION_COLORS[s.id];
         box(X(s.start) - bs / 2, X(s.end) + bs / 2, s.hi, s.lo, alpha(col, 0.07), alpha(col, 0.35));
-        tag(g, s.name, X(s.start) - bs / 2 + 3, Y(s.hi) - 8, alpha(col, 0.9));
+        later(g, s.name, X(s.start) - bs / 2 + 3, Y(s.hi) - 8, alpha(col, 0.9), { dir: -1, optional: true });
       }
       // FVG：未回补的延伸到最右，已回补的停在回补那根
       if (L.fvg) {
@@ -363,7 +378,10 @@
         const x0 = X(Math.max(0, Math.min(f.start, nB - 1))) - bs / 2;
         const col = hex(f.dir > 0 ? c.up : c.down);
         box(x0, right + bs * 2, f.top, f.bottom, alpha(col, f.mitigated >= 0 ? 0.07 : 0.12), alpha(col, 0.65), [5, 3]);
-        tag(g, `${VP.TF_NAME[f.tf]} FVG${f.mitigated >= 0 ? ' 已触及' : ''}`, Math.max(4, x0 + 3), (Y(f.top) ?? 0) + 8, alpha(col, 0.95));
+        // 框的上沿在可见区上方时，标签贴着可见区顶部画（整个框都看不见就不画）
+        const yt = Y(f.top), yb = Y(f.bottom);
+        if (yt != null && yb != null && Math.max(yt, yb) > 14 && Math.min(yt, yb) < Hh - 8)
+          later(g, `${VP.TF_NAME[f.tf]} FVG${f.mitigated >= 0 ? ' 已触及' : ''}`, Math.max(4, x0 + 3), Math.max(10, Math.min(yt, yb) + 8), alpha(col, 0.95), { dir: 1, optional: f.mitigated >= 0 });
       }
       // Breaker / 独角兽
       if (L.breaker) for (const k of R.brk || []) {
@@ -373,7 +391,7 @@
         const dim = k.invalid >= 0;
         box(X(k.i0) - bs / 2, k.invalid >= 0 ? X(end) : right + bs * 2, k.top, k.bottom, alpha(col, dim ? 0.05 : 0.1), alpha(col, dim ? 0.35 : 0.9));
         if (k.fvg) box(X(k.i0) - bs / 2, X(k.confirm) + bs / 2, Math.min(k.top, k.fvg.top), Math.max(k.bottom, k.fvg.bottom), alpha('#f2b33d', dim ? 0.08 : 0.22), null);
-        tag(g, `${k.side > 0 ? '+' : '−'}${k.unicorn ? '独角兽' : 'Breaker'}${dim ? '（失效）' : ''}`, X(k.i0) - bs / 2 + 3, k.side > 0 ? (Y(k.bottom) ?? 0) + 9 : (Y(k.top) ?? 0) - 9, alpha(col, dim ? 0.5 : 1));
+        later(g, `${k.side > 0 ? '+' : '−'}${k.unicorn ? '独角兽' : 'Breaker'}${dim ? '（失效）' : ''}`, X(k.i0) - bs / 2 + 3, k.side > 0 ? Y(k.bottom) + 9 : Y(k.top) - 9, alpha(col, dim ? 0.5 : 1), { dir: k.side > 0 ? 1 : -1, optional: dim });
       }
       // 订单块：每个方向显示最近 4 个
       if (L.ob) {
@@ -383,7 +401,7 @@
             if (!inView(o.i, end)) continue;
             const col = hex(dir > 0 ? c.up : c.down);
             box(X(o.i) - bs / 2, o.breaker ? X(end) : right + bs * 2, o.top, o.bottom, alpha(col, o.breaker ? 0.05 : 0.11), alpha(col, o.breaker ? 0.3 : 0.7), o.breaker ? [3, 3] : null);
-            tag(g, o.breaker ? 'OB（已破）' : 'OB', X(o.i) - bs / 2 + 3, (Y((o.top + o.bottom) / 2) ?? 0), alpha(col, 0.95));
+            later(g, o.breaker ? 'OB（已破）' : 'OB', X(o.i) - bs / 2 + 3, Y((o.top + o.bottom) / 2), alpha(col, 0.95), { optional: o.breaker });
           }
         }
       }
@@ -392,13 +410,13 @@
       if (L.po3 && seq && seq.tspot3) {
         const x0 = X(Math.min(seq.c3Idx, nB - 1)) - bs / 2;
         box(x0, right + bs * 2, seq.tspot3[0], seq.tspot3[1], alpha('#f2b33d', 0.12), alpha('#f2b33d', 0.55), [4, 3]);
-        tag(g, 'T-Spot（C3）', x0 + 3, Y(Math.max(...seq.tspot3)) - 8, '#f2b33d');
+        later(g, 'T-Spot（C3）', x0 + 3, Y(Math.max(...seq.tspot3)) - 8, '#f2b33d', { dir: -1 });
       }
       if (L.po3 && seq && seq.tspot4) {
         const c4 = R.h1[seq.i2 + 2];
         const x0 = X(c4 ? Math.min(idxAtOrAfter(c4.t), nB - 1) : nB - 1) - bs / 2;
         box(x0, right + bs * 2, seq.tspot4[0], seq.tspot4[1], alpha('#ff9800', 0.12), alpha('#ff9800', 0.55), [4, 3]);
-        tag(g, 'T-Spot（C4）', x0 + 3, Y(Math.max(...seq.tspot4)) - 8, '#ff9800');
+        later(g, 'T-Spot（C4）', x0 + 3, Y(Math.max(...seq.tspot4)) - 8, '#ff9800', { dir: -1 });
       }
       // 成交量分布（可见区间）
       if (L.vp) {
@@ -424,6 +442,7 @@
     }
 
     // ------- 前景 -------
+    placed = [];
     // 价位：前日 / 前周高低、日开 / 周开
     const lv = [];
     if (L.pdl && R.day) lv.push([R.day.ph, '前日高', '#d6deea', [6, 4], R.day.start], [R.day.pl, '前日低', '#d6deea', [6, 4], R.day.start]);
@@ -434,7 +453,7 @@
       const y = Y(p); if (y == null) continue;
       const x0 = Math.max(0, X(Math.max(0, idxAtOrAfter(t0))) ?? 0);
       hl(y, x0, right + bs * 2 + LABEL_W, alpha(hex(col), 0.75), dash);
-      tag(g, `${name} ${fmt.price(p)}`, right + bs * 2 + 2, y - 7, hex(col));
+      tag(g, `${name} ${fmt.price(p)}`, right + bs * 2 + 2, y - 7, hex(col), { dir: -1 });
     }
     // Breaker 的扫单线：从高周期价位到扫单极值
     if (L.breaker) for (const k of R.brk || []) {
@@ -446,7 +465,7 @@
     if (L.swings) for (const p of R.swLabels) {
       if (p.i < from || p.i > to) continue;
       const y = Y(p.level); if (y == null) continue;
-      tag(g, p.lab, X(p.i), p.type > 0 ? y - 9 : y + 9, p.type > 0 ? '#c9d3e0' : '#c9d3e0', { align: 'center' });
+      tag(g, p.lab, X(p.i), p.type > 0 ? y - 9 : y + 9, '#c9d3e0', { align: 'center', dir: p.type > 0 ? -1 : 1 });
     }
     // BOS / CHoCH
     if (L.bos) for (const e of R.bos) {
@@ -454,7 +473,7 @@
       const y = Y(e.level); if (y == null) continue;
       const col = e.dir > 0 ? c.up : c.down;
       hl(y, X(e.i), X(e.broken), col, e.kind === 'BOS' ? [4, 3] : null, e.kind === 'CHoCH' ? 1.5 : 1);
-      tag(g, e.kind, (X(e.i) + X(e.broken)) / 2, e.dir > 0 ? y - 8 : y + 8, col, { align: 'center' });
+      tag(g, e.kind, (X(e.i) + X(e.broken)) / 2, e.dir > 0 ? y - 8 : y + 8, col, { align: 'center', dir: e.dir > 0 ? -1 : 1 });
     }
     // 等高 / 等低
     if (L.liq) for (const q of R.liq) {
@@ -462,7 +481,7 @@
       if (!inView(q.i, end)) continue;
       const y = Y(q.level); if (y == null) continue;
       hl(y, X(q.i), q.swept >= 0 ? X(end) : right + bs * 2, alpha('#f2b33d', q.swept >= 0 ? 0.45 : 0.9), [1, 3], 1.5);
-      tag(g, `${q.type > 0 ? '等高' : '等低'}×${q.count}${q.swept >= 0 ? ' 已扫' : ''}`, X(q.i), q.type > 0 ? y - 8 : y + 8, '#f2b33d');
+      tag(g, `${q.type > 0 ? '等高' : '等低'}×${q.count}${q.swept >= 0 ? ' 已扫' : ''}`, X(q.i), q.type > 0 ? y - 8 : y + 8, '#f2b33d', { dir: q.type > 0 ? -1 : 1, optional: q.swept >= 0 });
     }
     // CISD
     // 有效的 CISD + 最近 60 根里失效的（变暗）
@@ -471,7 +490,7 @@
       const y = Y(k.level); if (y == null) continue;
       const col = alpha(hex(k.bull ? c.up : c.down), k.invalid >= 0 ? 0.35 : 1);
       hl(y, X(k.start) - bs / 2, X(k.i + 3), col, null, 1.5);
-      tag(g, 'CISD', X(k.i + 3) + 3, y, col);
+      tag(g, 'CISD', X(k.i + 3) + 3, y, col, { optional: k.invalid >= 0 });
     }
     // PO3：C1 高低点（被扫的那条）、C2 极值、STDV
     const seq = R.po3[0];
@@ -479,16 +498,16 @@
       const x0 = X(Math.min(seq.c1Idx, nB - 1)) - bs / 2;
       const swept = seq.side > 0 ? seq.c1.l : seq.c1.h;
       hl(Y(swept), x0, right + bs * 2, '#f2b33d', [6, 3]);
-      tag(g, `C1 ${seq.side > 0 ? '低点' : '高点'}（${VP.TF_NAME[R.h1tf]}）`, x0 + 3, Y(swept) + (seq.side > 0 ? 9 : -9), '#f2b33d');
+      tag(g, `C1 ${seq.side > 0 ? '低点' : '高点'}（${VP.TF_NAME[R.h1tf]}）`, x0 + 3, Y(swept) + (seq.side > 0 ? 9 : -9), '#f2b33d', { dir: seq.side > 0 ? 1 : -1 });
       hl(Y(seq.extreme), X(Math.min(seq.c2Idx, nB - 1)) - bs / 2, right + bs * 2, alpha('#f2b33d', 0.5), [2, 3]);
-      tag(g, 'C2 极值', X(Math.min(seq.c2Idx, nB - 1)) + 3, Y(seq.extreme) + (seq.side > 0 ? 9 : -9), alpha('#f2b33d', 0.8));
+      tag(g, 'C2 极值', X(Math.min(seq.c2Idx, nB - 1)) + 3, Y(seq.extreme) + (seq.side > 0 ? 9 : -9), alpha('#f2b33d', 0.8), { dir: seq.side > 0 ? 1 : -1 });
     }
     if (L.stdv && seq && seq.stdv) {
       const x0 = X(seq.cisd.i) - bs / 2;
       for (let k = 0; k < seq.stdv.length; k++) {
         const s = seq.stdv[k]; const y = Y(s.price); if (y == null) continue;
         hl(y, x0, right + bs * 2, 'rgba(160,170,185,.75)');
-        tag(g, `−${s.d}  ${fmt.price(s.price)}`, right + bs * 2 + 2, y - 7, '#a0aab9');
+        tag(g, `−${s.d}  ${fmt.price(s.price)}`, right + bs * 2 + 2, y - 7, '#a0aab9', { dir: -1, optional: true });
       }
       for (let k = 0; k + 1 < seq.stdv.length; k += 2) {
         const y0 = Y(seq.stdv[k].price), y1 = Y(seq.stdv[k + 1].price);
@@ -500,7 +519,7 @@
       if (!inView(s.i1, s.i2)) continue;
       const y1 = Y(s.l1), y2 = Y(s.l2); if (y1 == null || y2 == null) continue;
       g.save(); g.strokeStyle = '#a68cfa'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X(s.i1), y1); g.lineTo(X(s.i2), y2); g.stroke(); g.restore();
-      tag(g, `SMT（${coin === 'BTC' ? 'ETH' : 'BTC'}）`, X(s.i2) + 4, y2 + (s.type > 0 ? 9 : -9), '#a68cfa');
+      tag(g, `SMT（${coin === 'BTC' ? 'ETH' : 'BTC'}）`, X(s.i2) + 4, y2 + (s.type > 0 ? 9 : -9), '#a68cfa', { dir: s.type > 0 ? 1 : -1 });
     }
     // 成交量分布的 POC / 价值区
     if (L.vp && R.vp) {
@@ -508,10 +527,12 @@
       hl(Y(R.vp.poc), xa, xr, alpha('#f2b33d', 0.8), null, 1);
       hl(Y(R.vp.vah), xa, xr, 'rgba(135,150,171,.5)', [2, 3]);
       hl(Y(R.vp.val), xa, xr, 'rgba(135,150,171,.5)', [2, 3]);
-      tag(g, 'POC', xr - 4, Y(R.vp.poc) - 7, '#f2b33d', { align: 'right' });
+      tag(g, 'POC', xr - 4, Y(R.vp.poc) - 7, '#f2b33d', { align: 'right', dir: -1 });
     }
     // 右侧的高周期 K 线
     if (L.htf) drawHtf(g, W, X, Y, bs, right, c, seq, L);
+    // 背景层记下的标签最后画，被挡住的次要标签会自动省略
+    for (const a of bgTags) tag(g, ...a);
   }
 
   function hex(col) {
