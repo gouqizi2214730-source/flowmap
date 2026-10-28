@@ -379,9 +379,19 @@
       summary: async (currency, kind) => deribitOk(await VP.get(`${DB}/get_book_summary_by_currency?currency=${currency}&kind=${kind}`, { ttl: 20000 })),
       index: async currency => deribitOk(await VP.get(`${DB}/get_index_price?index_name=${currency.toLowerCase()}_usd`, { ttl: 5000 })),
       trades: async (currency, count = 1000) => deribitOk(await VP.get(`${DB}/get_last_trades_by_currency?currency=${currency}&kind=option&count=${count}`, { ttl: 20000 })).trades,
+      // DVOL K 线：一次返回的条数有上限，按 continuation（下一页的 end_timestamp）往前翻，凑满整段时间
       volIndex: async (currency, resolution = 3600, hours = 24 * 7) => {
-        const end = Date.now(), start = end - hours * 3600e3;
-        return deribitOk(await VP.get(`${DB}/get_volatility_index_data?currency=${currency}&start_timestamp=${start}&end_timestamp=${end}&resolution=${resolution}`, { ttl: 60000 }));
+        let end = Date.now(), data = [];
+        const start = end - hours * 3600e3;
+        for (let page = 0; page < 5; page++) {
+          const r = deribitOk(await VP.get(`${DB}/get_volatility_index_data?currency=${currency}&start_timestamp=${start}&end_timestamp=${end}&resolution=${resolution}`, { ttl: 60000 }));
+          data = (r.data || []).concat(data);
+          const next = Number(r.continuation);
+          if (!next || next <= start || next >= end) break;
+          end = next;
+        }
+        const seen = new Set();
+        return { data: data.filter(x => !seen.has(x[0]) && seen.add(x[0])), continuation: null };
       },
     },
   };

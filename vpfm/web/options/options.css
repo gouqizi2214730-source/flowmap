@@ -30,6 +30,7 @@
 .trades .meta { color: var(--text-dim); grid-column: 2 / 4; }
 .trades li.buy .usd { color: var(--up); }
 .trades li.sell .usd { color: var(--down); }
+.trades li.empty { display: block; border-bottom: 0; }
 .trades .tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px; font-size: 10.5px; line-height: 16px; background: var(--bg-raised); color: var(--text-dim); }
 
 @media (max-width: 1100px) {

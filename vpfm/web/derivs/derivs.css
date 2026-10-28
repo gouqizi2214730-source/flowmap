@@ -37,7 +37,7 @@
 .liq-list .usd { font: 600 13px var(--font-num); font-variant-numeric: tabular-nums; }
 .liq-list .long .usd { color: var(--down); }
 .liq-list .short .usd { color: var(--up); }
-.liq-empty { color: var(--text-faint); padding: 18px 12px; font-size: 12px; }
+.liq-list li.liq-empty { display: block; color: var(--text-faint); padding: 18px 12px; font-size: 12px; border-bottom: 0; }
 
 /* 资金费率表 */
 .board { border-top: 1px solid var(--line); }

@@ -398,6 +398,8 @@ const EXACT: Record<string, string> = {
   'TAPE': '逐笔',
   'N/A': '无',
   'waiting for the feed —': '等待数据源 —',
+  // 热力图图例两端
+  'more': '多', 'less': '少', 'ask-heavy': '卖盘偏多', 'bid-heavy': '买盘偏多',
 };
 
 /** 带变量的句子：英文正则 → 中文模板（$1、$2 为捕获组）。 */
@@ -421,6 +423,7 @@ const PATTERNS: Array<[RegExp, string]> = [
   [/^REPLAY (.+)× PLAYING$/, '回放 $1× 播放中'],
   [/^REPLAY (.+)× PAUSED$/, '回放 $1× 已暂停'],
   [/^replay refused — (.+); retrying$/, '回放被拒绝 — $1；正在重试'],
+  [/^waiting for the feed — (.+)$/, '等待数据源 — $1'],
   [/^replay speed (.+)×, click to change$/, '回放速度 $1×，点击更改'],
   [/^Watchlist full \((\d+)\)$/, '自选已满（$1）'],
   [/^Add (.+) to the watchlist$/, '把 $1 加入自选'],

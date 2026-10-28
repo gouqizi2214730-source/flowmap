@@ -316,7 +316,9 @@
     if (y == null || !isFinite(y) || x == null || !isFinite(x)) return;
     g.font = font(10.5);
     const w = g.measureText(text).width;
-    const x0 = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
+    let x0 = align === 'right' ? x - w : align === 'center' ? x - w / 2 : x;
+    if (x0 + w < 2) return;       // 整段在可见区左边
+    x0 = Math.max(2, x0);         // 被左边缘截断的贴着边缘画
     const free = yy => !placed.some(r => x0 - 2 < r[1] && x0 + w + 2 > r[0] && yy - 6 < r[3] && yy + 6 > r[2]);
     let yy = y;
     if (!free(y)) {
