@@ -10,11 +10,11 @@
 | 成交 | 聚合成交 | 多交易所逐笔成交与爆仓聚合、成交量气泡图、计数器与统计、价格提醒 | [aggr](https://github.com/Tucsky/aggr)（GPL-3.0） |
 | 流动 | 流动性地图 | 多交易所聚合盘口热力图、足迹图、Delta/CVD、持仓、清算、关键价位、回放 | [Liquidity Mapper Fast](https://github.com/liquiditymapperfast/liquiditymapperfast.github.io)（MIT） |
 | 衍生 | 衍生品数据 | 合约/现货 CVD、五所聚合持仓、资金费率历史、多空比、实时爆仓流、跨所资金费率表（折算 8 小时、年化价差） | VPFM 自研 |
-| 期权 | 期权 GEX | Deribit BTC/ETH：各行权价 Gamma 敞口、Gamma 翻转价、看涨/看跌墙、最大痛点、波动率微笑、期限结构、大额成交 | VPFM 自研 |
-| 结构 | 结构分析 | SMC（摆动点、BOS/CHoCH、订单块、FVG、等高等低）、PO3 序列与 T-Spot、CISD、STDV、SMT、高周期 K 线、三周期布林带、锚定/滚动 VWAP、成交量分布、前高前低被突破概率等统计 | VPFM 自研，算法改写自 smart-money-concepts（MIT），概念参考 HTF SUITE、Bandz Po3 Profiler、Fractal Model、Triple HTF BB、VWAP Claire |
+| 期权 | 期权 GEX | Deribit BTC/ETH：各行权价 Gamma 敞口、Gamma 翻转价、看涨/看跌墙、最大痛点、波动率微笑、期限结构、DVOL 恐慌度、大额成交 | VPFM 自研，DVOL 恐慌度参考 Resonance Alpha |
+| 结构 | 结构分析 | SMC（摆动点、BOS/CHoCH、订单块、FVG、等高等低）、高周期 FVG、PO3 序列与 T-Spot、CISD、STDV、Breaker / 独角兽、SMT、高周期 K 线、三周期布林带、锚定/滚动 VWAP、成交量分布、前高前低被突破概率等统计 | VPFM 自研，算法改写自 smart-money-concepts（MIT），概念参考 HTF SUITE、Bandz Po3 Profiler、Fractal Model、Unicorn Model、HTF FVGs Tap、Triple HTF BB、VWAP Claire |
 | 工具 | 工具箱 | 打开复盘本（FupanBook）、仓位计算、强平价估算、资金费成本、时段时钟 | VPFM 自研 |
 
-快捷键：`Ctrl+1`…`Ctrl+7` 切换模块，`Ctrl+,` 打开设置。双击左侧图标重新加载该模块。
+快捷键：`Ctrl+1`…`Ctrl+7` 切换模块，`Ctrl+,` 打开设置。双击左侧图标重新加载该模块。在聚合成交里点交易对，衍生品数据和结构分析会跟着切到这个币（设置里可关）。
 
 ## 安装
 

@@ -119,13 +119,22 @@ jobs:
           node-version: 22
       - uses: astral-sh/setup-uv@v5
 
+      # 三个前端的依赖按锁文件缓存（aggr 有个要现场编译的 git 依赖，不缓存每次要多花 5 分钟）
+      - uses: actions/cache@v4
+        with:
+          path: |
+            flowmap/client/node_modules
+            aggr/node_modules
+            lmap/node_modules
+          key: vpfm-nm-${{ runner.os }}-${{ hashFiles('flowmap/client/package-lock.json', 'aggr/package-lock.json', 'lmap/package-lock.json') }}
+
       - name: 编译深度热力图（FlowMap 前端）
         working-directory: flowmap/client
         env:
           MSYS_NO_PATHCONV: '1'   # 不让 Git Bash 把 --base=/wb/... 改写成 C:/Program Files/Git/wb/...
         run: |
           set -o pipefail
-          { npm ci && npx vite build --base=/wb/flowmap/; } 2>&1 | tee -a ../../build.log
+          { { [ -d node_modules ] || npm ci; } && npx vite build --base=/wb/flowmap/; } 2>&1 | tee -a ../../build.log
 
       - name: 编译聚合成交（aggr）
         working-directory: aggr
@@ -139,7 +148,7 @@ jobs:
           # 历史数据服务、社区指标库、推送提醒都是作者的在线服务：关掉；跨域请求走 VPFM 本地转发
           printf '%s\n' 'VITE_APP_PROXY_URL=/api/wb/proxy/' 'VITE_APP_API_URL=' 'VITE_APP_LIB_URL=' \
             'VITE_APP_PUBLIC_VAPID_KEY=' 'VITE_APP_BASE_PATH=/wb/aggr/' > .env.production.local
-          { { npm ci --no-audit --no-fund || npm install --no-audit --no-fund; } && npx vite build --base=/wb/aggr/; } 2>&1 | tee -a ../build.log
+          { { [ -d node_modules ] || npm ci --no-audit --no-fund || npm install --no-audit --no-fund; } && npx vite build --base=/wb/aggr/; } 2>&1 | tee -a ../build.log
           python ../fork/vpfm/aggr/patch_aggr.py dist 2>&1 | tee -a ../build.log
 
       - name: 编译流动性地图（Liquidity Mapper Fast）
@@ -156,7 +165,7 @@ jobs:
           else
             echo "lmap: 没找到默认主题的写法，保持原样" | tee -a ../build.log
           fi
-          { npm ci --no-audit --no-fund && npx vite build --config vite.config.mts; } 2>&1 | tee -a ../build.log
+          { { [ -d node_modules ] || npm ci --no-audit --no-fund; } && npx vite build --config vite.config.mts; } 2>&1 | tee -a ../build.log
 
       - name: 组装界面文件（wb）
         env:
