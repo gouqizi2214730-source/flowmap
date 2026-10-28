@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """把汉化和自动更新补丁套到一份上游 FlowMap 源码上。
 
-用法：python zh-patch/apply.py <上游源码目录> <版本号> <更新源 latest.json 地址> <更新公钥>
+用法：python zh-patch/apply.py <上游源码目录> <版本号> <汉化版仓库 owner/repo>
 
 设计成"每次从上游最新代码重新套一遍"：只复制新增文件、用锚点做少量插入，
 锚点找不到时立即报错退出（工作流失败，不会发布坏包，旧版本继续可用）。
@@ -14,7 +14,7 @@ import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 root = pathlib.Path(sys.argv[1]).resolve()
-version, endpoint, pubkey = sys.argv[2], sys.argv[3], sys.argv[4]
+version, zh_repo = sys.argv[2], sys.argv[3]
 
 
 def edit(rel, fn):
@@ -40,7 +40,8 @@ for src in (HERE / 'client').rglob('*'):
         dst = root / 'client' / src.relative_to(HERE / 'client')
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
-shutil.copy2(HERE / 'app/src-tauri/src/zh_update.rs', root / 'app/src-tauri/src/zh_update.rs')
+(root / 'app/src-tauri/src/zh_update.rs').write_text(
+    (HERE / 'app/src-tauri/src/zh_update.rs').read_text(encoding='utf-8').replace('__ZH_REPO__', zh_repo), encoding='utf-8')
 
 # ---------- 2. i18n：加入中文并设为默认 ----------
 def i18n(s):
@@ -74,7 +75,7 @@ edit('client/index.html', html)
 def cargo(s):
     s = sub1(r'(?m)^version = "[^"]+"', f'version = "{version}"', s, what='Cargo version')
     return sub1(r'(?m)^(tauri = \{[^\n]*\}\n)',
-                r'\1tauri-plugin-updater = "2"\ntauri-plugin-dialog = "2"\n', s, what='tauri 依赖')
+                r'\1tauri-plugin-dialog = "2"\nureq = { version = "2", features = ["json"] }\nsemver = "1"\nsha2 = "0.10"\n', s, what='tauri 依赖')
 
 
 edit('app/src-tauri/Cargo.toml', cargo)
@@ -83,13 +84,6 @@ edit('app/src-tauri/Cargo.toml', cargo)
 def conf(s):
     c = json.loads(s)
     c['version'] = version
-    c['productName'] = 'FlowMap'
-    c.setdefault('bundle', {})['createUpdaterArtifacts'] = True
-    c.setdefault('plugins', {})['updater'] = {
-        'pubkey': pubkey,
-        'endpoints': [endpoint],
-        'windows': {'installMode': 'passive'},
-    }
     return json.dumps(c, ensure_ascii=False, indent=2) + '\n'
 
 
@@ -110,7 +104,7 @@ edit('app/src-tauri/tauri.windows.conf.json', wconf)
 
 def caps(s):
     c = json.loads(s)
-    for p in ('updater:default', 'dialog:default'):
+    for p in ('dialog:default',):
         if p not in c['permissions']:
             c['permissions'].append(p)
     return json.dumps(c, ensure_ascii=False, indent=2) + '\n'
@@ -122,7 +116,7 @@ edit('app/src-tauri/capabilities/default.json', caps)
 def mainrs(s):
     s = sub1(r'(\nuse tauri::\{Manager, WebviewUrl, WebviewWindowBuilder\};\n)', r'\1\nmod zh_update;\n', s, what='use tauri')
     s = sub1(r'(fn main\(\) \{\n\s*tauri::Builder::default\(\)\n)',
-             r'\1        .plugin(tauri_plugin_updater::Builder::new().build())\n        .plugin(tauri_plugin_dialog::init())\n        .menu(|h| zh_update::build_menu(h))\n        .on_menu_event(|app, ev| zh_update::on_menu(app, ev.id().as_ref()))\n',
+             r'\1        .plugin(tauri_plugin_dialog::init())\n        .menu(|h| zh_update::build_menu(h))\n        .on_menu_event(|app, ev| zh_update::on_menu(app, ev.id().as_ref()))\n',
              s, what='Builder::default')
     s = sub1(r'(\n(\s*)spawn_sidecar_monitor\(handle, port\);)',
              r'\n\2zh_update::spawn(handle.clone());\1', s, what='spawn_sidecar_monitor')

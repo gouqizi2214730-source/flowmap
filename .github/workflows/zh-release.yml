@@ -2,7 +2,7 @@ name: 汉化版：同步上游并发布
 
 # 每天检查原项目 nazmiefearmutcu/flowmap 有没有新提交；有就拉下最新源码、
 # 套上 zh-patch（汉化 + 自动更新）、编译 Windows 安装包、签名并发布 Release。
-# 已安装的 FlowMap 中文版会通过 Release 里的 latest.json 发现并安装新版本。
+# 已安装的 FlowMap 中文版会读取本仓库最新 Release，校验 SHA-256 后自动安装新版本。
 on:
   schedule:
     - cron: '17 1 * * *'   # 每天 UTC 01:17（北京时间 09:17）
@@ -69,7 +69,6 @@ jobs:
         shell: bash
     env:
       VERSION: ${{ needs.check.outputs.version }}
-      ENDPOINT: https://github.com/${{ github.repository }}/releases/latest/download/latest.json
     steps:
       - uses: actions/checkout@v4
         with:
@@ -81,14 +80,8 @@ jobs:
           path: flowmap
           fetch-depth: 50
 
-      - name: 检查签名密钥
-        env:
-          K: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: |
-          if [ -z "$K" ]; then echo "缺少仓库 Secret：TAURI_SIGNING_PRIVATE_KEY（更新包签名私钥）" | tee -a build.log; exit 1; fi
-
       - name: 套用汉化与自动更新补丁
-        run: python fork/zh-patch/apply.py flowmap "$VERSION" "$ENDPOINT" "$(cat fork/zh-patch/updater.pub)" 2>&1 | tee -a build.log
+        run: python fork/zh-patch/apply.py flowmap "$VERSION" "$GITHUB_REPOSITORY" 2>&1 | tee -a build.log
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2
@@ -112,9 +105,6 @@ jobs:
 
       - name: 生成图标并编译安装包
         working-directory: flowmap/app/src-tauri
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ''
         run: |
           npx --yes @tauri-apps/cli@2 icon ../icons/icon-1024.png 2>&1 | tail -5 | tee -a ../../../build.log
           npx --yes @tauri-apps/cli@2 build --bundles nsis 2>&1 | tee -a ../../../build.log
@@ -136,7 +126,7 @@ jobs:
           [ "$ok" = 1 ] || { echo "服务器健康检查失败" | tee -a ../build.log; exit 1; }
           echo "服务器健康检查通过" | tee -a ../build.log
 
-      - name: 生成 latest.json 并发布
+      - name: 发布 Release
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.check.outputs.sha }}
@@ -145,40 +135,21 @@ jobs:
           set -euo pipefail
           B=flowmap/app/src-tauri/target/release/bundle/nsis
           EXE=$(ls "$B"/*-setup.exe | head -1)
-          SIG="$EXE.sig"
           NAME="FlowMap-zh_${VERSION}_x64-setup.exe"
           mkdir -p out
           cp "$EXE" "out/$NAME"
-          cp "$SIG" "out/$NAME.sig"
-          LOG=$(git -C flowmap log -8 --format='- %s' | sed 's/"/'"'"'/g')
+          (cd out && sha256sum "$NAME" > "$NAME.sha256")
+          LOG=$(git -C flowmap log -6 --format='- %s')
           DATE=$(git -C flowmap log -1 --format=%cs)
-          URL="https://github.com/$GITHUB_REPOSITORY/releases/download/zh-v$VERSION/$NAME"
-          python - "$VERSION" "$URL" "out/$NAME.sig" "$SHA" "$DATE" <<'PY'
-          import json, sys, datetime, subprocess
-          ver, url, sigf, sha, date = sys.argv[1:]
-          log = subprocess.run(['git', '-C', 'flowmap', 'log', '-6', '--format=- %s'], capture_output=True, text=True).stdout.strip()
-          notes = f"已同步原项目到 {sha[:7]}（{date}）。最近更新：\n{log}"
-          json.dump({
-              'version': ver,
-              'notes': notes,
-              'pub_date': datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-              'platforms': {'windows-x86_64': {'signature': open(sigf).read().strip(), 'url': url}},
-          }, open('out/latest.json', 'w', encoding='utf-8'), ensure_ascii=False, indent=2)
-          PY
           {
-            echo "FlowMap 中文版 $VERSION"
-            echo
-            echo "下载 \`$NAME\` 安装即可；已安装的会在启动时自动提示更新。"
-            echo
-            echo "原项目提交：https://github.com/$UPSTREAM/commit/$SHA （$DATE）"
-            echo
-            echo "最近的原项目更新："
+            echo "已同步原项目到 ${SHA:0:7}（$DATE）。最近更新："
             echo "$LOG"
             echo
             echo "<!-- build-key: $KEY -->"
           } > out/notes.md
-          gh release create "zh-v$VERSION" "out/$NAME" "out/$NAME.sig" out/latest.json \
+          gh release create "zh-v$VERSION" "out/$NAME" "out/$NAME.sha256" \
             --repo "$GITHUB_REPOSITORY" --title "FlowMap 中文版 $VERSION" --notes-file out/notes.md --latest
+          echo "已发布 zh-v$VERSION" | tee -a build.log
 
       - name: 把构建日志保存到 zh-build-log 分支
         if: always()
