@@ -18,12 +18,13 @@
   const SESSION_COLORS = { asia: '#7b6cf6', london: '#45b7ff', nyam: '#f2b33d', nypm: '#ff8a3d' };
 
   const LAYERS = [
-    ['结构', [['swings', '摆动点（HH/HL/LH/LL）'], ['bos', 'BOS / CHoCH'], ['ob', '订单块'], ['fvg', 'FVG 缺口'], ['liq', '等高 / 等低流动性']]],
-    ['ICT / PO3', [['htf', '高周期 K 线（右侧）'], ['po3', 'PO3 序列与 T-Spot'], ['cisd', 'CISD'], ['stdv', 'STDV 投射'], ['smt', 'SMT 背离']]],
+    ['结构', [['swings', '摆动点（HH/HL/LH/LL）'], ['bos', 'BOS / CHoCH'], ['ob', '订单块'], ['fvg', 'FVG 缺口'], ['htffvg', '高周期 FVG'], ['liq', '等高 / 等低流动性']]],
+    ['ICT / PO3', [['htf', '高周期 K 线（右侧）'], ['po3', 'PO3 序列与 T-Spot'], ['cisd', 'CISD'], ['stdv', 'STDV 投射'], ['breaker', 'Breaker / 独角兽'], ['smt', 'SMT 背离']]],
     ['价位', [['pdl', '前日高低'], ['pwl', '前周高低'], ['opens', '日开 / 周开'], ['sessions', '交易时段（纽约时间）']]],
     ['指标', [['bb', '三周期布林带'], ['vwapD', '日 VWAP ±1/2σ'], ['vwapW', '周 VWAP'], ['vwapM', '月 VWAP'], ['rvwap', '滚动 VWAP 30/90/365 天'], ['ema', 'EMA 20/50/200'], ['vp', '成交量分布（可见区间）']]],
   ];
-  const DEF = { swings: true, bos: true, ob: true, fvg: true, liq: true, htf: true, po3: true, cisd: true, stdv: true, smt: false, pdl: true, pwl: false, opens: true, sessions: false, bb: false, vwapD: true, vwapW: false, vwapM: false, rvwap: false, ema: false, vp: true };
+  // 默认只开最常用的几层，图上不至于太乱；其余在右侧「图层」里勾选
+  const DEF = { swings: true, bos: true, ob: false, fvg: true, htffvg: true, breaker: true, liq: true, htf: true, po3: true, cisd: false, stdv: true, smt: false, pdl: true, pwl: false, opens: false, sessions: false, bb: false, vwapD: true, vwapW: false, vwapM: false, rvwap: false, ema: false, vp: true };
   const st = VP.store('structure', { coin: 'BTC', tf: '15m', mkt: 'futures', swing: 10, fvgMin: 0.15, layers: {}, tab: 'layers' });
   const S = st.get();
   S.layers = Object.assign({}, DEF, S.layers);
@@ -65,24 +66,46 @@
   }
   const kl = (sym, t, limit, deep) => (deep ? ex.binance.klinesDeep(sym, t, limit, { spot: mkt === 'spot' }) : ex.binance.klines(sym, t, limit, { spot: mkt === 'spot' }));
 
-  let loadSeq = 0;
+  let loadSeq = 0, loadedKey = '';
+  /** 用新拉到的最近几根 K 线替换 / 追加到已有数据上 */
+  function merge(old, fresh, max) {
+    if (!old || !old.length) return fresh;
+    if (!fresh || !fresh.length) return old;
+    const t0 = fresh[0].t;
+    let k = old.length;
+    while (k > 0 && old[k - 1].t >= t0) k--;
+    const out = old.slice(0, k).concat(fresh);
+    return max && out.length > max ? out.slice(out.length - max) : out;
+  }
   async function load(first) {
     const seq = ++loadSeq;
-    const want = `${coin}|${tf}|${mkt}`;
+    const want = `${coin}|${tf}|${mkt}|${on('smt') ? 1 : 0}`;
+    // 定时刷新只拉最近几十根再拼接；切换币种 / 周期、或者中间断档时整段重拉
+    const inc = !first && loadedKey === want && B.length > 50;
     try {
       const sym = await resolveSymbol();
       const others = [...new Set([...HTF[tf], ...BBTF[tf]])].filter(t => t !== tf);
-      const tasks = [kl(sym, tf, 1500, true), ...others.map(t => kl(sym, t, 300, false)), kl(sym, '1d', 1000, false)];
-      if (on('smt')) tasks.push(kl(coin === 'BTC' ? 'ETHUSDT' : 'BTCUSDT', tf, 1500, true));
+      const cmpSym = coin === 'BTC' ? 'ETHUSDT' : 'BTCUSDT';
+      const tasks = inc
+        ? [kl(sym, tf, 60, false), ...others.map(t => kl(sym, t, 5, false)), kl(sym, '1d', 3, false)]
+        : [kl(sym, tf, 1500, true), ...others.map(t => kl(sym, t, 300, false)), kl(sym, '1d', 1000, false)];
+      if (on('smt')) tasks.push(inc ? kl(cmpSym, tf, 60, false) : kl(cmpSym, tf, 1500, true));
       const res = await Promise.allSettled(tasks);
-      if (seq !== loadSeq || want !== `${coin}|${tf}|${mkt}`) return;
+      if (seq !== loadSeq || want !== `${coin}|${tf}|${mkt}|${on('smt') ? 1 : 0}`) return;
       if (res[0].status !== 'fulfilled') throw res[0].reason;
-      B = res[0].value.filter(b => isFinite(b.c));
-      H = { [tf]: B };
-      others.forEach((t, k) => { if (res[k + 1].status === 'fulfilled') H[t] = res[k + 1].value; });
+      const fresh = res[0].value.filter(b => isFinite(b.c));
+      if (inc && fresh.length && fresh[0].t > B[B.length - 1].t + secOf(tf)) { loadedKey = ''; return load(true); }
+      if (!inc && fresh.length < 30) throw new Error(fresh.length ? `只有 ${fresh.length} 根 K 线，数据太少` : '交易所没有返回 K 线（可能还没上线这个交易对）');
+      B = inc ? merge(B, fresh, 1500) : fresh;
+      const H2 = { [tf]: B };
+      others.forEach((t, k) => { if (res[k + 1].status === 'fulfilled') H2[t] = inc ? merge(H[t], res[k + 1].value, 300) : res[k + 1].value; else if (inc && H[t]) H2[t] = H[t]; });
+      H = H2;
       const dIdx = others.length + 1;
-      daily = res[dIdx].status === 'fulfilled' ? res[dIdx].value : [];
-      cmpBars = on('smt') && res[dIdx + 1]?.status === 'fulfilled' ? res[dIdx + 1].value : null;
+      if (res[dIdx].status === 'fulfilled') daily = inc ? merge(daily, res[dIdx].value, 1000) : res[dIdx].value;
+      else if (!inc) daily = [];
+      if (on('smt') && res[dIdx + 1]?.status === 'fulfilled') cmpBars = inc ? merge(cmpBars, res[dIdx + 1].value, 1500) : res[dIdx + 1].value;
+      else if (!on('smt')) cmpBars = null;
+      loadedKey = want;
       const failed = res.filter(r => r.status === 'rejected').length;
       setStatus(`${sym}${mkt === 'spot' ? ' 现货' : ' 永续'}，更新于 ${fmt.time(Date.now())}` + (failed ? `，${failed} 项失败` : ''), failed > 0);
       $('#chartMsg').hidden = true;
@@ -141,6 +164,17 @@
     const [h1, h2] = HTF[tf];
     r.h1 = H[h1] || []; r.h2 = H[h2] || []; r.h1tf = h1; r.h2tf = h2;
     r.po3 = SMC.po3(r.h1);
+    // 高周期 FVG（参考 HTF FVGs 15m-1H-4H Tap）：只留没回补的，按离现价远近各取 4 个
+    const px = B[B.length - 1].c;
+    r.htfFvg = [[h1, r.h1], [h2, r.h2]].flatMap(([t, hb]) => {
+      if (!hb || hb.length < 5) return [];
+      const hAtr = SMC.atr(hb);
+      return SMC.fvg(hb, { minSize: hAtr * 0.1 }).filter(f => f.filled < 0 && f.i > hb.length - 120)
+        .map(f => ({ ...f, tf: t, start: idxAtOrAfter(hb[f.i - 1].t), dist: Math.min(Math.abs(f.top - px), Math.abs(f.bottom - px)) }))
+        .sort((a, b) => a.dist - b.dist).slice(0, 4);
+    });
+    // Breaker / 独角兽（参考 Unicorn Model）：第一个高周期的高低点被扫后的结构
+    r.brk = SMC.breakers(B, r.h1, secOf(h1), r.fvg);
     const seq = r.po3[0];
     if (seq) {
       const c2Start = idxAtOrAfter(seq.c2.t);
@@ -197,6 +231,7 @@
     for (const c of r.cisd.slice(-12)) ev.push({ i: c.i, bull: c.bull, text: `${c.bull ? '看涨' : '看跌'} CISD ${fmt.price(c.level)}${c.invalid >= 0 ? '（已失效）' : ''}` });
     for (const l of r.liq) if (l.swept >= 0) ev.push({ i: l.swept, bull: l.type < 0, text: `扫${l.type > 0 ? '等高' : '等低'} ${fmt.price(l.level)}` });
     for (const f of r.fvg.slice(-30)) if (f.filled < 0 && f.mitigated < 0) ev.push({ i: f.i + 1, bull: f.dir > 0, text: `${f.dir > 0 ? '看涨' : '看跌'} FVG ${fmt.price(f.bottom)}–${fmt.price(f.top)}` });
+    for (const k of r.brk || []) ev.push({ i: k.confirm, bull: k.side > 0, text: `${k.side > 0 ? '看涨' : '看跌'}${k.unicorn ? '独角兽' : ' Breaker'}确认（扫${VP.TF_NAME[r.h1tf]}${k.side > 0 ? '低点' : '高点'} ${fmt.price(k.level)}）${k.invalid >= 0 ? '，已失效' : ''}` });
     if (r.smt) for (const s of r.smt) ev.push({ i: s.i2, bull: s.type > 0, text: `${s.type > 0 ? '看涨' : '看跌'} SMT（对比 ${coin === 'BTC' ? 'ETH' : 'BTC'}）` });
     const seq = r.po3[0];
     if (seq) ev.push({ i: seq.c2Idx ?? B.length - 1, bull: seq.side > 0, text: `${VP.TF_NAME[r.h1tf]} C2 ${seq.side > 0 ? '扫低' : '扫高'}${seq.closedIn ? '后收回' : '（进行中）'}` });
@@ -323,6 +358,23 @@
           box(X(f.i - 1) - bs / 2, f.filled >= 0 ? X(end) : right + bs * 2, f.top, f.bottom, alpha(hex(col), done ? 0.06 : f.mitigated >= 0 ? 0.12 : 0.18), null);
         }
       }
+      // 高周期 FVG：虚线框 + 周期标签
+      if (L.htffvg) for (const f of R.htfFvg || []) {
+        const x0 = X(Math.max(0, Math.min(f.start, nB - 1))) - bs / 2;
+        const col = hex(f.dir > 0 ? c.up : c.down);
+        box(x0, right + bs * 2, f.top, f.bottom, alpha(col, f.mitigated >= 0 ? 0.07 : 0.12), alpha(col, 0.65), [5, 3]);
+        tag(g, `${VP.TF_NAME[f.tf]} FVG${f.mitigated >= 0 ? ' 已触及' : ''}`, Math.max(4, x0 + 3), (Y(f.top) ?? 0) + 8, alpha(col, 0.95));
+      }
+      // Breaker / 独角兽
+      if (L.breaker) for (const k of R.brk || []) {
+        const end = k.invalid >= 0 ? k.invalid : nB - 1;
+        if (!inView(k.i0, end)) continue;
+        const col = hex(k.side > 0 ? c.up : c.down);
+        const dim = k.invalid >= 0;
+        box(X(k.i0) - bs / 2, k.invalid >= 0 ? X(end) : right + bs * 2, k.top, k.bottom, alpha(col, dim ? 0.05 : 0.1), alpha(col, dim ? 0.35 : 0.9));
+        if (k.fvg) box(X(k.i0) - bs / 2, X(k.confirm) + bs / 2, Math.min(k.top, k.fvg.top), Math.max(k.bottom, k.fvg.bottom), alpha('#f2b33d', dim ? 0.08 : 0.22), null);
+        tag(g, `${k.side > 0 ? '+' : '−'}${k.unicorn ? '独角兽' : 'Breaker'}${dim ? '（失效）' : ''}`, X(k.i0) - bs / 2 + 3, k.side > 0 ? (Y(k.bottom) ?? 0) + 9 : (Y(k.top) ?? 0) - 9, alpha(col, dim ? 0.5 : 1));
+      }
       // 订单块：每个方向显示最近 4 个
       if (L.ob) {
         for (const dir of [1, -1]) {
@@ -383,6 +435,12 @@
       const x0 = Math.max(0, X(Math.max(0, idxAtOrAfter(t0))) ?? 0);
       hl(y, x0, right + bs * 2 + LABEL_W, alpha(hex(col), 0.75), dash);
       tag(g, `${name} ${fmt.price(p)}`, right + bs * 2 + 2, y - 7, hex(col));
+    }
+    // Breaker 的扫单线：从高周期价位到扫单极值
+    if (L.breaker) for (const k of R.brk || []) {
+      const i0 = Math.max(0, idxAtOrAfter(k.levelT));
+      if (!inView(i0, k.sweep)) continue;
+      hl(Y(k.level), X(i0), X(k.sweep), alpha(hex(k.side > 0 ? c.up : c.down), 0.7), [1, 3]);
     }
     // 摆动点
     if (L.swings) for (const p of R.swLabels) {
@@ -553,6 +611,13 @@
     const fDn = openF.filter(f => f.top < px).sort((a, b) => b.top - a.top)[0];
     rows.push(['上方最近 FVG', fUp ? dist(fUp.bottom) : '—']);
     rows.push(['下方最近 FVG', fDn ? dist(fDn.top) : '—']);
+    const hf = (R.htfFvg || []);
+    const hUp = hf.filter(f => f.bottom > px).sort((a, b) => a.bottom - b.bottom)[0];
+    const hDn = hf.filter(f => f.top < px).sort((a, b) => b.top - a.top)[0];
+    if (hUp) rows.push([`上方 ${VP.TF_NAME[hUp.tf]} FVG`, dist(hUp.bottom)]);
+    if (hDn) rows.push([`下方 ${VP.TF_NAME[hDn.tf]} FVG`, dist(hDn.top)]);
+    const lastBrk = (R.brk || [])[0];
+    if (lastBrk) rows.push(['最近 Breaker', `<span class="${lastBrk.side > 0 ? 'up' : 'down'}">${lastBrk.side > 0 ? '看涨' : '看跌'}${lastBrk.unicorn ? '独角兽' : ''}</span> ${fmt.price(lastBrk.bottom)}–${fmt.price(lastBrk.top)}${lastBrk.invalid >= 0 ? '（已失效）' : ''}`]);
     const act = R.ob.filter(o => !o.breaker);
     const oUp = act.filter(o => o.bottom > px).sort((a, b) => a.bottom - b.bottom)[0];
     const oDn = act.filter(o => o.top < px).sort((a, b) => b.top - a.top)[0];
@@ -640,7 +705,7 @@
     document.querySelectorAll('#mkt button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === mkt)));
     $('#coin').value = coin;
   }
-  function restart() { B = []; R = null; markTop(); renderLayers(); $('#chartMsg').hidden = false; $('#chartMsg').textContent = '加载中…'; load(true); timer.stop(); timer = VP.every(refreshMs(), () => load(false), { immediate: false }); }
+  function restart() { B = []; R = null; loadedKey = ''; markTop(); renderLayers(); $('#chartMsg').hidden = false; $('#chartMsg').textContent = '加载中…'; load(true); timer.stop(); timer = VP.every(refreshMs(), () => load(false), { immediate: false }); }
   const refreshMs = () => (tf === '1m' || tf === '5m' ? 15000 : tf === '15m' || tf === '1h' ? 30000 : 60000);
   $('#tf').innerHTML = TFS.map(t => `<button type="button" data-v="${t}">${t}</button>`).join('');
   $('#quick').innerHTML = QUICK.map(c => `<button type="button" class="chip" data-v="${c}">${c}</button>`).join('');

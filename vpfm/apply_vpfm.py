@@ -76,7 +76,8 @@ def mainrs(s):
              '            return Ok(p);\n'
              '        }\n'
              '    }\n', s, what='free_loopback_port')
-    s = sub1(r'\.title\("FlowMap"\)', '.title("VPFM")', s, what='窗口标题')
+    # 窗口标题；深色主题让各模块的"跟随系统配色"都走深色（FlowMap 在浅色 Windows 上会默认用浅色主题）
+    s = sub1(r'\.title\("FlowMap"\)', '.title("VPFM")\n                .theme(Some(tauri::Theme::Dark))', s, what='窗口标题')
     s = re.sub(r'show_error_box\(\s*"FlowMap",', 'show_error_box(\n                        "VPFM",', s)
     s = s.replace('FlowMap 已经在运行。', 'VPFM 已经在运行。').replace('请先关闭另一个 FlowMap 窗口', '请先关闭另一个 VPFM 窗口') \
          .replace('卡住的 FlowMap 进程', '卡住的 VPFM 进程').replace('"FlowMap 启动失败"', '"VPFM 启动失败"') \

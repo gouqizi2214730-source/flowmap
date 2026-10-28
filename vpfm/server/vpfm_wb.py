@@ -144,7 +144,16 @@ def _fix_mimetypes() -> None:
 
 
 # ---------------------------------------------------------------- 安全检查
+def _host_ok(request: Request) -> bool:
+    """防 DNS 重绑定：只认用 127.0.0.1 / localhost 访问本服务的请求。"""
+    host = request.headers.get("host", "")
+    name = host.rsplit(":", 1)[0] if not host.startswith("[") else host.split("]")[0] + "]"
+    return name in ("127.0.0.1", "localhost", "[::1]")
+
+
 def _same_origin(request: Request) -> bool:
+    if not _host_ok(request):
+        return False
     origin = request.headers.get("origin")
     if origin:
         try:

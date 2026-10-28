@@ -121,12 +121,16 @@ jobs:
 
       - name: 编译深度热力图（FlowMap 前端）
         working-directory: flowmap/client
+        env:
+          MSYS_NO_PATHCONV: '1'   # 不让 Git Bash 把 --base=/wb/... 改写成 C:/Program Files/Git/wb/...
         run: |
           set -o pipefail
           { npm ci && npx vite build --base=/wb/flowmap/; } 2>&1 | tee -a ../../build.log
 
       - name: 编译聚合成交（aggr）
         working-directory: aggr
+        env:
+          MSYS_NO_PATHCONV: '1'
         run: |
           set -o pipefail
           # aggr 依赖的图表库写的是 git+ssh 地址，构建机上改用 https 拉取
@@ -142,8 +146,16 @@ jobs:
         working-directory: lmap
         env:
           HLM_SOURCEMAP: 'off'
+          MSYS_NO_PATHCONV: '1'
         run: |
           set -o pipefail
+          # 默认主题从浅色改成深色，和 VPFM 其他模块一致（用户在它的菜单里选过就按用户的）
+          if grep -q "export const DEFAULT_THEME = 'light';" src/app/store.ts; then
+            sed -i "s/export const DEFAULT_THEME = 'light';/export const DEFAULT_THEME = 'midnight';/" src/app/store.ts
+            echo "lmap: 默认主题改为 midnight" | tee -a ../build.log
+          else
+            echo "lmap: 没找到默认主题的写法，保持原样" | tee -a ../build.log
+          fi
           { npm ci --no-audit --no-fund && npx vite build --config vite.config.mts; } 2>&1 | tee -a ../build.log
 
       - name: 组装界面文件（wb）
@@ -159,6 +171,9 @@ jobs:
           cp -r flowmap/client/dist "$WB/flowmap"
           cp -r aggr/dist "$WB/aggr"
           cp -r lmap/dist "$WB/lmap"
+          if grep -l "Program Files\|Program%20Files" "$WB"/flowmap/index.html "$WB"/aggr/index.html "$WB"/lmap/index.html; then
+            echo "资源路径被改写成了 Windows 路径" | tee -a build.log; exit 1
+          fi
           mkdir -p "$WB/licenses"
           cp flowmap/LICENSE "$WB/licenses/FlowMap-Apache-2.0.txt"
           cp aggr/LICENSE "$WB/licenses/aggr-GPL-3.0.txt"
@@ -217,6 +232,16 @@ jobs:
           done
           curl -fsS "$B/wb/aggr/" -o page.html || fail "/wb/aggr/ 打不开"
           grep -F 'zh-aggr.js' page.html >/dev/null || fail "aggr 没有加上中文脚本"
+          # 每个模块的入口脚本和样式都要能取到（防止资源路径写错导致白屏）
+          for m in flowmap aggr lmap; do
+            curl -fsS "$B/wb/$m/" -o page.html || fail "/wb/$m/ 打不开"
+            for u in $(grep -oE '(src|href)="[^"]+\.(js|css)"' page.html | sed -E 's/^(src|href)="//; s/"$//'); do
+              case "$u" in /*) url="$B$u" ;; ./*) url="$B/wb/$m/${u#./}" ;; *) url="$B/wb/$m/$u" ;; esac
+              code=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+              echo "$m 资源 $u -> $code" | tee -a ../build.log
+              [ "$code" = 200 ] || fail "$m 的资源 $u 取不到（$code）"
+            done
+          done
           ct=$(curl -sI "$B/wb/shell.js" | tr -d '\r' | grep -i '^content-type:' | cut -d' ' -f2- || true)
           echo "shell.js content-type: $ct" | tee -a ../build.log
           case "$ct" in *javascript*) ;; *) fail "脚本的 MIME 类型不对：$ct" ;; esac

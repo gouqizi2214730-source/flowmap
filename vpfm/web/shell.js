@@ -101,11 +101,16 @@ function ensureFrame(id) {
   el.title = m.name;
   el.allow = 'clipboard-read; clipboard-write; fullscreen; autoplay';
   el.src = m.src;
-  el.addEventListener('load', () => wire(el));
+  el.addEventListener('load', () => { wire(el); if (el.hidden) tellVisible({ el }, false); });
   $('#stage').append(el);
   f = { el, hiddenAt: 0 };
   frames.set(id, f);
   return f;
+}
+
+/** 告诉模块自己是否在前台（隐藏的 iframe 不会触发 document.hidden），模块据此暂停定时刷新 */
+function tellVisible(f, visible) {
+  try { f.el.contentWindow.dispatchEvent(new CustomEvent('vpfm-visible', { detail: visible })); } catch { /* 还没加载完 */ }
 }
 
 function show(id, opts = {}) {
@@ -113,14 +118,14 @@ function show(id, opts = {}) {
   if (id === current && !opts.force) return;
   if (current && current !== 'settings') {
     const f = frames.get(current);
-    if (f) { f.el.hidden = true; f.hiddenAt = Date.now(); }
+    if (f) { f.el.hidden = true; f.hiddenAt = Date.now(); tellVisible(f, false); }
   }
   $('#settings').hidden = id !== 'settings';
   if (id === 'settings') {
     refreshSettings();
   } else {
     const f = ensureFrame(id);
-    f.el.hidden = false; f.hiddenAt = 0;
+    f.el.hidden = false; f.hiddenAt = 0; tellVisible(f, true);
     try { f.el.contentWindow.focus(); } catch { /* 跨域时忽略 */ }
     shell.last = id; writeJson(SHELL_KEY, shell);
   }

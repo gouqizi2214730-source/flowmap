@@ -6,6 +6,7 @@
 .og { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); }
 .og .pane { border-right: 1px solid var(--line); }
 .og .pane:nth-child(2n) { border-right: 0; }
+.og .pane.dvol { grid-column: 1 / -1; border-right: 0; }
 .og .pane-body { margin: 2px 4px 6px 8px; }
 
 .og2 { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); align-items: start; }

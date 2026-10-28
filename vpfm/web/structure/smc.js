@@ -408,6 +408,51 @@
     return out.sort((a, b) => a.i2 - b.i2);
   };
 
+  /* ---------------- Breaker / 独角兽（Unicorn Model 的思路） ---------------- */
+  // 高周期已收完 K 线的高 / 低点被扫 → 扫完之后第一段连续反向 K 线构成 Breaker →
+  // 收盘越过 Breaker 另一侧确认；Breaker 区间里有同向 FVG 就是"独角兽"。
+  SMC.breakers = function (bars, htf, htfSec, fvgs, { minRun = 2, window = 24 } = {}) {
+    const n = bars.length;
+    if (n < 10 || htf.length < 2) return [];
+    const idxAfter = t => { let lo = 0, hi = n - 1, r = n; while (lo <= hi) { const m = (lo + hi) >> 1; if (bars[m].t >= t) { r = m; hi = m - 1; } else lo = m + 1; } return r; };
+    const out = [];
+    for (const c of htf.slice(-25, -1)) {
+      const from = idxAfter(c.t + htfSec);
+      if (from >= n) continue;
+      for (const side of [1, -1]) {           // 1：扫低点后看涨；-1：扫高点后看跌
+        const lvl = side > 0 ? c.l : c.h;
+        let j = -1;
+        for (let k = from; k < n; k++) if (side > 0 ? bars[k].l < lvl : bars[k].h > lvl) { j = k; break; }
+        if (j < 0) continue;
+        // 扫单极值：之后 window 根内最极端的那根
+        let e = j;
+        for (let k = j; k < Math.min(n, j + window); k++) if (side > 0 ? bars[k].l < bars[e].l : bars[k].h > bars[e].h) e = k;
+        // 极值之后第一段连续同向 K 线（看涨要阳线）
+        let a = -1, b = -1;
+        for (let k = e; k < Math.min(n, e + window); k++) {
+          const ok = side > 0 ? bars[k].c > bars[k].o : bars[k].c < bars[k].o;
+          if (ok) { if (a < 0) a = k; b = k; } else if (a >= 0) { if (b - a + 1 >= minRun) break; a = -1; }
+        }
+        if (a < 0 || b - a + 1 < minRun) continue;
+        let top = -Infinity, bottom = Infinity;
+        for (let k = a; k <= b; k++) { top = Math.max(top, bars[k].h); bottom = Math.min(bottom, bars[k].l); }
+        let confirm = -1;
+        for (let k = b + 1; k < Math.min(n, b + 1 + window * 2); k++) {
+          if (side > 0 ? bars[k].c > top : bars[k].c < bottom) { confirm = k; break; }
+          if (side > 0 ? bars[k].c < bottom : bars[k].c > top) break;
+        }
+        if (confirm < 0) continue;
+        const fvg = fvgs.find(f => f.dir === side && f.i >= e && f.i <= confirm && f.bottom < top && f.top > bottom) || null;
+        let invalid = -1;
+        for (let k = confirm + 1; k < n; k++) if (side > 0 ? bars[k].c < bottom : bars[k].c > top) { invalid = k; break; }
+        out.push({ side, level: lvl, levelT: c.t, sweep: e, i0: a, i1: b, top, bottom, confirm, unicorn: !!fvg, fvg, invalid });
+      }
+    }
+    // 同一段行情可能被几个价位重复识别：按确认 K 线去重，留最近的
+    const seen = new Set();
+    return out.sort((x, y) => y.confirm - x.confirm).filter(x => { const k = x.side + ':' + x.i0; if (seen.has(k)) return false; seen.add(k); return true; }).slice(0, 6);
+  };
+
   /* ---------------- 高周期 K 线聚合 ---------------- */
   SMC.aggregate = function (bars, sec) {
     const out = [];

@@ -190,20 +190,30 @@
     clearTimeout(toastTimer); toastTimer = setTimeout(() => { t.hidden = true; }, 3500);
   };
 
-  /** 页面隐藏（切到别的模块）时暂停定时刷新，回来立即补一次 */
+  /** 模块是否在前台：外壳切走时会发 vpfm-visible 事件（iframe 被隐藏不会触发 document.hidden） */
+  VP.active = true;
+  const visListeners = new Set();
+  window.addEventListener('vpfm-visible', e => {
+    const was = VP.active;
+    VP.active = !!e.detail;
+    if (VP.active !== was) visListeners.forEach(fn => { try { fn(VP.active); } catch (err) { console.error(err); } });
+  });
+  document.addEventListener('visibilitychange', () => visListeners.forEach(fn => { try { fn(!document.hidden && VP.active); } catch (err) { console.error(err); } }));
+  VP.isVisible = () => !document.hidden && VP.active;
+  VP.onVisible = fn => visListeners.add(fn);
+
+  /** 定时刷新：模块不在前台时暂停，回到前台时如果已经过期立即补一次 */
   VP.every = function (ms, fn, { immediate = true } = {}) {
     let timer = 0, last = 0, stopped = false;
     const run = async () => {
       if (stopped) return;
       clearTimeout(timer);
-      if (document.hidden) { timer = setTimeout(run, 1000); return; }
+      if (!VP.isVisible()) { timer = setTimeout(run, 1000); return; }
       last = Date.now();
       try { await fn(); } catch (e) { console.error(e); }
       if (!stopped) timer = setTimeout(run, ms);
     };
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden && Date.now() - last > ms) run();
-    });
+    visListeners.add(vis => { if (vis && !stopped && Date.now() - last > ms) run(); });
     if (immediate) run(); else timer = setTimeout(run, ms);
     return { stop() { stopped = true; clearTimeout(timer); }, now: run };
   };
@@ -308,6 +318,7 @@
         return d.map(k => ({ t: n(k[0]) / 1000, o: n(k[1]), h: n(k[2]), l: n(k[3]), c: n(k[4]), v: n(k[6]), qv: n(k[7]) })).reverse();
       },
       tickers: async () => okxOk(await VP.get(`${OK}/api/v5/market/tickers?instType=SWAP`, { ttl: 15000 })),
+      ticker: async inst => okxOk(await VP.get(`${OK}/api/v5/market/ticker?instId=${inst}`, { ttl: 4000 }))[0],
       oiAll: async () => okxOk(await VP.get(`${OK}/api/v5/public/open-interest?instType=SWAP`, { ttl: 15000 })),
       oi: async inst => okxOk(await VP.get(`${OK}/api/v5/public/open-interest?instType=SWAP&instId=${inst}`, { ttl: 8000 }))[0],
       funding: async inst => okxOk(await VP.get(`${OK}/api/v5/public/funding-rate?instId=${inst}`, { ttl: 30000 }))[0],
@@ -331,6 +342,7 @@
     },
     bitget: {
       tickers: async () => bitgetOk(await VP.get(`${BG}/api/v2/mix/market/tickers?productType=USDT-FUTURES`, { ttl: 15000 })),
+      ticker: async sym => bitgetOk(await VP.get(`${BG}/api/v2/mix/market/ticker?symbol=${sym}&productType=USDT-FUTURES`, { ttl: 4000 }))[0],
       async fundingAll() {
         try { return bitgetOk(await VP.get(`${BG}/api/v2/mix/market/current-fund-rate?productType=USDT-FUTURES`, { ttl: 60000, retries: 0 })); } catch { return []; }
       },

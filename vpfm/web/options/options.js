@@ -47,7 +47,7 @@
     const cur = st.get().cur;
     try {
       const [sum, idx, trades, dvol] = await Promise.allSettled([
-        ex.deribit.summary(cur, 'option'), ex.deribit.index(cur), ex.deribit.trades(cur, 1000), ex.deribit.volIndex(cur, 3600, 48),
+        ex.deribit.summary(cur, 'option'), ex.deribit.index(cur), ex.deribit.trades(cur, 1000), ex.deribit.volIndex(cur, 3600, 24 * 30),
       ]);
       if (cur !== st.get().cur) return;
       if (sum.status !== 'fulfilled') throw sum.reason;
@@ -71,9 +71,13 @@
       const exps = [...new Set(opts.map(o => o.exp))].sort((a, b) => a - b);
       let dv = null;
       if (dvol.status === 'fulfilled' && dvol.value.data?.length) {
-        const rows = dvol.value.data;
-        const last = rows[rows.length - 1], dayAgo = rows.find(r => r[0] >= last[0] - 24 * 3600e3) || rows[0];
-        dv = { now: n(last[4]), chg: n(last[4]) - n(dayAgo[4]) };
+        const rows = dvol.value.data.map(r => ({ t: n(r[0]), v: n(r[4]) })).filter(r => isFinite(r.v)).sort((a, b) => a.t - b.t);
+        const last = rows[rows.length - 1], dayAgo = rows.find(r => r.t >= last.t - 24 * 3600e3) || rows[0];
+        const vals = rows.map(r => r.v);
+        const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+        const sd = Math.sqrt(vals.reduce((a, b) => a + (b - mean) ** 2, 0) / vals.length) || 1;
+        const pct = vals.filter(v => v <= last.v).length / vals.length;
+        dv = { now: last.v, chg: last.v - dayAgo.v, rows, mean, sd, z: (last.v - mean) / sd, pct };
       }
       D = { cur, spot, opts, exps, trades: trades.status === 'fulfilled' ? trades.value : [], dvol: dv, at: now };
       const errs = [idx, trades, dvol].filter(x => x.status === 'rejected').map(x => x.reason.message);
@@ -172,7 +176,7 @@
     const firstExp = sel.exp === 'one' ? exps.find(e => e.code === sel.one) : exps.find(e => daysLeft(e.exp) > 0.2) || exps[0];
     C = { list, strikes, prof, flip, callWall, putWall, cOi, pOi, cVol, pVol, net, exps, firstExp };
     renderKpis(); renderTable(); renderTrades(); fillSmileChoices();
-    charts.gex.redraw(); charts.profile.redraw(); charts.smile.redraw(); charts.term.redraw();
+    charts.gex.redraw(); charts.profile.redraw(); charts.smile.redraw(); charts.term.redraw(); charts.dvol.redraw();
   }
 
   /* ------------------------------------------------------------ 指标条与表格 */
@@ -417,6 +421,43 @@
         + `<div class="row"><span>25Δ RR</span><b>${isFinite(e.rr) ? (e.rr * 100).toFixed(1) : '—'}</b></div>`
         + `<div class="row"><span>25Δ 蝶式</span><b>${isFinite(e.bf) ? (e.bf * 100).toFixed(1) : '—'}</b></div>`
         + `<div class="row"><span>最大痛点</span><b>${fk(e.maxPain)}</b></div>`;
+    },
+  });
+
+  charts.dvol = VP.plot($('#dvolChart'), (g, w, h, state) => {
+    const dv = D && D.dvol;
+    if (!dv || !dv.rows || dv.rows.length < 10) { D_.label(g, '暂时拿不到 DVOL 数据', w / 2, h / 2, { color: VP.colors().faint, align: 'center' }); return; }
+    const c = VP.colors();
+    const rows = dv.rows;
+    const t0 = rows[0].t, t1 = rows[rows.length - 1].t;
+    const lo = Math.min(dv.mean - 2.3 * dv.sd, ...rows.map(r => r.v)) - 1, hi = Math.max(dv.mean + 2.3 * dv.sd, ...rows.map(r => r.v)) + 1;
+    const X = VP.scale(t0, t1, 4, w - RIGHT), Y = VP.scale(lo, hi, h - BOTTOM, TOP);
+    // ±1σ / ±2σ 区间
+    g.fillStyle = 'rgba(166,140,250,.07)'; g.fillRect(4, Y(dv.mean + 2 * dv.sd), w - RIGHT - 4, Y(dv.mean - 2 * dv.sd) - Y(dv.mean + 2 * dv.sd));
+    g.fillStyle = 'rgba(166,140,250,.09)'; g.fillRect(4, Y(dv.mean + dv.sd), w - RIGHT - 4, Y(dv.mean - dv.sd) - Y(dv.mean + dv.sd));
+    D_.yAxis(g, VP.niceTicks(lo, hi, 4), Y, w - RIGHT, w, v => v.toFixed(0), c.faint, 'rgba(40,56,78,.35)');
+    const days = []; for (let t = Math.ceil(t0 / 86400e3) * 86400e3; t <= t1; t += 86400e3 * 5) days.push(t);
+    D_.xAxis(g, days, X, h - BOTTOM, t => fmt.date(t), c.faint, null);
+    D_.hline(g, 4, w - RIGHT, Y(dv.mean), 'rgba(166,140,250,.8)', [4, 3]);
+    D_.label(g, '均值', 8, Y(dv.mean) - 8, { color: '#a68cfa' });
+    D_.label(g, '+2σ', 8, Y(dv.mean + 2 * dv.sd) + 9, { color: c.faint });
+    g.beginPath(); rows.forEach((r, i) => (i ? g.lineTo(X(r.t), Y(r.v)) : g.moveTo(X(r.t), Y(r.v))));
+    g.strokeStyle = c.text; g.lineWidth = 1.4; g.stroke();
+    // 超过 +2σ 的时段标成橙色
+    g.fillStyle = '#ff6a3d';
+    for (const r of rows) if (r.v > dv.mean + 2 * dv.sd) { g.beginPath(); g.arc(X(r.t), Y(r.v), 2, 0, Math.PI * 2); g.fill(); }
+    if (state.mouse) D_.vline(g, state.mouse.x, TOP, h - BOTTOM, '#566a86', [3, 3]);
+    const mood = dv.z >= 2 ? '恐慌：期权保护很贵' : dv.z >= 1 ? '偏紧张' : dv.z <= -1 ? '平静：期权便宜' : '正常';
+    $('#lg-dvol').innerHTML = `<span>当前 <b>${dv.now.toFixed(1)}</b></span><span>24h <b>${dv.chg >= 0 ? '+' : ''}${dv.chg.toFixed(1)}</b></span>`
+      + `<span>近 30 天 <b>${(dv.pct * 100).toFixed(0)}%</b> 分位</span><span>偏离均值 <b>${dv.z >= 0 ? '+' : ''}${dv.z.toFixed(1)}σ</b></span><span style="color:${dv.z >= 2 ? '#ff6a3d' : dv.z <= -1 ? '#45b7ff' : 'var(--text-dim)'}">${mood}</span>`;
+  }, {
+    onHover(mx) {
+      const dv = D && D.dvol; if (!dv || !dv.rows) return '';
+      const rows = dv.rows, w = $('#dvolChart').clientWidth;
+      const X = VP.scale(rows[0].t, rows[rows.length - 1].t, 4, w - RIGHT);
+      const t = X.invert(mx);
+      const r = rows.reduce((a, b) => (Math.abs(b.t - t) < Math.abs(a.t - t) ? b : a));
+      return `<div><b>${fmt.date(r.t)} ${fmt.time(r.t, false)}</b></div><div class="row"><span>DVOL</span><b>${r.v.toFixed(2)}</b></div><div class="row"><span>偏离均值</span><b>${((r.v - dv.mean) / dv.sd).toFixed(1)}σ</b></div>`;
     },
   });
 

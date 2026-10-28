@@ -96,16 +96,16 @@
       byT: m.by ? ex.bybit.tickers(m.by.sym) : skip(),
       okOi: m.ok ? ex.okx.oi(m.ok.inst) : skip(),
       okF: m.ok ? ex.okx.funding(m.ok.inst) : skip(),
-      okT: m.ok ? ex.okx.tickers() : skip(),
-      bgT: m.bg ? ex.bitget.tickers() : skip(),
+      okT: m.ok ? ex.okx.ticker(m.ok.inst) : skip(),
+      bgT: m.bg ? ex.bitget.ticker(m.bg.sym) : skip(),
       hl: m.hl ? ex.hyperliquid.ctxs() : skip(),
     });
     const parts = [];
     let price = NaN, chg = NaN;
     if (r.bnT) { price = n(r.bnT.lastPrice); chg = n(r.bnT.priceChangePercent) / 100; }
     const by = r.byT && r.byT[0];
-    const okT = r.okT && m.ok ? r.okT.find(x => x.instId === m.ok.inst) : null;
-    const bg = r.bgT && m.bg ? r.bgT.find(x => x.symbol === m.bg.sym) : null;
+    const okT = r.okT || null;
+    const bg = r.bgT || null;
     const hl = r.hl && m.hl ? r.hl.find(x => x.name === m.hl.name) : null;
     if (!isFinite(price) && by) { price = n(by.lastPrice); chg = n(by.price24hPcnt); }
 
@@ -446,7 +446,7 @@
     scheduleRender();
   }
   let renderPending = false;
-  function scheduleRender() { if (!renderPending) { renderPending = true; requestAnimationFrame(() => { renderPending = false; renderLiqs(); }); } }
+  function scheduleRender() { if (!renderPending && VP.isVisible()) { renderPending = true; requestAnimationFrame(() => { renderPending = false; renderLiqs(); }); } }
 
   function liqFilter() {
     const s = st.get();
@@ -573,7 +573,8 @@
       },
     });
     Object.values(feeds).forEach(f => f.onStatus(feedBadge));
-    setInterval(() => { if (!document.hidden) renderLiqs(); }, 15000);
+    setInterval(() => { if (VP.isVisible()) renderLiqs(); }, 15000);
+    VP.onVisible(v => { if (v) renderLiqs(); });
 
     $('#liqScope').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { st.set({ liqScope: b.dataset.v }); renderLiqs(); } });
     $('#liqMin').addEventListener('change', e => { st.set({ liqMin: Number(e.target.value) }); renderLiqs(); });
@@ -634,15 +635,15 @@
     list.sort((a, b) => b.vol - a.vol);
     list = list.slice(0, 80);
     // OKX 没有批量资金费率接口：只补成交额前 40 的
-    const okList = list.filter(x => x.okInst).slice(0, 40);
-    await VP.pool(okList, 4, async x => {
+    const okList = list.filter(x => x.okInst).slice(0, 30);
+    await VP.pool(okList, 3, async x => {
       const d = await ex.okx.funding(x.okInst);
       const h = (n(d.nextFundingTime) - n(d.fundingTime)) / 3.6e6;
       setF(x, 'okx', n(d.fundingRate), h > 0 ? h : 8);
     });
     // 币安持仓也没有批量接口：补前 30 的
     const bnList = list.filter(x => x.bnSym).slice(0, 30);
-    await VP.pool(bnList, 5, async x => {
+    await VP.pool(bnList, 4, async x => {
       const d = await ex.binance.openInterest(x.bnSym);
       const mark = n((r.bnP || []).find(p => p.symbol === x.bnSym)?.markPrice);
       x.oi += n(d.openInterest) * mark || 0; x.bnOi = true;
@@ -725,6 +726,6 @@
     markets.ready = true;
     kpiTimer = VP.every(15000, loadKpis);
     chartTimer = VP.every(60000, loadCharts);
-    VP.every(120000, loadBoard);
+    VP.every(180000, loadBoard);
   });
 })();

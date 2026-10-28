@@ -49,6 +49,10 @@
       <div class="pane-head"><h3>期限结构</h3><div class="legend" id="lg-term"></div><span class="tip-i" title="ATM IV：最接近远期价格的行权价的隐含波动率。25Δ 风险逆转（RR）= 25 Delta 看涨 IV − 25 Delta 看跌 IV，正值说明市场更愿意为上涨付溢价。">?</span></div>
       <div class="pane-body" id="termChart"></div>
     </section>
+    <section class="pane dvol" style="height:220px">
+      <div class="pane-head"><h3>DVOL 恐慌度（近 30 天）</h3><div class="legend" id="lg-dvol"></div><span class="tip-i" title="DVOL 是 Deribit 根据期权价格算出的 30 天隐含波动率指数，机构买保护时会推高它。远高于近 30 天均值（例如超过 2 倍标准差）往往对应恐慌抛售，远低于均值说明期权便宜、市场平静。思路参考 Resonance Alpha 的波动率共振。">?</span></div>
+      <div class="pane-body" id="dvolChart"></div>
+    </section>
   </div>
 
   <div class="og2">
