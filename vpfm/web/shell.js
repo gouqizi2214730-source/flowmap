@@ -174,6 +174,7 @@ const browserWins = new Map();     // 普通浏览器里退回用的弹出窗口
 
 async function winOp(op, id) {
   if (!IN_APP) {
+    if (op === 'main') { window.focus(); return; }
     const w = browserWins.get(id);
     if (op === 'focus' && w && !w.closed) w.focus();
     if (op === 'close' && w && !w.closed) w.close();
@@ -307,7 +308,11 @@ if (bc) {
   bc.onmessage = e => {
     const msg = e.data || {};
     if (msg.op === 'market') handleMarket(msg.data);
-    else if (msg.op === 'show' && (BY_ID[msg.id] || msg.id === 'settings')) show(msg.id, { user: true });
+    else if (msg.op === 'show' && (BY_ID[msg.id] || msg.id === 'settings')) {
+      // 独立窗口里按的快捷键：主窗口切过去；要切的模块本身开在独立窗口里时，show 会把那个窗口叫到前面
+      show(msg.id, { user: true });
+      if (!popped.has(msg.id)) winOp('main');
+    }
     else if (msg.op === 'toast' && msg.text) toast(String(msg.text), !!msg.bad);
   };
 }

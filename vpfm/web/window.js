@@ -38,8 +38,7 @@
     }
     if (!target) return;
     e.preventDefault(); e.stopPropagation();
-    if (bc) bc.postMessage({ op: 'show', id: target });
-    post('/api/wb/window', { op: 'main' }).catch(() => {});
+    if (bc) bc.postMessage({ op: 'show', id: target }); // 主窗口切到目标，并决定把哪个窗口叫到前面
   }
   window.addEventListener('keydown', onKey, true);
 
