@@ -1,6 +1,8 @@
 'use strict';
 /* VPFM 外壳：左侧切换模块，模块放在同源 iframe 里、切走后保留运行。
-   本页由内置服务器在 http://127.0.0.1:<端口>/wb/ 提供，各模块和外壳同源。 */
+   本页由内置服务器在 http://127.0.0.1:<端口>/wb/ 提供，各模块和外壳同源。
+   每个模块也可以在独立窗口里打开（window.html#模块）：桌面版由 VPFM 主程序开新窗口，
+   在普通浏览器里打开本页时退回成浏览器弹出窗口。 */
 
 const ICONS = {
   flowmap: '<path d="M3 6h7M14 6h7M3 10h4M10 10h11M3 14h12M18 14h3M3 18h6M12 18h9"/>',
@@ -12,15 +14,7 @@ const ICONS = {
   tools: '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 7.5h7M8.5 12h1M12 12h0M15.5 12h0M8.5 16.5h1M12 16.5h0M15.5 16.5h0"/>',
 };
 
-const MODULES = [
-  { id: 'flowmap', name: '深度热力图', short: '热力', src: 'flowmap/', heavy: true },
-  { id: 'aggr', name: '聚合成交', short: '成交', src: 'aggr/', heavy: true },
-  { id: 'lmap', name: '流动性地图', short: '流动', src: 'lmap/?lang=zh&source=browser', heavy: true },
-  { id: 'derivs', name: '衍生品数据', short: '衍生', src: 'derivs/' },
-  { id: 'options', name: '期权 GEX', short: '期权', src: 'options/' },
-  { id: 'structure', name: '结构分析', short: '结构', src: 'structure/' },
-  { id: 'tools', name: '工具箱', short: '工具', src: 'tools/' },
-];
+const MODULES = window.VPFM_MODULES;
 const BY_ID = Object.fromEntries(MODULES.map(m => [m.id, m]));
 
 const CREDITS = [
@@ -29,6 +23,7 @@ const CREDITS = [
   ['Liquidity Mapper Fast', 'liquiditymapperfast/liquiditymapperfast.github.io', 'MIT', '多交易所聚合盘口热力图、足迹图、Delta/CVD、持仓、清算、关键价位、录制回放。'],
   ['smart-money-concepts', 'joshyattridge/smart-money-concepts', 'MIT', '结构分析里的摆动高低点、BOS/CHoCH、订单块、FVG、流动性算法（改写为 JavaScript）。'],
   ['HTF SUITE、Bandz Po3 Profiler、Fractal Model、Triple HTF BB、VWAP Claire', 'gouqizi2214730-source', 'GPL-3.0 / MPL-2.0 / MIT', '结构分析里的高周期 K 线、PO3、CISD、三周期布林带、锚定与滚动 VWAP 等思路参考了这些 TradingView 指标（按概念重写，没有照搬代码）。'],
+  ['Flowsurface', 'flowsurface-rs/flowsurface', 'GPL-3.0', '多窗口的做法参考了它：任意模块单独开窗口、拖到别的显示器，下次启动按原来的位置恢复。'],
   ['Lightweight Charts', 'tradingview/lightweight-charts', 'Apache-2.0', '衍生品、期权和结构分析的图表。'],
   ['Barlow', 'jpt/barlow', 'OFL-1.1', '界面里的数字字体。'],
 ];
@@ -36,6 +31,8 @@ const CREDITS = [
 const SHELL_KEY = 'vpfm.shell.v1';
 const PREFS_KEY = 'vpfm.prefs';
 const SAVER_MS = 5 * 60 * 1000;
+/* 桌面版主程序在主窗口里注入了 __FLOWMAP_SERVER__；没有它说明是在普通浏览器里打开的 */
+const IN_APP = typeof window.__FLOWMAP_SERVER__ === 'string';
 
 const $ = s => document.querySelector(s);
 const readJson = (k, d) => { try { return Object.assign({}, d, JSON.parse(localStorage.getItem(k) || '{}')); } catch { return Object.assign({}, d); } };
@@ -75,8 +72,9 @@ function buildRail() {
     const b = document.createElement('button');
     b.type = 'button'; b.className = 'rail-item'; b.dataset.go = m.id;
     b.setAttribute('role', 'tab');
-    b.title = `${m.name}（Ctrl+${i + 1}）`;
-    b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[m.id]}</svg><span>${m.short}</span><i class="live"></i>`;
+    b.title = `${m.name}（Ctrl+${i + 1}）\n右键或 Shift+点击：在新窗口打开`;
+    b.innerHTML = `<svg viewBox="0 0 24 24" aria-hidden="true">${ICONS[m.id]}</svg><span>${m.short}</span><i class="live"></i>`
+      + '<svg class="pop" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 2H10v5.5M10 2 4 8M8 10H2V4"/></svg>';
     rail.append(b);
   });
   markRail();
@@ -84,10 +82,12 @@ function buildRail() {
 
 function markRail() {
   document.querySelectorAll('[data-go].rail-item').forEach(b => {
-    const on = b.dataset.go === current;
+    const id = b.dataset.go;
+    const on = id === current;
     b.setAttribute('aria-selected', on ? 'true' : 'false');
+    b.classList.toggle('popped', popped.has(id));
     const live = b.querySelector('.live');
-    if (live) live.classList.toggle('on', frames.has(b.dataset.go));
+    if (live) live.classList.toggle('on', frames.has(id));
   });
 }
 
@@ -101,11 +101,17 @@ function ensureFrame(id) {
   el.title = m.name;
   el.allow = 'clipboard-read; clipboard-write; fullscreen; autoplay';
   el.src = m.src;
-  el.addEventListener('load', () => { wire(el); if (el.hidden) tellVisible({ el }, false); });
+  el.addEventListener('load', () => { VPFM_wire(el, { onKey, openExternal }); if (el.hidden) tellVisible({ el }, false); });
   $('#stage').append(el);
   f = { el, hiddenAt: 0 };
   frames.set(id, f);
   return f;
+}
+
+function dropFrame(id) {
+  const f = frames.get(id);
+  if (!f) return;
+  f.el.src = 'about:blank'; f.el.remove(); frames.delete(id);
 }
 
 /** 告诉模块自己是否在前台（隐藏的 iframe 不会触发 document.hidden），模块据此暂停定时刷新 */
@@ -115,14 +121,24 @@ function tellVisible(f, visible) {
 
 function show(id, opts = {}) {
   if (id !== 'settings' && !BY_ID[id]) id = visibleModules()[0]?.id || 'settings';
-  if (id === current && !opts.force) return;
+  if (id === current && !opts.force) {
+    if (opts.user && popped.has(id)) winOp('focus', id);
+    return;
+  }
   if (current && current !== 'settings') {
     const f = frames.get(current);
     if (f) { f.el.hidden = true; f.hiddenAt = Date.now(); tellVisible(f, false); }
   }
   $('#settings').hidden = id !== 'settings';
+  $('#popout').hidden = !popped.has(id);
   if (id === 'settings') {
     refreshSettings();
+  } else if (popped.has(id)) {
+    // 这个模块开在独立窗口里：这里显示提示，点击时把那个窗口叫到前面
+    $('#popName').textContent = BY_ID[id].name;
+    $('#popIcon').innerHTML = ICONS[id];
+    if (opts.user) winOp('focus', id);
+    shell.last = id; writeJson(SHELL_KEY, shell);
   } else {
     const f = ensureFrame(id);
     f.el.hidden = false; f.hiddenAt = 0; tellVisible(f, true);
@@ -146,12 +162,112 @@ setInterval(() => {
   if (!shell.saver) return;
   const now = Date.now();
   for (const [id, f] of frames) {
-    if (id !== current && f.hiddenAt && now - f.hiddenAt > SAVER_MS) {
-      f.el.src = 'about:blank'; f.el.remove(); frames.delete(id);
-    }
+    if (id !== current && f.hiddenAt && now - f.hiddenAt > SAVER_MS) dropFrame(id);
   }
   markRail();
 }, 30000);
+
+/* ---------- 独立窗口 ---------- */
+const popped = new Set();          // 现在开在独立窗口里的模块
+const pending = new Map();         // 刚发出"打开"、还没等到主程序确认的模块 → 超时计时器
+const browserWins = new Map();     // 普通浏览器里退回用的弹出窗口
+
+async function winOp(op, id) {
+  if (!IN_APP) {
+    const w = browserWins.get(id);
+    if (op === 'focus' && w && !w.closed) w.focus();
+    if (op === 'close' && w && !w.closed) w.close();
+    return;
+  }
+  try { await post('/api/wb/window', { op, mod: id }); } catch (e) { toast('窗口操作失败：' + e.message, true); }
+}
+
+/** 主程序在窗口打开、关闭时调用，传入现在开着的模块列表 */
+function setPopped(list) {
+  const next = new Set((list || []).filter(id => BY_ID[id]));
+  for (const id of next) {
+    if (pending.has(id)) { clearTimeout(pending.get(id)); pending.delete(id); }
+    if (!popped.has(id)) {
+      popped.add(id);
+      dropFrame(id); // 同一个模块不在两个地方同时跑
+    }
+  }
+  for (const id of [...popped]) {
+    if (!next.has(id) && !pending.has(id)) {
+      popped.delete(id);
+      if (current === id) show(id, { force: true }); // 正看着提示页：窗口关掉后模块回到这里
+    }
+  }
+  if (current && BY_ID[current]) $('#popout').hidden = !popped.has(current);
+  markRail();
+  if ($('#settings') && !$('#settings').hidden) renderWinList();
+}
+window.__vpfmWindows = setPopped;
+
+function popOut(id) {
+  if (!BY_ID[id]) return;
+  if (popped.has(id)) { winOp('focus', id); return; }
+  popped.add(id);
+  dropFrame(id);
+  if (current === id) show(id, { force: true });
+  markRail();
+  if (IN_APP) {
+    // 一般半秒内主程序就会确认；8 秒还没确认就当失败，模块回到主窗口
+    pending.set(id, setTimeout(() => {
+      pending.delete(id);
+      popped.delete(id);
+      if (current === id) show(id, { force: true });
+      markRail();
+      toast('没能打开新窗口，模块留在主窗口里', true);
+    }, 8000));
+    winOp('open', id);
+  } else {
+    const w = window.open(`window.html#${id}`, `vpfm-${id}`, 'popup=yes,width=1280,height=800');
+    if (!w) { popped.delete(id); show(id, { force: true }); toast('浏览器拦截了弹出窗口', true); return; }
+    browserWins.set(id, w);
+    const timer = setInterval(() => {
+      if (!w.closed) return;
+      clearInterval(timer); browserWins.delete(id);
+      setPopped([...popped].filter(x => x !== id));
+    }, 800);
+  }
+  toast(`${BY_ID[id].name}已在新窗口打开，关掉那个窗口就回到这里`);
+}
+
+function dock(id) {
+  if (!popped.has(id)) return;
+  winOp('close', id);
+  if (!IN_APP) return;
+  // 主程序关掉窗口后会推送新的列表；这里先切过来，等推送到了模块就会加载
+  show(id, { force: true });
+}
+
+/* 右键菜单 */
+function closeCtx() { $('#ctx').hidden = true; }
+function openCtx(id, x, y) {
+  const m = BY_ID[id];
+  if (!m) return;
+  const items = popped.has(id)
+    ? [['focus', '切到它的窗口'], ['dock', '收回到主窗口']]
+    : [['pop', '在新窗口打开'], ...(frames.has(id) ? [['reload', '重新加载']] : [])];
+  const box = $('#ctx');
+  box.innerHTML = `<div class="ctx-title">${m.name}</div>` + items.map(([k, t]) => `<button type="button" role="menuitem" data-act="${k}" data-id="${id}">${t}</button>`).join('');
+  box.hidden = false;
+  const r = box.getBoundingClientRect();
+  box.style.left = Math.min(x, innerWidth - r.width - 6) + 'px';
+  box.style.top = Math.min(y, innerHeight - r.height - 6) + 'px';
+  box.querySelector('button')?.focus();
+}
+document.addEventListener('contextmenu', e => {
+  const b = e.target.closest('.rail-item[data-go]');
+  if (!b || !BY_ID[b.dataset.go]) return;
+  e.preventDefault();
+  const rect = b.getBoundingClientRect();
+  openCtx(b.dataset.go, e.clientX || rect.right, e.clientY || rect.top);
+});
+document.addEventListener('pointerdown', e => { if (!e.target.closest('#ctx')) closeCtx(); }, true);
+window.addEventListener('blur', closeCtx);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeCtx(); });
 
 /* ---------- 让模块里的快捷键、外部链接也归外壳管 ---------- */
 function onKey(e) {
@@ -160,67 +276,41 @@ function onKey(e) {
   const n = /^Digit([1-9])$/.exec(e.code);
   if (n) {
     const m = visibleModules()[Number(n[1]) - 1];
-    if (m) { e.preventDefault(); e.stopPropagation(); show(m.id); }
+    if (m) { e.preventDefault(); e.stopPropagation(); show(m.id, { user: true }); }
   }
-}
-
-function externalHref(a, win) {
-  const href = a.getAttribute('href');
-  if (!href || href.startsWith('#') || href.startsWith('javascript:')) return null;
-  let u;
-  try { u = new URL(href, win.location.href); } catch { return null; }
-  if (!/^https?:$/.test(u.protocol)) return null;
-  if (u.origin === location.origin) return null;
-  return u.href;
-}
-
-function wire(el) {
-  let w;
-  try { w = el.contentWindow; if (!w || !w.document) return; } catch { return; }
-  if (w.__vpfmWired) return;
-  w.__vpfmWired = true;
-  w.addEventListener('keydown', onKey, true);
-  w.document.addEventListener('click', e => {
-    const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-    if (!a) return;
-    const ext = externalHref(a, w);
-    if (ext) { e.preventDefault(); e.stopPropagation(); openExternal(ext); }
-  }, true);
-  const nativeOpen = w.open;
-  w.open = function (url, target, features) {
-    try {
-      const u = new URL(String(url), w.location.href);
-      if (/^https?:$/.test(u.protocol) && u.origin !== location.origin) { openExternal(u.href); return null; }
-    } catch { /* 交给原来的实现 */ }
-    return nativeOpen.call(w, url, target, features);
-  };
 }
 window.addEventListener('keydown', onKey, true);
 
-/* ---------- 币种联动：在聚合成交（aggr）里点交易对，衍生品数据和结构分析跟着切换 ---------- */
-function baseFromMarket(id) {
-  let s = String(id || '').split(':').pop().toUpperCase();
-  s = s.replace(/[-_]?(SWAP|PERPETUAL|PERP)$/, '');
-  if (/[-_/]/.test(s)) s = s.split(/[-_/]/)[0];
-  else s = s.replace(/(USDT|USDC|FDUSD|BUSD|USD|EUR|BTC)$/, m => (s.length > m.length ? '' : m));
-  s = s.replace(/^(1000000|100000|10000|1000|1M)(?=[A-Z])/, '');
-  if (s === 'XBT') s = 'BTC';
-  return /^[A-Z0-9]{2,15}$/.test(s) ? s : null;
-}
+/* ---------- 币种联动：在聚合成交（aggr）里点交易对，衍生品数据和结构分析跟着切换 ----------
+   主窗口里的 iframe 用 postMessage 报上来；独立窗口通过 BroadcastChannel 报上来，
+   切好的币再广播出去，开在独立窗口里的衍生品数据、结构分析也跟着切。 */
+const bc = typeof BroadcastChannel === 'function' ? new BroadcastChannel('vpfm') : null;
 let lastLinked = '';
+function handleMarket(market) {
+  if (!prefs.link) return;
+  const coin = VPFM_baseFromMarket(market);
+  if (!coin) return;
+  for (const id of VPFM_LINKED) {
+    const f = frames.get(id);
+    if (f) { try { f.el.contentWindow.dispatchEvent(new CustomEvent('vpfm-coin', { detail: coin })); } catch { /* 忽略 */ } }
+    else if (!popped.has(id)) { const key = 'vpfm.' + id; const v = readJson(key, {}); v.coin = coin; writeJson(key, v); } // 还没打开的模块：下次打开就是这个币
+  }
+  if (bc) bc.postMessage({ op: 'coin', coin });
+  if (coin !== lastLinked) { lastLinked = coin; toast(`衍生品数据和结构分析已切到 ${coin}`); }
+}
 window.addEventListener('message', e => {
   if (e.origin !== location.origin || typeof e.data !== 'string' || e.data[0] !== '{') return;
   let msg; try { msg = JSON.parse(e.data); } catch { return; }
-  if (!msg || msg.op !== 'market' || !prefs.link) return;
-  const coin = baseFromMarket(msg.data);
-  if (!coin) return;
-  for (const id of ['derivs', 'structure']) {
-    const f = frames.get(id);
-    if (f) { try { f.el.contentWindow.dispatchEvent(new CustomEvent('vpfm-coin', { detail: coin })); } catch { /* 忽略 */ } }
-    else { const key = 'vpfm.' + id; const v = readJson(key, {}); v.coin = coin; writeJson(key, v); } // 还没打开的模块：下次打开就是这个币
-  }
-  if (coin !== lastLinked) { lastLinked = coin; toast(`衍生品数据和结构分析已切到 ${coin}`); }
+  if (msg && msg.op === 'market') handleMarket(msg.data);
 });
+if (bc) {
+  bc.onmessage = e => {
+    const msg = e.data || {};
+    if (msg.op === 'market') handleMarket(msg.data);
+    else if (msg.op === 'show' && (BY_ID[msg.id] || msg.id === 'settings')) show(msg.id, { user: true });
+    else if (msg.op === 'toast' && msg.text) toast(String(msg.text), !!msg.bad);
+  };
+}
 
 /* ---------- 本地服务状态 ---------- */
 let info = null;
@@ -258,6 +348,14 @@ function applyPrefs() {
   document.querySelectorAll('#updownSeg button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.v === prefs.updown)));
 }
 
+function renderWinList() {
+  const box = $('#winList');
+  if (!box) return;
+  box.innerHTML = visibleModules().map(m => `<div class="win-row"><span>${m.name}</span>` + (popped.has(m.id)
+    ? `<span class="win-state on">在独立窗口中</span><span class="win-btns"><button type="button" class="btn" data-win="focus" data-id="${m.id}">切过去</button><button type="button" class="btn" data-win="dock" data-id="${m.id}">收回</button></span>`
+    : `<span class="win-state">在主窗口</span><span class="win-btns"><button type="button" class="btn" data-win="pop" data-id="${m.id}">在新窗口打开</button></span>`) + '</div>').join('');
+}
+
 function fillStatic() {
   const sel = $('#startSel');
   sel.innerHTML = '<option value="last">上次打开的模块</option>' + MODULES.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
@@ -277,17 +375,17 @@ function fillStatic() {
     if (!e.target.checked) {
       if (visibleModules().length <= 1) { e.target.checked = true; toast('至少保留一个模块'); return; }
       shell.hidden.push(id);
-      const f = frames.get(id);
-      if (f) { f.el.remove(); frames.delete(id); }
+      dropFrame(id);
+      if (popped.has(id)) winOp('close', id);
     }
-    writeJson(SHELL_KEY, shell); buildRail();
+    writeJson(SHELL_KEY, shell); buildRail(); renderWinList();
   };
 
   document.querySelectorAll('#updownSeg button').forEach(b => {
     b.onclick = () => { prefs.updown = b.dataset.v; writeJson(PREFS_KEY, prefs); applyPrefs(); notifyPrefs(); };
   });
 
-  const keys = visibleModules().map((m, i) => [`Ctrl+${i + 1}`, m.name]).concat([['Ctrl+,', '设置']]);
+  const keys = visibleModules().map((m, i) => [`Ctrl+${i + 1}`, m.name]).concat([['Ctrl+,', '设置'], ['右键 / Shift+点击', '左侧图标：在新窗口打开']]);
   $('#keys').innerHTML = keys.map(([k, v]) => `<dt><kbd>${k}</kbd></dt><dd>${v}</dd>`).join('');
 
   $('#credits').innerHTML = CREDITS.map(([n, repo, lic, d]) =>
@@ -303,18 +401,21 @@ function fillStatic() {
     const a = e.target.closest('a[href]');
     if (a && /^https?:/.test(a.href) && new URL(a.href).origin !== location.origin) { e.preventDefault(); openExternal(a.href); }
   });
+  renderWinList();
 }
 
 function notifyPrefs() {
   for (const f of frames.values()) {
     try { f.el.contentWindow.dispatchEvent(new CustomEvent('vpfm-prefs', { detail: { ...prefs } })); } catch { /* 忽略 */ }
   }
+  if (bc) bc.postMessage({ op: 'prefs' });
 }
 
 const SOURCE_NAME = { system: '系统代理', env: '环境变量', custom: '自定义', off: '已关闭', none: '没有设置', unsupported: '不支持的代理类型（只支持 http 代理）' };
 
 async function refreshSettings() {
   applyPrefs();
+  renderWinList();
   try {
     const [s, inf, ver] = await Promise.all([
       fetch('/api/wb/settings', { cache: 'no-store' }).then(r => r.json()),
@@ -353,24 +454,56 @@ async function saveProxy() {
 
 /* ---------- 启动 ---------- */
 document.addEventListener('click', e => {
+  const act = e.target.closest('#ctx [data-act]');
+  if (act) {
+    closeCtx();
+    const id = act.dataset.id;
+    if (act.dataset.act === 'pop') popOut(id);
+    else if (act.dataset.act === 'focus') winOp('focus', id);
+    else if (act.dataset.act === 'dock') dock(id);
+    else if (act.dataset.act === 'reload') { reloadModule(id); toast(`已重新加载${BY_ID[id].name}`); }
+    return;
+  }
+  const w = e.target.closest('[data-win]');
+  if (w) {
+    const id = w.dataset.id;
+    if (w.dataset.win === 'pop') popOut(id);
+    else if (w.dataset.win === 'focus') winOp('focus', id);
+    else if (w.dataset.win === 'dock') dock(id);
+    return;
+  }
+  if (e.target.closest('#popFocus')) { if (BY_ID[current]) winOp('focus', current); return; }
+  if (e.target.closest('#popDock')) { if (BY_ID[current]) dock(current); return; }
   const b = e.target.closest('[data-go]');
-  if (b) show(b.dataset.go);
+  if (!b) return;
+  if (e.shiftKey && BY_ID[b.dataset.go]) { popOut(b.dataset.go); return; }
+  show(b.dataset.go, { user: true });
 });
 document.addEventListener('dblclick', e => {
   const b = e.target.closest('.rail-item[data-go]');
-  if (b && b.dataset.go !== 'settings') { reloadModule(b.dataset.go); toast(`已重新加载${BY_ID[b.dataset.go].name}`); }
+  if (b && frames.has(b.dataset.go)) { reloadModule(b.dataset.go); toast(`已重新加载${BY_ID[b.dataset.go].name}`); }
 });
 window.addEventListener('hashchange', () => show(location.hash.slice(1)));
 window.addEventListener('storage', e => { if (e.key === PREFS_KEY) { Object.assign(prefs, readJson(PREFS_KEY, prefs)); applyPrefs(); } });
 
-window.vpfm = { show, openExternal, toast, reloadModule, prefs: () => ({ ...prefs }) };
+window.vpfm = { show, openExternal, toast, reloadModule, popOut, dock, prefs: () => ({ ...prefs }) };
 
-applyPrefs();
-fillStatic();
-buildRail();
-const fromHash = location.hash.slice(1);
-const first = (fromHash && (BY_ID[fromHash] || fromHash === 'settings')) ? fromHash
-  : (shell.start && shell.start !== 'last' && BY_ID[shell.start]) ? shell.start : shell.last;
-show(first);
-ping();
-setInterval(ping, 5000);
+(async () => {
+  applyPrefs();
+  fillStatic();
+  buildRail();
+  // 先问一下哪些模块开在独立窗口里（上次退出时开着的窗口启动时会恢复），免得在主窗口里再开一份
+  if (IN_APP) {
+    try {
+      const r = await fetch('/api/wb/windows', { cache: 'no-store', signal: AbortSignal.timeout(1500) });
+      if (r.ok) { const j = await r.json(); (j.open || []).forEach(id => { if (BY_ID[id]) popped.add(id); }); }
+    } catch { /* 读不到就当都在主窗口 */ }
+  }
+  const fromHash = location.hash.slice(1);
+  const first = (fromHash && (BY_ID[fromHash] || fromHash === 'settings')) ? fromHash
+    : (shell.start && shell.start !== 'last' && BY_ID[shell.start]) ? shell.start : shell.last;
+  show(first);
+  ping();
+  setInterval(ping, 5000);
+  if (IN_APP) post('/api/wb/window', { op: 'sync' }).catch(() => {}); // 主窗口刷新过：让主程序再推一次窗口列表
+})();

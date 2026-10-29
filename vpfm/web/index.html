@@ -30,6 +30,18 @@
 <main id="stage">
   <div class="banner" id="banner" hidden></div>
 
+  <section class="popout" id="popout" hidden aria-live="polite">
+    <div class="popout-box">
+      <svg class="popout-icon" id="popIcon" viewBox="0 0 24 24" aria-hidden="true"></svg>
+      <h2><span id="popName"></span>开在独立窗口里</h2>
+      <p class="dim">可以把那个窗口拖到另一块显示器上。关掉它，模块就回到主窗口；下次启动会按原来的位置重新打开。</p>
+      <div class="popout-btns">
+        <button class="btn primary" id="popFocus" type="button">切到那个窗口</button>
+        <button class="btn" id="popDock" type="button">收回到主窗口</button>
+      </div>
+    </div>
+  </section>
+
   <section class="settings" id="settings" hidden aria-labelledby="settingsTitle">
     <div class="settings-inner">
       <header class="set-head">
@@ -82,6 +94,12 @@
       </section>
 
       <section class="set-group">
+        <h2>窗口</h2>
+        <p class="dim">每个模块都可以单独开一个窗口，拖到别的显示器上并排看。左侧图标上点右键（或按住 Shift 点击）也能打开。独立窗口关掉后模块回到主窗口；退出时还开着的窗口，下次启动按原来的位置和大小恢复。</p>
+        <div class="win-list" id="winList"></div>
+      </section>
+
+      <section class="set-group">
         <h2>更新</h2>
         <p class="dim">启动后和每隔 6 小时会自动检查一次，有新版本会弹窗询问，确认后自动下载、校验、安装并重新打开。</p>
         <div class="set-row">
@@ -114,7 +132,9 @@
   </section>
 </main>
 
+<div class="ctx" id="ctx" role="menu" hidden></div>
 <div class="vp-toast" id="toast" role="status" aria-live="polite" hidden></div>
+<script src="modules.js"></script>
 <script src="shell.js"></script>
 </body>
 </html>

@@ -31,6 +31,41 @@ body { display: grid; grid-template-columns: 60px 1fr; overflow: hidden; }
   background: var(--ok); display: none;
 }
 .rail-item .live.on { display: block; }
+/* 开在独立窗口里的模块：图标右上角一个小箭头，图标变暗 */
+.rail-item svg.pop { position: absolute; top: 4px; right: 9px; width: 11px; height: 11px; stroke-width: 1.5; display: none; stroke: var(--cyan); }
+.rail-item.popped svg.pop { display: block; }
+.rail-item.popped .live { display: none; }
+.rail-item.popped > svg:first-child { opacity: .55; }
+
+/* 右键菜单 */
+.ctx {
+  position: fixed; z-index: 50; min-width: 150px; padding: 4px; border-radius: 7px;
+  background: #16212f; border: 1px solid var(--line-strong); box-shadow: 0 10px 30px rgba(0, 0, 0, .5);
+}
+.ctx[hidden] { display: none; }
+.ctx-title { padding: 5px 10px 4px; font-size: 11px; color: var(--text-faint); }
+.ctx button {
+  display: block; width: 100%; text-align: left; padding: 6px 10px; border: 0; border-radius: 4px;
+  background: none; color: var(--text); font: inherit; font-size: 13px; cursor: pointer;
+}
+.ctx button:hover, .ctx button:focus-visible { background: var(--bg-hover); outline: none; }
+
+/* 模块开在独立窗口时，主窗口里的提示 */
+.popout { position: absolute; inset: 0; display: grid; place-items: center; background: var(--bg); padding: 24px; }
+.popout[hidden] { display: none; }
+.popout-box { max-width: 460px; text-align: center; }
+.popout-icon { width: 46px; height: 46px; fill: none; stroke: var(--cyan); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.popout h2 { margin: 12px 0 6px; font-size: 18px; font-weight: 600; }
+.popout p { margin: 0 0 16px; line-height: 1.6; }
+.popout-btns { display: flex; justify-content: center; gap: 10px; }
+
+/* 设置页里的窗口列表 */
+.win-list { display: grid; gap: 6px; max-width: 520px; }
+.win-row { display: grid; grid-template-columns: 110px 1fr auto; align-items: center; gap: 10px; min-height: 30px; }
+.win-state { color: var(--text-dim); }
+.win-state.on { color: var(--cyan); }
+.win-btns { display: flex; gap: 6px; justify-content: flex-end; }
+.win-row .btn { height: 26px; padding: 0 10px; font-size: 12px; }
 .rail-foot { display: flex; flex-direction: column; gap: 2px; padding-bottom: 6px; border-top: 1px solid var(--line); padding-top: 6px; }
 .link-state {
   display: flex; flex-direction: column; align-items: center; gap: 3px;

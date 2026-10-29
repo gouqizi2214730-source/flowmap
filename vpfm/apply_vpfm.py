@@ -59,13 +59,26 @@ shutil.copy2(HERE / 'loader/index.html', loader / 'index.html')
 zh = root / 'app/src-tauri/src/zh_update.rs'
 if zh.exists():
     zh.unlink()
+# 多窗口：模块在独立窗口里打开、记住每个窗口的位置
+shutil.copy2(HERE / 'rust/vpfm_windows.rs', root / 'app/src-tauri/src/vpfm_windows.rs')
 
 
 def mainrs(s):
-    s = sub1(r'\nmod zh_update;\n', '\nmod vpfm_update;\n', s, what='mod zh_update')
+    s = sub1(r'\nmod zh_update;\n', '\nmod vpfm_update;\nmod vpfm_windows;\n', s, what='mod zh_update')
     s, n = re.subn(r'\bzh_update::', 'vpfm_update::', s)
     if n != 3:
         sys.exit(f'[vpfm] zh_update:: 调用应有 3 处，实际 {n} 处')
+    # 多窗口：主窗口建好后启动（需要内置服务器的端口）
+    s = sub1(r'\n(\s*)vpfm_update::spawn\(handle\.clone\(\)\);\n',
+             r'\n\1vpfm_update::spawn(handle.clone());\n\1vpfm_windows::spawn(handle.clone(), port);\n', s, what='vpfm_update::spawn')
+    # 原来"任何窗口关闭都退出整个程序"：改成只有主窗口关闭才退出，模块窗口关掉只关它自己
+    s = sub1(r'(\.on_window_event\(\|window, event\| \{\n)(\s*)(if let tauri::WindowEvent::CloseRequested \{ \.\. \} = event \{)',
+             '\\1\\2// VPFM：先记下窗口位置；模块的独立窗口关掉只关它自己，只有主窗口关闭才退出\n'
+             '\\2vpfm_windows::on_window_event(window, event);\n'
+             '\\2if window.label() != "main" {\n'
+             '\\2    return;\n'
+             '\\2}\n'
+             '\\2\\3', s, flags=0, what='on_window_event 关闭处理')
     # 固定端口优先：WebView 的存储按"协议+主机+端口"区分，端口每次都变的话设置会丢
     s = sub1(r'fn free_loopback_port\(\) -> std::io::Result<u16> \{\n',
              'fn free_loopback_port() -> std::io::Result<u16> {\n'

@@ -231,6 +231,38 @@ jobs:
           [ -f "$AD/Microsoft/Windows/Start Menu/Programs/VPFM.lnk" ] || fail "没有开始菜单快捷方式"
           [ -f "$DESK/VPFM.lnk" ] || fail "没有桌面快捷方式"
           echo "安装测试通过：$(du -sh "$LA/VPFM" | cut -f1)" | tee -a build.log
+
+      - name: 试运行：多窗口（打开、关闭独立窗口，退出后恢复）
+        continue-on-error: true   # 构建机上的图形界面环境不一定可靠：只记录结果，不影响发布
+        env:
+          MSYS_NO_PATHCONV: '1'
+        run: |
+          set -uo pipefail
+          LA=$(cygpath -u "$LOCALAPPDATA"); AD=$(cygpath -u "$APPDATA"); APP="$LA/VPFM/VPFM.exe"
+          B=http://127.0.0.1:47821
+          log() { echo "[多窗口] $*" | tee -a build.log; }
+          titles() { powershell -NoProfile -ExecutionPolicy Bypass -File fork/vpfm/ci/win-titles.ps1 "$@" 2>&1 | tr -d '\r' | paste -sd '|'; }
+          winop() { curl -s -X POST -H "Origin: $B" -H 'content-type: application/json' -d "{\"op\":\"$1\",\"mod\":\"${2:-}\"}" "$B/api/wb/window"; }
+          state() { curl -s "$B/api/wb/windows"; }
+          wait_health() { for _ in $(seq 1 120); do curl -fsS "$B/api/health" >/dev/null 2>&1 && return 0; sleep 1; done; return 1; }
+          "$APP" &
+          wait_health || { log "主程序没有起来"; exit 1; }
+          sleep 8
+          log "启动后的窗口：$(titles)"
+          log "打开衍生品：$(winop open derivs)"; sleep 5
+          log "打开后：状态 $(state)；窗口 $(titles)"
+          log "关闭衍生品：$(winop close derivs)"; sleep 4
+          log "关闭后：状态 $(state)；主程序还在 $(curl -s -o /dev/null -w '%{http_code}' "$B/api/health")；窗口 $(titles)"
+          log "打开期权：$(winop open options)"; sleep 5
+          log "关主窗口：$(titles -CloseMain)"; sleep 8
+          log "退出后进程数：$(powershell -NoProfile -Command "(Get-Process VPFM -ErrorAction SilentlyContinue | Measure-Object).Count" | tr -d '\r')"
+          log "保存的窗口状态：$(tr -d ' \r\n' < "$AD/com.gouqizi.vpfm/vpfm-windows.json" 2>/dev/null | head -c 700)"
+          "$APP" &
+          wait_health || { log "第二次启动没有起来"; exit 1; }
+          sleep 10
+          log "第二次启动后：状态 $(state)；窗口 $(titles)"
+          titles -CloseMain >/dev/null; sleep 5
+          powershell -NoProfile -Command "Get-Process VPFM -ErrorAction SilentlyContinue | Stop-Process -Force; Get-Process python -ErrorAction SilentlyContinue | Where-Object { \$_.Path -like \"\$env:LOCALAPPDATA\\VPFM\\*\" } | Stop-Process -Force" || true
           "$LA/VPFM/uninstall.exe" /S || true
 
       - name: 冒烟测试内置服务器与界面
@@ -262,6 +294,11 @@ jobs:
           done
           curl -fsS "$B/wb/aggr/" -o page.html || fail "/wb/aggr/ 打不开"
           grep -F 'zh-aggr.js' page.html >/dev/null || fail "aggr 没有加上中文脚本"
+          # 独立窗口的页面和接口
+          curl -fsS "$B/wb/window.html" -o page.html || fail "/wb/window.html 打不开"
+          grep -F 'window.js' page.html >/dev/null || fail "独立窗口页面内容不对"
+          curl -fsS "$B/wb/modules.js" -o /dev/null || fail "/wb/modules.js 取不到"
+          curl -fsS "$B/api/wb/windows" | grep -F '"open"' >/dev/null || fail "/api/wb/windows 不对"
           # 每个模块的入口脚本和样式都要能取到（防止资源路径写错导致白屏）
           for m in flowmap aggr lmap; do
             curl -fsS "$B/wb/$m/" -o page.html || fail "/wb/$m/ 打不开"

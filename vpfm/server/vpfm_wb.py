@@ -19,6 +19,7 @@ import json
 import mimetypes
 import os
 import ssl
+import secrets
 import subprocess
 import sys
 import time
@@ -34,6 +35,11 @@ from starlette.staticfiles import StaticFiles
 SETTINGS_FILE = "vpfm-settings.json"
 PROXY_FILE = "vpfm-proxy.txt"
 FLAG_FILE = "vpfm-update.flag"
+# 多窗口：界面在这里写请求文件，VPFM 主程序（vpfm_windows.rs）轮询处理；窗口状态由主程序写在 WIN_STATE_FILE
+WIN_REQ_PREFIX = "vpfm-winreq-"
+WIN_STATE_FILE = "vpfm-windows.json"
+WIN_MODULES = ("flowmap", "aggr", "lmap", "derivs", "options", "structure", "tools")
+WIN_OPS = ("open", "focus", "close", "main", "sync")
 PROXY_PREFIX = "/api/wb/proxy/"
 FUPANBOOK_RELEASES = "https://github.com/gouqizi2214730-source/trade-journal/releases"
 
@@ -417,6 +423,32 @@ def install(app: FastAPI) -> None:
             return JSONResponse({"error": {"code": "open_failed", "message": str(e)}}, status_code=500)
         return JSONResponse({"ok": True})
 
+    async def window_op(request: Request) -> JSONResponse:
+        if not _same_origin(request):
+            return _forbidden()
+        body = await _json_body(request)
+        op, mod = str(body.get("op", "")), str(body.get("mod", ""))
+        if op not in WIN_OPS or (op in ("open", "focus", "close") and mod not in WIN_MODULES):
+            return JSONResponse({"error": {"code": "bad_request", "message": "未知的窗口操作"}}, status_code=400)
+        d = _data_dir()
+        name = f"{WIN_REQ_PREFIX}{time.time_ns()}-{secrets.token_hex(3)}.json"
+        tmp = d / (name + ".part")  # 写完再改名，主程序不会读到半个文件
+        try:
+            tmp.write_text(json.dumps({"op": op, "mod": mod}), encoding="utf-8")
+            os.replace(tmp, d / name)
+        except OSError as e:
+            return JSONResponse({"error": {"code": "write_failed", "message": str(e)}}, status_code=500)
+        return JSONResponse({"ok": True})
+
+    async def windows_state() -> JSONResponse:
+        try:
+            s = json.loads((_data_dir() / WIN_STATE_FILE).read_text(encoding="utf-8"))
+            mods = s.get("mods") if isinstance(s, dict) else None
+            opened = [m for m, v in (mods or {}).items() if m in WIN_MODULES and isinstance(v, dict) and v.get("open")]
+        except (OSError, ValueError):
+            opened = []
+        return JSONResponse({"open": opened}, headers={"Cache-Control": "no-store"})
+
     async def wb_noslash() -> RedirectResponse:
         return RedirectResponse("/wb/", status_code=307)
 
@@ -435,6 +467,8 @@ def install(app: FastAPI) -> None:
     app.add_api_route("/api/wb/apps", apps, methods=["GET"], include_in_schema=False)
     app.add_api_route("/api/wb/launch", launch, methods=["POST"], include_in_schema=False)
     app.add_api_route("/api/wb/open-data", open_data, methods=["POST"], include_in_schema=False)
+    app.add_api_route("/api/wb/window", window_op, methods=["POST"], include_in_schema=False)
+    app.add_api_route("/api/wb/windows", windows_state, methods=["GET"], include_in_schema=False)
     if wb is not None:
         app.mount("/wb", _WbStatic(directory=str(wb), html=True), name="vpfm-wb")
     else:
