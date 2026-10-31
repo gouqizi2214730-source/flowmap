@@ -1,0 +1,915 @@
+[zh-patch] 已修改 client/src/i18n/index.ts
+[zh-patch] 已修改 client/src/main.tsx
+[zh-patch] 已修改 client/index.html
+[zh-patch] 已修改 app/src-tauri/Cargo.toml
+[zh-patch] 已修改 app/src-tauri/tauri.conf.json
+[zh-patch] 已修改 app/src-tauri/tauri.windows.conf.json
+[zh-patch] 已修改 app/src-tauri/capabilities/default.json
+[zh-patch] 已修改 app/src-tauri/src/main.rs
+[zh-patch] 完成，版本 2.0.11
+[vpfm] 已修改 server/src/flowmap_server/api/app.py
+[vpfm] 已修改 app/src-tauri/src/main.rs
+[vpfm] 已修改 app/src-tauri/Cargo.toml
+[vpfm] 已修改 app/src-tauri/tauri.conf.json
+[vpfm] 已修改 app/src-tauri/tauri.windows.conf.json
+[vpfm] 完成，版本 2.0.11
+[36mvite v5.4.21 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 211 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mindex.html                            [39m[1m[2m  0.83 kB[22m[1m[22m[2m │ gzip:   0.49 kB[22m
+[2mdist/[22m[32massets/viewWorkerRuntime-CoLRvinW.js  [39m[1m[2m  3.97 kB[22m[1m[22m
+[2mdist/[22m[35massets/index-fo-LCjC3.css             [39m[1m[2m101.43 kB[22m[1m[22m[2m │ gzip:  17.58 kB[22m
+[2mdist/[22m[36massets/testHook-r3cEB9ya.js           [39m[1m[2m  3.25 kB[22m[1m[22m[2m │ gzip:   1.26 kB[22m
+[2mdist/[22m[36massets/index-C5wdIcrJ.js              [39m[1m[33m732.14 kB[39m[22m[2m │ gzip: 243.43 kB[22m
+[33m
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m✓ built in 2.69s[39m
+[36mvite v4.5.14 [32mbuilding for production...[36m[39m
+transforming...
+node_modules/@protobufjs/inquire/index.js (12:18) Use of eval in "node_modules/@protobufjs/inquire/index.js" is strongly discouraged as it poses security risks and may cause issues with minification.
+[32m✓[39m 1341 modules transformed.
+rendering chunks...
+computing gzip size...
+[2mdist/[22m[32mPHEMEX.5c4cb14.svg                      [39m[1m[2m    0.26 kB[22m[1m[22m[2m │ gzip:   0.19 kB[22m
+[2mdist/[22m[32mBINANCE.5c4cb14.svg                     [39m[1m[2m    0.28 kB[22m[1m[22m[2m │ gzip:   0.21 kB[22m
+[2mdist/[22m[32mBITFINEX.5c4cb14.svg                    [39m[1m[2m    0.29 kB[22m[1m[22m[2m │ gzip:   0.21 kB[22m
+[2mdist/[22m[32mHUOBI.5c4cb14.svg                       [39m[1m[2m    0.39 kB[22m[1m[22m[2m │ gzip:   0.26 kB[22m
+[2mdist/[22m[32mGATEIO.5c4cb14.svg                      [39m[1m[2m    0.43 kB[22m[1m[22m[2m │ gzip:   0.27 kB[22m
+[2mdist/[22m[32mBITGET.5c4cb14.svg                      [39m[1m[2m    0.47 kB[22m[1m[22m[2m │ gzip:   0.30 kB[22m
+[2mdist/[22m[32mBINANCE_FUTURES.5c4cb14.svg             [39m[1m[2m    0.52 kB[22m[1m[22m[2m │ gzip:   0.35 kB[22m
+[2mdist/[22m[32mHYPERLIQUID.5c4cb14.svg                 [39m[1m[2m    0.53 kB[22m[1m[22m[2m │ gzip:   0.38 kB[22m
+[2mdist/[22m[32mBITMEX.5c4cb14.svg                      [39m[1m[2m    0.55 kB[22m[1m[22m[2m │ gzip:   0.35 kB[22m
+[2mdist/[22m[32mCRYPTOCOM.5c4cb14.svg                   [39m[1m[2m    0.60 kB[22m[1m[22m[2m │ gzip:   0.37 kB[22m
+[2mdist/[22m[32mCOINBASE.5c4cb14.svg                    [39m[1m[2m    0.62 kB[22m[1m[22m[2m │ gzip:   0.38 kB[22m
+[2mdist/[22m[32mAGGR.5c4cb14.svg                        [39m[1m[2m    0.64 kB[22m[1m[22m[2m │ gzip:   0.39 kB[22m
+[2mdist/[22m[32mKRAKEN.5c4cb14.svg                      [39m[1m[2m    0.71 kB[22m[1m[22m[2m │ gzip:   0.34 kB[22m
+[2mdist/[22m[32mDERIBIT.5c4cb14.svg                     [39m[1m[2m    0.73 kB[22m[1m[22m[2m │ gzip:   0.38 kB[22m
+[2mdist/[22m[32mPOLONIEX.5c4cb14.svg                    [39m[1m[2m    0.74 kB[22m[1m[22m[2m │ gzip:   0.39 kB[22m
+[2mdist/[22m[32mWHITEBIT.5c4cb14.svg                    [39m[1m[2m    0.76 kB[22m[1m[22m[2m │ gzip:   0.44 kB[22m
+[2mdist/[22m[32mBITUNIX.5c4cb14.svg                     [39m[1m[2m    0.79 kB[22m[1m[22m[2m │ gzip:   0.50 kB[22m
+[2mdist/[22m[32mBITSTAMP.5c4cb14.svg                    [39m[1m[2m    0.79 kB[22m[1m[22m[2m │ gzip:   0.41 kB[22m
+[2mdist/[22m[32mDYDX.5c4cb14.svg                        [39m[1m[2m    0.87 kB[22m[1m[22m[2m │ gzip:   0.44 kB[22m
+[2mdist/[22m[32mBYBIT.5c4cb14.svg                       [39m[1m[2m    0.87 kB[22m[1m[22m[2m │ gzip:   0.52 kB[22m
+[2mdist/[22m[32mBINANCE_US.5c4cb14.svg                  [39m[1m[2m    0.88 kB[22m[1m[22m[2m │ gzip:   0.46 kB[22m
+[2mdist/[22m[32mKUCOIN.5c4cb14.svg                      [39m[1m[2m    0.95 kB[22m[1m[22m[2m │ gzip:   0.52 kB[22m
+[2mdist/[22m[32mMEXC.5c4cb14.svg                        [39m[1m[2m    1.01 kB[22m[1m[22m[2m │ gzip:   0.55 kB[22m
+[2mdist/[22m[32mOKEX.5c4cb14.svg                        [39m[1m[2m    1.10 kB[22m[1m[22m[2m │ gzip:   0.28 kB[22m
+[2mdist/[22m[32mHITBTC.5c4cb14.svg                      [39m[1m[2m    1.17 kB[22m[1m[22m[2m │ gzip:   0.48 kB[22m
+[2mdist/[22m[32mASTER.5c4cb14.svg                       [39m[1m[2m    1.23 kB[22m[1m[22m[2m │ gzip:   0.43 kB[22m
+[2mdist/[22m[32mBITMART.5c4cb14.svg                     [39m[1m[2m    1.78 kB[22m[1m[22m[2m │ gzip:   0.71 kB[22m
+[2mdist/[22m[32mindex.html                              [39m[1m[2m    3.92 kB[22m[1m[22m[2m │ gzip:   1.57 kB[22m
+[2mdist/[22m[32micon.5c4cb14.woff2                      [39m[1m[2m   16.20 kB[22m[1m[22m
+[2mdist/[22m[32micon.5c4cb14.woff                       [39m[1m[2m   18.88 kB[22m[1m[22m
+[2mdist/[22m[32micon.5c4cb14.ttf                        [39m[1m[2m   29.78 kB[22m[1m[22m
+[2mdist/[22m[32micon.5c4cb14.eot                        [39m[1m[2m   29.93 kB[22m[1m[22m
+[2mdist/[22m[32mBarlow-Medium.5c4cb14.woff2             [39m[1m[2m   52.47 kB[22m[1m[22m
+[2mdist/[22m[32mBarlow-Regular.5c4cb14.woff2            [39m[1m[2m   52.70 kB[22m[1m[22m
+[2mdist/[22m[32mBarlow-SemiBold.5c4cb14.woff2           [39m[1m[2m   53.09 kB[22m[1m[22m
+[2mdist/[22m[32mcodicon.5c4cb14.ttf                     [39m[1m[2m   73.46 kB[22m[1m[22m
+[2mdist/[22m[32mBarlow-Regular.5c4cb14.woff             [39m[1m[2m   75.22 kB[22m[1m[22m
+[2mdist/[22m[32mBarlow-Medium.5c4cb14.woff              [39m[1m[2m   75.26 kB[22m[1m[22m
+[2mdist/[22m[32mBarlow-SemiBold.5c4cb14.woff            [39m[1m[2m   76.48 kB[22m[1m[22m
+[2mdist/[22m[32massets/worker-c570c603.js               [39m[1m[2m  215.39 kB[22m[1m[22m
+[2mdist/[22m[32micon.5c4cb14.svg                        [39m[1m[2m  226.90 kB[22m[1m[22m[2m │ gzip:  71.74 kB[22m
+[2mdist/[22m[32mnoresults.5c4cb14.png                   [39m[1m[2m1,128.44 kB[22m[1m[22m
+[2mdist/[22m[32mpublish-1.5c4cb14.png                   [39m[1m[2m1,429.53 kB[22m[1m[22m
+[2mdist/[22m[32mpublish-3.5c4cb14.png                   [39m[1m[2m1,729.80 kB[22m[1m[22m
+[2mdist/[22m[32mpublish-2.5c4cb14.png                   [39m[1m[2m1,854.86 kB[22m[1m[22m
+[2mdist/[22m[35mIndicatorDropdown.5c4cb14.css           [39m[1m[2m    0.00 kB[22m[1m[22m[2m │ gzip:   0.02 kB[22m
+[2mdist/[22m[35mIndicatorOptionRange.5c4cb14.css        [39m[1m[2m    0.07 kB[22m[1m[22m[2m │ gzip:   0.09 kB[22m
+[2mdist/[22m[35mIndicatorOptionCheckbox.5c4cb14.css     [39m[1m[2m    0.17 kB[22m[1m[22m[2m │ gzip:   0.14 kB[22m
+[2mdist/[22m[35mIndicatorOptionColor.5c4cb14.css        [39m[1m[2m    0.19 kB[22m[1m[22m[2m │ gzip:   0.15 kB[22m
+[2mdist/[22m[35mAlerts.5c4cb14.css                      [39m[1m[2m    0.24 kB[22m[1m[22m[2m │ gzip:   0.17 kB[22m
+[2mdist/[22m[35mTradesLite.5c4cb14.css                  [39m[1m[2m    0.26 kB[22m[1m[22m[2m │ gzip:   0.18 kB[22m
+[2mdist/[22m[35mWebsite.5c4cb14.css                     [39m[1m[2m    0.37 kB[22m[1m[22m[2m │ gzip:   0.22 kB[22m
+[2mdist/[22m[35mConnectionIssueDialog.5c4cb14.css       [39m[1m[2m    0.39 kB[22m[1m[22m[2m │ gzip:   0.19 kB[22m
+[2mdist/[22m[35mToggableGroup.5c4cb14.css               [39m[1m[2m    0.44 kB[22m[1m[22m[2m │ gzip:   0.20 kB[22m
+[2mdist/[22m[35mMarkdownEditor.5c4cb14.css              [39m[1m[2m    0.50 kB[22m[1m[22m[2m │ gzip:   0.24 kB[22m
+[2mdist/[22m[35mDraggableMarket.5c4cb14.css             [39m[1m[2m    0.65 kB[22m[1m[22m[2m │ gzip:   0.33 kB[22m
+[2mdist/[22m[35mEditor.5c4cb14.css                      [39m[1m[2m    0.67 kB[22m[1m[22m[2m │ gzip:   0.26 kB[22m
+[2mdist/[22m[35mStats.5c4cb14.css                       [39m[1m[2m    0.91 kB[22m[1m[22m[2m │ gzip:   0.44 kB[22m
+[2mdist/[22m[35mTimeframeDropdown.5c4cb14.css           [39m[1m[2m    0.92 kB[22m[1m[22m[2m │ gzip:   0.29 kB[22m
+[2mdist/[22m[35mTab.5c4cb14.css                         [39m[1m[2m    0.96 kB[22m[1m[22m[2m │ gzip:   0.42 kB[22m
+[2mdist/[22m[35mAlertsList.5c4cb14.css                  [39m[1m[2m    1.00 kB[22m[1m[22m[2m │ gzip:   0.43 kB[22m
+[2mdist/[22m[35mEditorReference.5c4cb14.css             [39m[1m[2m    1.08 kB[22m[1m[22m[2m │ gzip:   0.43 kB[22m
+[2mdist/[22m[35mPublishResourceDialog.5c4cb14.css       [39m[1m[2m    1.24 kB[22m[1m[22m[2m │ gzip:   0.45 kB[22m
+[2mdist/[22m[35mCreateAlertDialog.5c4cb14.css           [39m[1m[2m    1.39 kB[22m[1m[22m[2m │ gzip:   0.53 kB[22m
+[2mdist/[22m[35mChartMeasurement.5c4cb14.css            [39m[1m[2m    2.08 kB[22m[1m[22m[2m │ gzip:   0.59 kB[22m
+[2mdist/[22m[35mCounters.5c4cb14.css                    [39m[1m[2m    2.13 kB[22m[1m[22m[2m │ gzip:   0.58 kB[22m
+[2mdist/[22m[35mColorPickerDialog.5c4cb14.css           [39m[1m[2m    2.16 kB[22m[1m[22m[2m │ gzip:   0.72 kB[22m
+[2mdist/[22m[35mPublishOnboarding.5c4cb14.css           [39m[1m[2m    2.68 kB[22m[1m[22m[2m │ gzip:   0.79 kB[22m
+[2mdist/[22m[35mPrices.5c4cb14.css                      [39m[1m[2m    4.50 kB[22m[1m[22m[2m │ gzip:   0.85 kB[22m
+[2mdist/[22m[35mIndicatorDialog.5c4cb14.css             [39m[1m[2m    4.88 kB[22m[1m[22m[2m │ gzip:   1.22 kB[22m
+[2mdist/[22m[35mTradesDialog.5c4cb14.css                [39m[1m[2m    4.90 kB[22m[1m[22m[2m │ gzip:   1.35 kB[22m
+[2mdist/[22m[35mSearchDialog.5c4cb14.css                [39m[1m[2m    5.05 kB[22m[1m[22m[2m │ gzip:   1.21 kB[22m
+[2mdist/[22m[35mIndicatorLibraryDialog.5c4cb14.css      [39m[1m[2m    5.75 kB[22m[1m[22m[2m │ gzip:   1.50 kB[22m
+[2mdist/[22m[35mChart.5c4cb14.css                       [39m[1m[2m    5.76 kB[22m[1m[22m[2m │ gzip:   1.47 kB[22m
+[2mdist/[22m[35mTrades.5c4cb14.css                      [39m[1m[2m    8.51 kB[22m[1m[22m[2m │ gzip:   1.74 kB[22m
+[2mdist/[22m[35mindex.5c4cb14.css                       [39m[1m[2m   54.34 kB[22m[1m[22m[2m │ gzip:  10.99 kB[22m
+[2mdist/[22m[35meditor.5c4cb142.css                     [39m[1m[2m  105.65 kB[22m[1m[22m[2m │ gzip:  16.76 kB[22m
+[2mdist/[22m[36mtime.5c4cb14.js                         [39m[1m[2m    0.23 kB[22m[1m[22m[2m │ gzip:   0.18 kB[22m
+[2mdist/[22m[36mvbuy.5c4cb14.js                         [39m[1m[2m    0.28 kB[22m[1m[22m[2m │ gzip:   0.22 kB[22m
+[2mdist/[22m[36mvsell.5c4cb14.js                        [39m[1m[2m    0.29 kB[22m[1m[22m[2m │ gzip:   0.22 kB[22m
+[2mdist/[22m[36mlbuy.5c4cb14.js                         [39m[1m[2m    0.32 kB[22m[1m[22m[2m │ gzip:   0.23 kB[22m
+[2mdist/[22m[36mcbuy.5c4cb14.js                         [39m[1m[2m    0.32 kB[22m[1m[22m[2m │ gzip:   0.23 kB[22m
+[2mdist/[22m[36mlsell.5c4cb14.js                        [39m[1m[2m    0.32 kB[22m[1m[22m[2m │ gzip:   0.23 kB[22m
+[2mdist/[22m[36mcsell.5c4cb14.js                        [39m[1m[2m    0.33 kB[22m[1m[22m[2m │ gzip:   0.23 kB[22m
+[2mdist/[22m[36mindicatorOptionMixin.5c4cb14.js         [39m[1m[2m    0.46 kB[22m[1m[22m[2m │ gzip:   0.32 kB[22m
+[2mdist/[22m[36msource.5c4cb14.js                       [39m[1m[2m    0.73 kB[22m[1m[22m[2m │ gzip:   0.38 kB[22m
+[2mdist/[22m[36moptions.5c4cb142.js                     [39m[1m[2m    0.74 kB[22m[1m[22m[2m │ gzip:   0.42 kB[22m
+[2mdist/[22m[36mAlertsDialog.5c4cb14.js                 [39m[1m[2m    0.75 kB[22m[1m[22m[2m │ gzip:   0.43 kB[22m
+[2mdist/[22m[36mIndicatorOptionText.5c4cb14.js          [39m[1m[2m    0.77 kB[22m[1m[22m[2m │ gzip:   0.49 kB[22m
+[2mdist/[22m[36mIndicatorOptionCheckbox.5c4cb14.js      [39m[1m[2m    0.81 kB[22m[1m[22m[2m │ gzip:   0.51 kB[22m
+[2mdist/[22m[36mcum.5c4cb14.js                          [39m[1m[2m    0.88 kB[22m[1m[22m[2m │ gzip:   0.47 kB[22m
+[2mdist/[22m[36mDraggableMarket.5c4cb14.js              [39m[1m[2m    0.92 kB[22m[1m[22m[2m │ gzip:   0.47 kB[22m
+[2mdist/[22m[36mcloudarea.5c4cb14.js                    [39m[1m[2m    0.94 kB[22m[1m[22m[2m │ gzip:   0.40 kB[22m
+[2mdist/[22m[36mIndicatorOptionLineType.5c4cb14.js      [39m[1m[2m    0.95 kB[22m[1m[22m[2m │ gzip:   0.59 kB[22m
+[2mdist/[22m[36mIndicatorOptionLineStyle.5c4cb14.js     [39m[1m[2m    0.99 kB[22m[1m[22m[2m │ gzip:   0.61 kB[22m
+[2mdist/[22m[36mavg_close.5c4cb14.js                    [39m[1m[2m    1.00 kB[22m[1m[22m[2m │ gzip:   0.49 kB[22m
+[2mdist/[22m[36mIndicatorOptionExchange.5c4cb14.js      [39m[1m[2m    1.03 kB[22m[1m[22m[2m │ gzip:   0.63 kB[22m
+[2mdist/[22m[36mazcli.5c4cb14.js                        [39m[1m[2m    1.10 kB[22m[1m[22m[2m │ gzip:   0.46 kB[22m
+[2mdist/[22m[36mna.5c4cb14.js                           [39m[1m[2m    1.11 kB[22m[1m[22m[2m │ gzip:   0.58 kB[22m
+[2mdist/[22m[36mhighest.5c4cb14.js                      [39m[1m[2m    1.17 kB[22m[1m[22m[2m │ gzip:   0.54 kB[22m
+[2mdist/[22m[36mIndicatorOptionNumber.5c4cb14.js        [39m[1m[2m    1.19 kB[22m[1m[22m[2m │ gzip:   0.64 kB[22m
+[2mdist/[22m[36mlowest.5c4cb14.js                       [39m[1m[2m    1.20 kB[22m[1m[22m[2m │ gzip:   0.57 kB[22m
+[2mdist/[22m[36msum.5c4cb14.js                          [39m[1m[2m    1.20 kB[22m[1m[22m[2m │ gzip:   0.57 kB[22m
+[2mdist/[22m[36mavg_heikinashi.5c4cb14.js               [39m[1m[2m    1.21 kB[22m[1m[22m[2m │ gzip:   0.53 kB[22m
+[2mdist/[22m[36mrenderer.5c4cb14.js                     [39m[1m[2m    1.21 kB[22m[1m[22m[2m │ gzip:   0.44 kB[22m
+[2mdist/[22m[36mToggableGroup.5c4cb14.js                [39m[1m[2m    1.21 kB[22m[1m[22m[2m │ gzip:   0.66 kB[22m
+[2mdist/[22m[36mavg.5c4cb14.js                          [39m[1m[2m    1.22 kB[22m[1m[22m[2m │ gzip:   0.60 kB[22m
+[2mdist/[22m[36mIndicatorOptionColor.5c4cb14.js         [39m[1m[2m    1.22 kB[22m[1m[22m[2m │ gzip:   0.72 kB[22m
+[2mdist/[22m[36mjavascript.5c4cb14.js                   [39m[1m[2m    1.24 kB[22m[1m[22m[2m │ gzip:   0.63 kB[22m
+[2mdist/[22m[36mIndicatorOptionList.5c4cb14.js          [39m[1m[2m    1.25 kB[22m[1m[22m[2m │ gzip:   0.70 kB[22m
+[2mdist/[22m[36mPriceScaleDropdown.5c4cb14.js           [39m[1m[2m    1.29 kB[22m[1m[22m[2m │ gzip:   0.61 kB[22m
+[2mdist/[22m[36mcma.5c4cb14.js                          [39m[1m[2m    1.30 kB[22m[1m[22m[2m │ gzip:   0.61 kB[22m
+[2mdist/[22m[36mlast.5c4cb14.js                         [39m[1m[2m    1.31 kB[22m[1m[22m[2m │ gzip:   0.57 kB[22m
+[2mdist/[22m[36mini.5c4cb14.js                          [39m[1m[2m    1.35 kB[22m[1m[22m[2m │ gzip:   0.68 kB[22m
+[2mdist/[22m[36msma.5c4cb14.js                          [39m[1m[2m    1.36 kB[22m[1m[22m[2m │ gzip:   0.66 kB[22m
+[2mdist/[22m[36mlinreg.5c4cb14.js                       [39m[1m[2m    1.46 kB[22m[1m[22m[2m │ gzip:   0.63 kB[22m
+[2mdist/[22m[36mhistogram.5c4cb14.js                    [39m[1m[2m    1.48 kB[22m[1m[22m[2m │ gzip:   0.70 kB[22m
+[2mdist/[22m[36mema.5c4cb14.js                          [39m[1m[2m    1.50 kB[22m[1m[22m[2m │ gzip:   0.72 kB[22m
+[2mdist/[22m[36mpaneDialogMixin.5c4cb14.js              [39m[1m[2m    1.51 kB[22m[1m[22m[2m │ gzip:   0.73 kB[22m
+[2mdist/[22m[36mstoch.5c4cb14.js                        [39m[1m[2m    1.52 kB[22m[1m[22m[2m │ gzip:   0.67 kB[22m
+[2mdist/[22m[36mrma.5c4cb14.js                          [39m[1m[2m    1.53 kB[22m[1m[22m[2m │ gzip:   0.70 kB[22m
+[2mdist/[22m[36mpivot_low.5c4cb14.js                    [39m[1m[2m    1.53 kB[22m[1m[22m[2m │ gzip:   0.69 kB[22m
+[2mdist/[22m[36mpivot_high.5c4cb14.js                   [39m[1m[2m    1.59 kB[22m[1m[22m[2m │ gzip:   0.69 kB[22m
+[2mdist/[22m[36mline.5c4cb14.js                         [39m[1m[2m    1.59 kB[22m[1m[22m[2m │ gzip:   0.77 kB[22m
+[2mdist/[22m[36mcsp.5c4cb14.js                          [39m[1m[2m    1.67 kB[22m[1m[22m[2m │ gzip:   0.67 kB[22m
+[2mdist/[22m[36mChartMeasurement.5c4cb14.js             [39m[1m[2m    1.67 kB[22m[1m[22m[2m │ gzip:   0.67 kB[22m
+[2mdist/[22m[36mohlc.5c4cb14.js                         [39m[1m[2m    1.69 kB[22m[1m[22m[2m │ gzip:   0.74 kB[22m
+[2mdist/[22m[36mavg_ohlc_with_gaps.5c4cb14.js           [39m[1m[2m    1.75 kB[22m[1m[22m[2m │ gzip:   0.77 kB[22m
+[2mdist/[22m[36mAlerts.5c4cb14.js                       [39m[1m[2m    1.75 kB[22m[1m[22m[2m │ gzip:   0.90 kB[22m
+[2mdist/[22m[36mCreateIndicatorDialog.5c4cb14.js        [39m[1m[2m    1.77 kB[22m[1m[22m[2m │ gzip:   0.84 kB[22m
+[2mdist/[22m[36marea.5c4cb14.js                         [39m[1m[2m    1.79 kB[22m[1m[22m[2m │ gzip:   0.81 kB[22m
+[2mdist/[22m[36mavg_ohlc.5c4cb14.js                     [39m[1m[2m    1.88 kB[22m[1m[22m[2m │ gzip:   0.82 kB[22m
+[2mdist/[22m[36mIndicatorOptionRange.5c4cb14.js         [39m[1m[2m    1.88 kB[22m[1m[22m[2m │ gzip:   0.87 kB[22m
+[2mdist/[22m[36mcum_ohlc.5c4cb14.js                     [39m[1m[2m    1.90 kB[22m[1m[22m[2m │ gzip:   0.80 kB[22m
+[2mdist/[22m[36mcandlestick.5c4cb14.js                  [39m[1m[2m    1.92 kB[22m[1m[22m[2m │ gzip:   0.84 kB[22m
+[2mdist/[22m[36mpla.5c4cb14.js                          [39m[1m[2m    1.93 kB[22m[1m[22m[2m │ gzip:   0.79 kB[22m
+[2mdist/[22m[36mTab.5c4cb14.js                          [39m[1m[2m    1.94 kB[22m[1m[22m[2m │ gzip:   0.85 kB[22m
+[2mdist/[22m[36mmerge_overlapping_intervals.5c4cb14.js  [39m[1m[2m    1.94 kB[22m[1m[22m[2m │ gzip:   0.85 kB[22m
+[2mdist/[22m[36mscheme.5c4cb14.js                       [39m[1m[2m    2.01 kB[22m[1m[22m[2m │ gzip:   0.97 kB[22m
+[2mdist/[22m[36mheikinashi.5c4cb14.js                   [39m[1m[2m    2.04 kB[22m[1m[22m[2m │ gzip:   0.81 kB[22m
+[2mdist/[22m[36minterpolate.5c4cb14.js                  [39m[1m[2m    2.04 kB[22m[1m[22m[2m │ gzip:   0.88 kB[22m
+[2mdist/[22m[36mflow9.5c4cb14.js                        [39m[1m[2m    2.06 kB[22m[1m[22m[2m │ gzip:   1.00 kB[22m
+[2mdist/[22m[36mbaseline.5c4cb14.js                     [39m[1m[2m    2.07 kB[22m[1m[22m[2m │ gzip:   0.86 kB[22m
+[2mdist/[22m[36msb.5c4cb14.js                           [39m[1m[2m    2.08 kB[22m[1m[22m[2m │ gzip:   0.97 kB[22m
+[2mdist/[22m[36mbat.5c4cb14.js                          [39m[1m[2m    2.09 kB[22m[1m[22m[2m │ gzip:   1.01 kB[22m
+[2mdist/[22m[36mdockerfile.5c4cb14.js                   [39m[1m[2m    2.12 kB[22m[1m[22m[2m │ gzip:   0.82 kB[22m
+[2mdist/[22m[36mEditorContextMenu.5c4cb14.js            [39m[1m[2m    2.20 kB[22m[1m[22m[2m │ gzip:   0.86 kB[22m
+[2mdist/[22m[36mpascaligo.5c4cb14.js                    [39m[1m[2m    2.25 kB[22m[1m[22m[2m │ gzip:   1.06 kB[22m
+[2mdist/[22m[36mlua.5c4cb14.js                          [39m[1m[2m    2.37 kB[22m[1m[22m[2m │ gzip:   1.07 kB[22m
+[2mdist/[22m[36mcameligo.5c4cb14.js                     [39m[1m[2m    2.43 kB[22m[1m[22m[2m │ gzip:   1.11 kB[22m
+[2mdist/[22m[36mgraphql.5c4cb14.js                      [39m[1m[2m    2.51 kB[22m[1m[22m[2m │ gzip:   1.17 kB[22m
+[2mdist/[22m[36mobjective-c.5c4cb14.js                  [39m[1m[2m    2.65 kB[22m[1m[22m[2m │ gzip:   1.21 kB[22m
+[2mdist/[22m[36mlexon.5c4cb14.js                        [39m[1m[2m    2.68 kB[22m[1m[22m[2m │ gzip:   1.07 kB[22m
+[2mdist/[22m[36mxml.5c4cb14.js                          [39m[1m[2m    2.74 kB[22m[1m[22m[2m │ gzip:   1.13 kB[22m
+[2mdist/[22m[36mbicep.5c4cb14.js                        [39m[1m[2m    2.74 kB[22m[1m[22m[2m │ gzip:   1.08 kB[22m
+[2mdist/[22m[36msparql.5c4cb14.js                       [39m[1m[2m    2.80 kB[22m[1m[22m[2m │ gzip:   1.31 kB[22m
+[2mdist/[22m[36mmips.5c4cb14.js                         [39m[1m[2m    2.83 kB[22m[1m[22m[2m │ gzip:   1.22 kB[22m
+[2mdist/[22m[36mgo.5c4cb14.js                           [39m[1m[2m    2.90 kB[22m[1m[22m[2m │ gzip:   1.29 kB[22m
+[2mdist/[22m[36msophia.5c4cb14.js                       [39m[1m[2m    3.01 kB[22m[1m[22m[2m │ gzip:   1.36 kB[22m
+[2mdist/[22m[36mm3.5c4cb14.js                           [39m[1m[2m    3.06 kB[22m[1m[22m[2m │ gzip:   1.47 kB[22m
+[2mdist/[22m[36mTimeframeDropdown.5c4cb14.js            [39m[1m[2m    3.12 kB[22m[1m[22m[2m │ gzip:   1.26 kB[22m
+[2mdist/[22m[36mEditorReference.5c4cb14.js              [39m[1m[2m    3.18 kB[22m[1m[22m[2m │ gzip:   1.35 kB[22m
+[2mdist/[22m[36mqsharp.5c4cb14.js                       [39m[1m[2m    3.18 kB[22m[1m[22m[2m │ gzip:   1.51 kB[22m
+[2mdist/[22m[36mPublishResourceDialog.5c4cb14.js        [39m[1m[2m    3.20 kB[22m[1m[22m[2m │ gzip:   1.39 kB[22m
+[2mdist/[22m[36moption.5c4cb14.js                       [39m[1m[2m    3.21 kB[22m[1m[22m[2m │ gzip:   1.28 kB[22m
+[2mdist/[22m[36mfsharp.5c4cb14.js                       [39m[1m[2m    3.23 kB[22m[1m[22m[2m │ gzip:   1.47 kB[22m
+[2mdist/[22m[36mpascal.5c4cb14.js                       [39m[1m[2m    3.24 kB[22m[1m[22m[2m │ gzip:   1.55 kB[22m
+[2mdist/[22m[36mCountersDialog.5c4cb14.js               [39m[1m[2m    3.27 kB[22m[1m[22m[2m │ gzip:   1.42 kB[22m
+[2mdist/[22m[36mshell.5c4cb14.js                        [39m[1m[2m    3.32 kB[22m[1m[22m[2m │ gzip:   1.35 kB[22m
+[2mdist/[22m[36mr.5c4cb14.js                            [39m[1m[2m    3.38 kB[22m[1m[22m[2m │ gzip:   1.42 kB[22m
+[2mdist/[22m[36mjava.5c4cb14.js                         [39m[1m[2m    3.47 kB[22m[1m[22m[2m │ gzip:   1.55 kB[22m
+[2mdist/[22m[36mpowershell.5c4cb14.js                   [39m[1m[2m    3.52 kB[22m[1m[22m[2m │ gzip:   1.53 kB[22m
+[2mdist/[22m[36mMarkdownEditor.5c4cb14.js               [39m[1m[2m    3.57 kB[22m[1m[22m[2m │ gzip:   1.54 kB[22m
+[2mdist/[22m[36mcypher.5c4cb14.js                       [39m[1m[2m    3.64 kB[22m[1m[22m[2m │ gzip:   1.59 kB[22m
+[2mdist/[22m[36mkotlin.5c4cb14.js                       [39m[1m[2m    3.69 kB[22m[1m[22m[2m │ gzip:   1.63 kB[22m
+[2mdist/[22m[36mredis.5c4cb14.js                        [39m[1m[2m    3.80 kB[22m[1m[22m[2m │ gzip:   1.64 kB[22m
+[2mdist/[22m[36mtcl.5c4cb14.js                          [39m[1m[2m    3.82 kB[22m[1m[22m[2m │ gzip:   1.52 kB[22m
+[2mdist/[22m[36mcoffee.5c4cb14.js                       [39m[1m[2m    3.84 kB[22m[1m[22m[2m │ gzip:   1.45 kB[22m
+[2mdist/[22m[36mhcl.5c4cb14.js                          [39m[1m[2m    3.84 kB[22m[1m[22m[2m │ gzip:   1.64 kB[22m
+[2mdist/[22m[36mStatsDialog.5c4cb14.js                  [39m[1m[2m    3.87 kB[22m[1m[22m[2m │ gzip:   1.46 kB[22m
+[2mdist/[22m[36mWebsite.5c4cb14.js                      [39m[1m[2m    3.93 kB[22m[1m[22m[2m │ gzip:   1.66 kB[22m
+[2mdist/[22m[36mpython.5c4cb14.js                       [39m[1m[2m    3.94 kB[22m[1m[22m[2m │ gzip:   1.75 kB[22m
+[2mdist/[22m[36mPublishOnboarding.5c4cb14.js            [39m[1m[2m    3.96 kB[22m[1m[22m[2m │ gzip:   1.69 kB[22m
+[2mdist/[22m[36mEditor.5c4cb14.js                       [39m[1m[2m    3.98 kB[22m[1m[22m[2m │ gzip:   1.55 kB[22m
+[2mdist/[22m[36mCreateAlertDialog.5c4cb14.js            [39m[1m[2m    4.02 kB[22m[1m[22m[2m │ gzip:   1.72 kB[22m
+[2mdist/[22m[36mmarkdown.5c4cb14.js                     [39m[1m[2m    4.05 kB[22m[1m[22m[2m │ gzip:   1.54 kB[22m
+[2mdist/[22m[36mless.5c4cb14.js                         [39m[1m[2m    4.15 kB[22m[1m[22m[2m │ gzip:   1.57 kB[22m
+[2mdist/[22m[36mrestructuredtext.5c4cb14.js             [39m[1m[2m    4.15 kB[22m[1m[22m[2m │ gzip:   1.53 kB[22m
+[2mdist/[22m[36mapex.5c4cb14.js                         [39m[1m[2m    4.19 kB[22m[1m[22m[2m │ gzip:   1.91 kB[22m
+[2mdist/[22m[36mliquid.5c4cb14.js                       [39m[1m[2m    4.29 kB[22m[1m[22m[2m │ gzip:   1.83 kB[22m
+[2mdist/[22m[36myaml.5c4cb14.js                         [39m[1m[2m    4.33 kB[22m[1m[22m[2m │ gzip:   1.68 kB[22m
+[2mdist/[22m[36mrust.5c4cb14.js                         [39m[1m[2m    4.41 kB[22m[1m[22m[2m │ gzip:   1.97 kB[22m
+[2mdist/[22m[36mdart.5c4cb14.js                         [39m[1m[2m    4.50 kB[22m[1m[22m[2m │ gzip:   1.80 kB[22m
+[2mdist/[22m[36mWebsiteDialog.5c4cb14.js                [39m[1m[2m    4.55 kB[22m[1m[22m[2m │ gzip:   1.82 kB[22m
+[2mdist/[22m[36mcss.5c4cb14.js                          [39m[1m[2m    4.76 kB[22m[1m[22m[2m │ gzip:   1.53 kB[22m
+[2mdist/[22m[36mcsharp.5c4cb14.js                       [39m[1m[2m    4.77 kB[22m[1m[22m[2m │ gzip:   1.88 kB[22m
+[2mdist/[22m[36mCounters.5c4cb14.js                     [39m[1m[2m    4.83 kB[22m[1m[22m[2m │ gzip:   1.83 kB[22m
+[2mdist/[22m[36mpug.5c4cb14.js                          [39m[1m[2m    5.08 kB[22m[1m[22m[2m │ gzip:   1.80 kB[22m
+[2mdist/[22m[36mmsdax.5c4cb14.js                        [39m[1m[2m    5.16 kB[22m[1m[22m[2m │ gzip:   2.11 kB[22m
+[2mdist/[22m[36mmdx.5c4cb14.js                          [39m[1m[2m    5.18 kB[22m[1m[22m[2m │ gzip:   1.61 kB[22m
+[2mdist/[22m[36mhtml.5c4cb14.js                         [39m[1m[2m    5.36 kB[22m[1m[22m[2m │ gzip:   1.56 kB[22m
+[2mdist/[22m[36mChartContextMenu.5c4cb14.js             [39m[1m[2m    5.36 kB[22m[1m[22m[2m │ gzip:   1.53 kB[22m
+[2mdist/[22m[36mswift.5c4cb14.js                        [39m[1m[2m    5.42 kB[22m[1m[22m[2m │ gzip:   2.22 kB[22m
+[2mdist/[22m[36mIndicatorDropdown.5c4cb14.js            [39m[1m[2m    5.56 kB[22m[1m[22m[2m │ gzip:   1.70 kB[22m
+[2mdist/[22m[36mecl.5c4cb14.js                          [39m[1m[2m    5.59 kB[22m[1m[22m[2m │ gzip:   2.38 kB[22m
+[2mdist/[22m[36mcpp.5c4cb14.js                          [39m[1m[2m    5.73 kB[22m[1m[22m[2m │ gzip:   2.29 kB[22m
+[2mdist/[22m[36mtypescript.5c4cb14.js                   [39m[1m[2m    5.73 kB[22m[1m[22m[2m │ gzip:   2.33 kB[22m
+[2mdist/[22m[36mbrokenarea.5c4cb14.js                   [39m[1m[2m    6.01 kB[22m[1m[22m[2m │ gzip:   2.28 kB[22m
+[2mdist/[22m[36mvb.5c4cb14.js                           [39m[1m[2m    6.04 kB[22m[1m[22m[2m │ gzip:   2.21 kB[22m
+[2mdist/[22m[36mtwig.5c4cb14.js                         [39m[1m[2m    6.23 kB[22m[1m[22m[2m │ gzip:   1.69 kB[22m
+[2mdist/[22m[36mConnectionIssueDialog.5c4cb14.js        [39m[1m[2m    6.26 kB[22m[1m[22m[2m │ gzip:   2.30 kB[22m
+[2mdist/[22m[36mAlertsSettings.5c4cb14.js               [39m[1m[2m    6.35 kB[22m[1m[22m[2m │ gzip:   2.22 kB[22m
+[2mdist/[22m[36mscss.5c4cb14.js                         [39m[1m[2m    6.66 kB[22m[1m[22m[2m │ gzip:   1.90 kB[22m
+[2mdist/[22m[36mhandlebars.5c4cb14.js                   [39m[1m[2m    7.10 kB[22m[1m[22m[2m │ gzip:   1.78 kB[22m
+[2mdist/[22m[36mAlertsList.5c4cb14.js                   [39m[1m[2m    7.27 kB[22m[1m[22m[2m │ gzip:   2.72 kB[22m
+[2mdist/[22m[36mjulia.5c4cb14.js                        [39m[1m[2m    7.34 kB[22m[1m[22m[2m │ gzip:   2.81 kB[22m
+[2mdist/[22m[36mPaneHeader.5c4cb14.js                   [39m[1m[2m    7.48 kB[22m[1m[22m[2m │ gzip:   2.38 kB[22m
+[2mdist/[22m[36mscala.5c4cb14.js                        [39m[1m[2m    7.57 kB[22m[1m[22m[2m │ gzip:   2.25 kB[22m
+[2mdist/[22m[36mPricesDialog.5c4cb14.js                 [39m[1m[2m    7.61 kB[22m[1m[22m[2m │ gzip:   2.07 kB[22m
+[2mdist/[22m[36mst.5c4cb14.js                           [39m[1m[2m    7.65 kB[22m[1m[22m[2m │ gzip:   2.39 kB[22m
+[2mdist/[22m[36msystemverilog.5c4cb14.js                [39m[1m[2m    7.85 kB[22m[1m[22m[2m │ gzip:   2.91 kB[22m
+[2mdist/[22m[36mChartDialog.5c4cb14.js                  [39m[1m[2m    7.87 kB[22m[1m[22m[2m │ gzip:   1.90 kB[22m
+[2mdist/[22m[36mpostiats.5c4cb14.js                     [39m[1m[2m    8.10 kB[22m[1m[22m[2m │ gzip:   2.59 kB[22m
+[2mdist/[22m[36mStats.5c4cb14.js                        [39m[1m[2m    8.18 kB[22m[1m[22m[2m │ gzip:   2.89 kB[22m
+[2mdist/[22m[36mphp.5c4cb14.js                          [39m[1m[2m    8.27 kB[22m[1m[22m[2m │ gzip:   2.22 kB[22m
+[2mdist/[22m[36mperl.5c4cb14.js                         [39m[1m[2m    8.50 kB[22m[1m[22m[2m │ gzip:   3.29 kB[22m
+[2mdist/[22m[36mwgsl.5c4cb14.js                         [39m[1m[2m    8.66 kB[22m[1m[22m[2m │ gzip:   2.89 kB[22m
+[2mdist/[22m[36mruby.5c4cb14.js                         [39m[1m[2m    8.75 kB[22m[1m[22m[2m │ gzip:   2.73 kB[22m
+[2mdist/[22m[36mrazor.5c4cb14.js                        [39m[1m[2m    9.11 kB[22m[1m[22m[2m │ gzip:   2.46 kB[22m
+[2mdist/[22m[36mprotobuf.5c4cb14.js                     [39m[1m[2m    9.29 kB[22m[1m[22m[2m │ gzip:   2.22 kB[22m
+[2mdist/[22m[36mclojure.5c4cb14.js                      [39m[1m[2m    9.89 kB[22m[1m[22m[2m │ gzip:   3.77 kB[22m
+[2mdist/[22m[36mPrices.5c4cb14.js                       [39m[1m[2m   10.09 kB[22m[1m[22m[2m │ gzip:   3.26 kB[22m
+[2mdist/[22m[36melixir.5c4cb14.js                       [39m[1m[2m   10.50 kB[22m[1m[22m[2m │ gzip:   2.69 kB[22m
+[2mdist/[22m[36msql.5c4cb14.js                          [39m[1m[2m   10.54 kB[22m[1m[22m[2m │ gzip:   4.01 kB[22m
+[2mdist/[22m[36mmysql.5c4cb14.js                        [39m[1m[2m   11.52 kB[22m[1m[22m[2m │ gzip:   4.23 kB[22m
+[2mdist/[22m[36mredshift.5c4cb14.js                     [39m[1m[2m   12.05 kB[22m[1m[22m[2m │ gzip:   4.49 kB[22m
+[2mdist/[22m[36mColorPickerDialog.5c4cb14.js            [39m[1m[2m   12.14 kB[22m[1m[22m[2m │ gzip:   4.27 kB[22m
+[2mdist/[22m[36mpgsql.5c4cb14.js                        [39m[1m[2m   13.71 kB[22m[1m[22m[2m │ gzip:   4.65 kB[22m
+[2mdist/[22m[36mabap.5c4cb14.js                         [39m[1m[2m   14.41 kB[22m[1m[22m[2m │ gzip:   5.47 kB[22m
+[2mdist/[22m[36mfreemarker2.5c4cb14.js                  [39m[1m[2m   16.42 kB[22m[1m[22m[2m │ gzip:   4.31 kB[22m
+[2mdist/[22m[36mpowerquery.5c4cb14.js                   [39m[1m[2m   17.19 kB[22m[1m[22m[2m │ gzip:   5.01 kB[22m
+[2mdist/[22m[36mTrades.5c4cb14.js                       [39m[1m[2m   17.91 kB[22m[1m[22m[2m │ gzip:   6.01 kB[22m
+[2mdist/[22m[36msolidity.5c4cb14.js                     [39m[1m[2m   18.84 kB[22m[1m[22m[2m │ gzip:   4.62 kB[22m
+[2mdist/[22m[36mTradesLite.5c4cb14.js                   [39m[1m[2m   19.48 kB[22m[1m[22m[2m │ gzip:   5.96 kB[22m
+[2mdist/[22m[36mSearchDialog.5c4cb14.js                 [39m[1m[2m   22.55 kB[22m[1m[22m[2m │ gzip:   6.44 kB[22m
+[2mdist/[22m[36mtsMode.5c4cb14.js                       [39m[1m[2m   23.19 kB[22m[1m[22m[2m │ gzip:   6.43 kB[22m
+[2mdist/[22m[36mIndicatorDialog.5c4cb14.js              [39m[1m[2m   28.36 kB[22m[1m[22m[2m │ gzip:   7.24 kB[22m
+[2mdist/[22m[36mIndicatorLibraryDialog.5c4cb14.js       [39m[1m[2m   35.52 kB[22m[1m[22m[2m │ gzip:   9.59 kB[22m
+[2mdist/[22m[36mmarked.esm.5c4cb14.js                   [39m[1m[2m   35.96 kB[22m[1m[22m[2m │ gzip:  10.97 kB[22m
+[2mdist/[22m[36mdexie-export-import.5c4cb14.js          [39m[1m[2m   52.49 kB[22m[1m[22m[2m │ gzip:  14.62 kB[22m
+[2mdist/[22m[36mTradesDialog.5c4cb14.js                 [39m[1m[2m   55.66 kB[22m[1m[22m[2m │ gzip:  12.34 kB[22m
+[2mdist/[22m[36mdexie.min.5c4cb14.js                    [39m[1m[2m   73.77 kB[22m[1m[22m[2m │ gzip:  25.23 kB[22m
+[2mdist/[22m[36mChart.5c4cb14.js                        [39m[1m[2m   78.14 kB[22m[1m[22m[2m │ gzip:  20.84 kB[22m
+[2mdist/[22m[36moptions.5c4cb14.js                      [39m[1m[2m  179.84 kB[22m[1m[22m[2m │ gzip:  55.92 kB[22m
+[2mdist/[22m[36mindex.5c4cb14.js                        [39m[1m[33m  554.41 kB[39m[22m[2m │ gzip: 168.55 kB[22m
+[2mdist/[22m[36meditor.5c4cb142.js                      [39m[1m[33m3,024.12 kB[39m[22m[2m │ gzip: 755.27 kB[22m
+[33m
+(!) Some chunks are larger than 500 kBs after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m✓ built in 37.12s[39m
+[aggr] index.html 已处理（字体替换 1 处）
+[aggr] 已加入中文脚本和本地字体
+lmap: 默认主题改为 midnight
+[36mvite v6.0.7 [32mbuilding for production...[36m[39m
+transforming...
+[32m✓[39m 279 modules transformed.
+rendering chunks...
+computing gzip size...
+[2m../../dist/[22m[32mindex.html                           [39m[1m[2m    1.95 kB[22m[1m[22m[2m │ gzip:   1.03 kB[22m
+[2m../../dist/[22m[32massets/gif-pool.worker-CEfw4dZd.js   [39m[1m[2m    7.20 kB[22m[1m[22m
+[2m../../dist/[22m[32massets/raster.worker-DxuV2QcZ.js     [39m[1m[2m   13.48 kB[22m[1m[22m
+[2m../../dist/[22m[32massets/gif.worker-CxRO5CJU.js        [39m[1m[2m   16.63 kB[22m[1m[22m
+[2m../../dist/[22m[32massets/hlm_kernels_bg-DBkqdGMb.wasm  [39m[1m[2m   31.54 kB[22m[1m[22m
+[2m../../dist/[22m[32massets/script.worker-MWG5eCOm.js     [39m[1m[2m   68.35 kB[22m[1m[22m
+[2m../../dist/[22m[32massets/feeds.worker-Dvf1szqW.js      [39m[1m[2m  147.25 kB[22m[1m[22m
+[2m../../dist/[22m[35massets/main-BucSOlOx.css             [39m[1m[2m  153.18 kB[22m[1m[22m[2m │ gzip:  25.20 kB[22m
+[2m../../dist/[22m[36massets/index-BiaB-acS.js             [39m[1m[2m    2.51 kB[22m[1m[22m[2m │ gzip:   1.04 kB[22m
+[2m../../dist/[22m[36massets/coin-dialog-C0mWq7Q0.js       [39m[1m[2m    2.52 kB[22m[1m[22m[2m │ gzip:   1.27 kB[22m
+[2m../../dist/[22m[36massets/lazy-BrD_9qGB.js              [39m[1m[2m    3.41 kB[22m[1m[22m[2m │ gzip:   1.79 kB[22m
+[2m../../dist/[22m[36massets/register-BQ1KTGi4.js          [39m[1m[2m   11.52 kB[22m[1m[22m[2m │ gzip:   4.48 kB[22m
+[2m../../dist/[22m[36massets/zh-bUdTI0pW.js                [39m[1m[2m   27.14 kB[22m[1m[22m[2m │ gzip:  17.67 kB[22m
+[2m../../dist/[22m[36massets/ja-yuM_3yPI.js                [39m[1m[2m   29.49 kB[22m[1m[22m[2m │ gzip:  18.02 kB[22m
+[2m../../dist/[22m[36massets/ko-B-BF0Ert.js                [39m[1m[2m   30.53 kB[22m[1m[22m[2m │ gzip:  17.48 kB[22m
+[2m../../dist/[22m[36massets/uk-DBbj_W67.js                [39m[1m[2m   40.04 kB[22m[1m[22m[2m │ gzip:  19.24 kB[22m
+[2m../../dist/[22m[36massets/tr-BRTSTjT_.js                [39m[1m[2m   40.10 kB[22m[1m[22m[2m │ gzip:  16.48 kB[22m
+[2m../../dist/[22m[36massets/ru-_Y6h5wZM.js                [39m[1m[2m   40.15 kB[22m[1m[22m[2m │ gzip:  19.07 kB[22m
+[2m../../dist/[22m[36massets/pt-Cts6J9TA.js                [39m[1m[2m   40.69 kB[22m[1m[22m[2m │ gzip:  16.10 kB[22m
+[2m../../dist/[22m[36massets/es-Cr5LCs3R.js                [39m[1m[2m   41.45 kB[22m[1m[22m[2m │ gzip:  16.17 kB[22m
+[2m../../dist/[22m[36massets/it-DlhLpj8c.js                [39m[1m[2m   41.58 kB[22m[1m[22m[2m │ gzip:  16.06 kB[22m
+[2m../../dist/[22m[36massets/de-D6H18G6p.js                [39m[1m[2m   41.66 kB[22m[1m[22m[2m │ gzip:  16.67 kB[22m
+[2m../../dist/[22m[36massets/fr-BQqAuyIH.js                [39m[1m[2m   42.50 kB[22m[1m[22m[2m │ gzip:  16.57 kB[22m
+[2m../../dist/[22m[36massets/editor-D3oPXXs8.js            [39m[1m[2m   48.15 kB[22m[1m[22m[2m │ gzip:  18.16 kB[22m
+[2m../../dist/[22m[36massets/guide-33Sp2Kuh.js             [39m[1m[2m   50.50 kB[22m[1m[22m[2m │ gzip:  19.35 kB[22m
+[2m../../dist/[22m[36massets/zh-NHGhtg7w.js                [39m[1m[2m  179.54 kB[22m[1m[22m[2m │ gzip:  95.35 kB[22m
+[2m../../dist/[22m[36massets/ja-DwNOfkCs.js                [39m[1m[2m  194.17 kB[22m[1m[22m[2m │ gzip:  98.15 kB[22m
+[2m../../dist/[22m[36massets/ko-D01NIjBm.js                [39m[1m[2m  199.81 kB[22m[1m[22m[2m │ gzip:  95.40 kB[22m
+[2m../../dist/[22m[36massets/tr-BC0heimw.js                [39m[1m[2m  262.27 kB[22m[1m[22m[2m │ gzip:  91.66 kB[22m
+[2m../../dist/[22m[36massets/uk-CozOG3uy.js                [39m[1m[2m  262.83 kB[22m[1m[22m[2m │ gzip: 106.96 kB[22m
+[2m../../dist/[22m[36massets/ru-C49WVb2E.js                [39m[1m[2m  264.07 kB[22m[1m[22m[2m │ gzip: 106.24 kB[22m
+[2m../../dist/[22m[36massets/pt-6TKbw9cj.js                [39m[1m[2m  269.19 kB[22m[1m[22m[2m │ gzip:  91.11 kB[22m
+[2m../../dist/[22m[36massets/es-8PM9z9f0.js                [39m[1m[2m  273.49 kB[22m[1m[22m[2m │ gzip:  91.54 kB[22m
+[2m../../dist/[22m[36massets/it-BpHk9227.js                [39m[1m[2m  275.16 kB[22m[1m[22m[2m │ gzip:  91.21 kB[22m
+[2m../../dist/[22m[36massets/de-BXZNGyD3.js                [39m[1m[2m  275.62 kB[22m[1m[22m[2m │ gzip:  94.21 kB[22m
+[2m../../dist/[22m[36massets/fr-C9OV5qGt.js                [39m[1m[2m  280.87 kB[22m[1m[22m[2m │ gzip:  93.49 kB[22m
+[2m../../dist/[22m[36massets/main-r-EAV2go.js              [39m[1m[33m1,173.09 kB[39m[22m[2m │ gzip: 418.58 kB[22m
+[33m
+(!) Some chunks are larger than 500 kB after minification. Consider:
+- Using dynamic import() to code-split the application
+- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks
+- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.[39m
+[32m✓ built in 5.74s[39m
+41M	flowmap/app/src-tauri/resources/wb
+==> FlowMap Python runtime bundler
+    triple:    x86_64-pc-windows-msvc (windows)
+    repo:      /d/a/flowmap/flowmap/flowmap
+    pyruntime: /d/a/flowmap/flowmap/flowmap/app/src-tauri/resources/pyruntime
+==> Resolving python-build-standalone asset (tag 20260623)
+    asset: https://github.com/astral-sh/python-build-standalone/releases/download/20260623/cpython-3.13.14%2B20260623-x86_64-pc-windows-msvc-install_only.tar.gz
+==> Downloading cpython-3.13.14%2B20260623-x86_64-pc-windows-msvc-install_only.tar.gz
+  % Total    % Received % Xferd  Average Speed  Time    Time    Time   Current
+                                 Dload  Upload  Total   Spent   Left   Speed
+  0      0   0      0   0      0      0      0                              0  0      0   0      0   0      0      0      0                              0  0      0   0      0   0      0      0      0                              0
+  0      0   0      0   0      0      0      0                              0100 44.90M 100 44.90M   0      0 37.63M      0   00:01   00:01              0100 44.90M 100 44.90M   0      0 37.62M      0   00:01   00:01              0100 44.90M 100 44.90M   0      0 37.62M      0   00:01   00:01              0
+==> Extracting runtime
+    interpreter: /d/a/flowmap/flowmap/flowmap/app/src-tauri/resources/pyruntime/python.exe
+    python 3.13.14
+==> Exporting locked requirements from server/uv.lock
+Using CPython 3.13.16 interpreter at: C:\hostedtoolcache\windows\Python\3.13.16\x64\python.exe
+Resolved 77 packages in 2ms
+# This file was autogenerated by uv via the following command:
+#    uv export --locked --no-dev --no-emit-project --no-hashes -o D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt
+./vendor/crocodile-0.3.2-py3-none-any.whl
+    # via flowmap-server
+aiohappyeyeballs==2.7.1
+    # via
+    #   aiohttp
+    #   ccxt
+aiohttp==3.14.1
+    # via
+    #   aiohttp-fast-zlib
+    #   ccxt
+    #   crocodile
+    #   flowmap-server
+aiohttp-fast-zlib==0.3.0
+    # via ccxt
+aiosignal==1.4.0
+    # via
+    #   aiohttp
+    #   ccxt
+annotated-doc==0.0.4
+    # via
+    #   fastapi
+    #   typer
+annotated-types==0.7.0
+    # via pydantic
+anyio==4.14.2
+    # via starlette
+attrs==26.1.0
+    # via
+    #   aiohttp
+    #   ccxt
+beautifulsoup4==4.15.0
+    # via
+    #   crocodile
+    #   yfinance
+ccxt==4.5.69
+    # via crocodile
+certifi==2026.6.17
+    # via
+    #   ccxt
+    #   curl-cffi
+    #   flowmap-server
+    #   requests
+cffi==2.0.0
+    # via
+    #   ccxt
+    #   cryptography
+    #   curl-cffi
+charset-normalizer==3.4.7
+    # via
+    #   ccxt
+    #   requests
+click==8.4.2
+    # via uvicorn
+coincurve==21.0.0 ; python_full_version < '3.14' and implementation_name == 'cpython' and platform_machine != 'x86' and platform_machine in 'x86_64 AMD64 aarch64 arm64 ARM64 i686'
+    # via ccxt
+colorama==0.4.6 ; sys_platform == 'win32'
+    # via
+    #   click
+    #   typer
+cryptography==49.0.0
+    # via ccxt
+curl-cffi==0.15.0
+    # via yfinance
+duckdb==1.5.4
+    # via crocodile
+fastapi==0.139.2
+    # via flowmap-server
+frozenlist==1.8.0
+    # via
+    #   aiohttp
+    #   aiosignal
+    #   ccxt
+h11==0.16.0
+    # via uvicorn
+idna==3.18
+    # via
+    #   anyio
+    #   ccxt
+    #   requests
+    #   yarl
+markdown-it-py==4.2.0
+    # via rich
+mdurl==0.1.2
+    # via markdown-it-py
+mmh3==5.2.1
+    # via crocodile
+msgspec==0.21.1
+    # via
+    #   crocodile
+    #   flowmap-server
+multidict==6.7.1
+    # via
+    #   aiohttp
+    #   ccxt
+    #   yarl
+multitasking==0.0.13
+    # via yfinance
+numpy==2.5.1
+    # via
+    #   crocodile
+    #   flowmap-server
+    #   pandas
+    #   yfinance
+orjson==3.11.9 ; python_full_version < '3.15' and implementation_name == 'cpython' and platform_machine in 'x86_64 AMD64 aarch64 arm64 armv7l i686 ppc64le s390x'
+    # via ccxt
+pandas==3.0.3
+    # via
+    #   crocodile
+    #   yfinance
+peewee==4.2.5
+    # via yfinance
+platformdirs==4.10.0
+    # via yfinance
+polars==1.42.1
+    # via
+    #   crocodile
+    #   flowmap-server
+polars-runtime-32==1.42.1
+    # via polars
+prompt-toolkit==3.0.52
+    # via crocodile
+propcache==0.5.2
+    # via
+    #   aiohttp
+    #   ccxt
+    #   yarl
+protobuf==7.35.1
+    # via yfinance
+pyarrow==25.0.0
+    # via crocodile
+pycparser==3.0
+    # via
+    #   ccxt
+    #   cffi
+pydantic==2.13.4
+    # via fastapi
+pydantic-core==2.46.4
+    # via pydantic
+pygments==2.20.0
+    # via rich
+python-dateutil==2.9.0.post0
+    # via
+    #   crocodile
+    #   pandas
+pytz==2026.2
+    # via yfinance
+requests==2.34.2
+    # via
+    #   ccxt
+    #   yfinance
+rich==15.0.0
+    # via
+    #   crocodile
+    #   curl-cffi
+    #   typer
+setuptools==83.0.0
+    # via ccxt
+shellingham==1.5.4
+    # via typer
+six==1.17.0
+    # via python-dateutil
+soupsieve==2.8.4
+    # via beautifulsoup4
+starlette==1.3.1
+    # via fastapi
+typer==0.27.0
+    # via crocodile
+typing-extensions==4.16.0
+    # via
+    #   beautifulsoup4
+    #   ccxt
+    #   fastapi
+    #   pydantic
+    #   pydantic-core
+    #   typing-inspection
+typing-inspection==0.4.2
+    # via
+    #   fastapi
+    #   pydantic
+tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
+    # via pandas
+urllib3==2.7.0
+    # via
+    #   ccxt
+    #   requests
+uvicorn==0.51.0
+    # via flowmap-server
+uvloop==0.22.1 ; implementation_name == 'cpython' and sys_platform != 'win32'
+    # via ccxt
+wcwidth==0.8.2
+    # via prompt-toolkit
+websockets==16.1
+    # via
+    #   crocodile
+    #   yfinance
+winloop==0.6.3 ; python_full_version < '3.15' and implementation_name == 'cpython' and platform_machine in 'AMD64 ARM64' and sys_platform == 'win32'
+    # via ccxt
+yarl==1.24.2
+    # via
+    #   aiohttp
+    #   ccxt
+yfinance==1.5.1
+    # via crocodile
+zlib-ng==1.0.0
+    # via ccxt
+    67 requirement lines
+==> Installing dependencies into the runtime (this fetches native wheels)
+Processing .\vendor\crocodile-0.3.2-py3-none-any.whl (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 3))
+Ignoring uvloop: markers 'implementation_name == "cpython" and sys_platform != "win32"' don't match your environment
+Collecting aiohappyeyeballs==2.7.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 5))
+  Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl.metadata (5.9 kB)
+Collecting aiohttp==3.14.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 9))
+  Downloading aiohttp-3.14.1-cp313-cp313-win_amd64.whl.metadata (8.5 kB)
+Collecting aiohttp-fast-zlib==0.3.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 15))
+  Downloading aiohttp_fast_zlib-0.3.0-py3-none-any.whl.metadata (5.7 kB)
+Collecting aiosignal==1.4.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 17))
+  Downloading aiosignal-1.4.0-py3-none-any.whl.metadata (3.7 kB)
+Collecting annotated-doc==0.0.4 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 21))
+  Downloading annotated_doc-0.0.4-py3-none-any.whl.metadata (6.6 kB)
+Collecting annotated-types==0.7.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 25))
+  Downloading annotated_types-0.7.0-py3-none-any.whl.metadata (15 kB)
+Collecting anyio==4.14.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 27))
+  Downloading anyio-4.14.2-py3-none-any.whl.metadata (4.6 kB)
+Collecting attrs==26.1.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 29))
+  Downloading attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting beautifulsoup4==4.15.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 33))
+  Downloading beautifulsoup4-4.15.0-py3-none-any.whl.metadata (3.8 kB)
+Collecting ccxt==4.5.69 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 37))
+  Downloading ccxt-4.5.69-py3-none-any.whl.metadata (156 kB)
+Collecting certifi==2026.6.17 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 39))
+  Downloading certifi-2026.6.17-py3-none-any.whl.metadata (2.5 kB)
+Collecting cffi==2.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 45))
+  Downloading cffi-2.0.0-cp313-cp313-win_amd64.whl.metadata (2.6 kB)
+Collecting charset-normalizer==3.4.7 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 50))
+  Downloading charset_normalizer-3.4.7-cp313-cp313-win_amd64.whl.metadata (41 kB)
+Collecting click==8.4.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 54))
+  Downloading click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting coincurve==21.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 56))
+  Downloading coincurve-21.0.0-cp313-cp313-win_amd64.whl.metadata (4.0 kB)
+Collecting colorama==0.4.6 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 58))
+  Downloading colorama-0.4.6-py2.py3-none-any.whl.metadata (17 kB)
+Collecting cryptography==49.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 62))
+  Downloading cryptography-49.0.0-cp311-abi3-win_amd64.whl.metadata (4.3 kB)
+Collecting curl-cffi==0.15.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 64))
+  Downloading curl_cffi-0.15.0-cp310-abi3-win_amd64.whl.metadata (18 kB)
+Collecting duckdb==1.5.4 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 66))
+  Downloading duckdb-1.5.4-cp313-cp313-win_amd64.whl.metadata (4.2 kB)
+Collecting fastapi==0.139.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 68))
+  Downloading fastapi-0.139.2-py3-none-any.whl.metadata (26 kB)
+Collecting frozenlist==1.8.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 70))
+  Downloading frozenlist-1.8.0-cp313-cp313-win_amd64.whl.metadata (21 kB)
+Collecting h11==0.16.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 75))
+  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting idna==3.18 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 77))
+  Downloading idna-3.18-py3-none-any.whl.metadata (6.1 kB)
+Collecting markdown-it-py==4.2.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 83))
+  Downloading markdown_it_py-4.2.0-py3-none-any.whl.metadata (7.4 kB)
+Collecting mdurl==0.1.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 85))
+  Downloading mdurl-0.1.2-py3-none-any.whl.metadata (1.6 kB)
+Collecting mmh3==5.2.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 87))
+  Downloading mmh3-5.2.1-cp313-cp313-win_amd64.whl.metadata (15 kB)
+Collecting msgspec==0.21.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 89))
+  Downloading msgspec-0.21.1-cp313-cp313-win_amd64.whl.metadata (5.9 kB)
+Collecting multidict==6.7.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 93))
+  Downloading multidict-6.7.1-cp313-cp313-win_amd64.whl.metadata (5.5 kB)
+Collecting multitasking==0.0.13 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 98))
+  Downloading multitasking-0.0.13-py3-none-any.whl.metadata (16 kB)
+Collecting numpy==2.5.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 100))
+  Downloading numpy-2.5.1-cp313-cp313-win_amd64.whl.metadata (6.6 kB)
+Collecting orjson==3.11.9 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 106))
+  Downloading orjson-3.11.9-cp313-cp313-win_amd64.whl.metadata (43 kB)
+Collecting pandas==3.0.3 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 108))
+  Downloading pandas-3.0.3-cp313-cp313-win_amd64.whl.metadata (19 kB)
+Collecting peewee==4.2.5 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 112))
+  Downloading peewee-4.2.5-py3-none-any.whl.metadata (10 kB)
+Collecting platformdirs==4.10.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 114))
+  Downloading platformdirs-4.10.0-py3-none-any.whl.metadata (5.5 kB)
+Collecting polars==1.42.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 116))
+  Downloading polars-1.42.1-py3-none-any.whl.metadata (10 kB)
+Collecting polars-runtime-32==1.42.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 120))
+  Downloading polars_runtime_32-1.42.1-cp310-abi3-win_amd64.whl.metadata (1.5 kB)
+Collecting prompt-toolkit==3.0.52 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 122))
+  Downloading prompt_toolkit-3.0.52-py3-none-any.whl.metadata (6.4 kB)
+Collecting propcache==0.5.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 124))
+  Downloading propcache-0.5.2-cp313-cp313-win_amd64.whl.metadata (17 kB)
+Collecting protobuf==7.35.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 129))
+  Downloading protobuf-7.35.1-cp310-abi3-win_amd64.whl.metadata (595 bytes)
+Collecting pyarrow==25.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 131))
+  Downloading pyarrow-25.0.0-cp313-cp313-win_amd64.whl.metadata (3.0 kB)
+Collecting pycparser==3.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 133))
+  Downloading pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)
+Collecting pydantic==2.13.4 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 137))
+  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+Collecting pydantic-core==2.46.4 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 139))
+  Downloading pydantic_core-2.46.4-cp313-cp313-win_amd64.whl.metadata (6.7 kB)
+Collecting pygments==2.20.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 141))
+  Downloading pygments-2.20.0-py3-none-any.whl.metadata (2.5 kB)
+Collecting python-dateutil==2.9.0.post0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 143))
+  Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting pytz==2026.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 147))
+  Downloading pytz-2026.2-py2.py3-none-any.whl.metadata (22 kB)
+Collecting requests==2.34.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 149))
+  Downloading requests-2.34.2-py3-none-any.whl.metadata (4.8 kB)
+Collecting rich==15.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 153))
+  Downloading rich-15.0.0-py3-none-any.whl.metadata (18 kB)
+Collecting setuptools==83.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 158))
+  Downloading setuptools-83.0.0-py3-none-any.whl.metadata (6.6 kB)
+Collecting shellingham==1.5.4 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 160))
+  Downloading shellingham-1.5.4-py2.py3-none-any.whl.metadata (3.5 kB)
+Collecting six==1.17.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 162))
+  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Collecting soupsieve==2.8.4 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 164))
+  Downloading soupsieve-2.8.4-py3-none-any.whl.metadata (4.6 kB)
+Collecting starlette==1.3.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 166))
+  Downloading starlette-1.3.1-py3-none-any.whl.metadata (6.4 kB)
+Collecting typer==0.27.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 168))
+  Downloading typer-0.27.0-py3-none-any.whl.metadata (15 kB)
+Collecting typing-extensions==4.16.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 170))
+  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting typing-inspection==0.4.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 178))
+  Downloading typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+Collecting tzdata==2026.3 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 182))
+  Downloading tzdata-2026.3-py2.py3-none-any.whl.metadata (1.4 kB)
+Collecting urllib3==2.7.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 184))
+  Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
+Collecting uvicorn==0.51.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 188))
+  Downloading uvicorn-0.51.0-py3-none-any.whl.metadata (6.6 kB)
+Collecting wcwidth==0.8.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 192))
+  Downloading wcwidth-0.8.2-py3-none-any.whl.metadata (43 kB)
+Collecting websockets==16.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 194))
+  Downloading websockets-16.1-cp313-cp313-win_amd64.whl.metadata (7.0 kB)
+Collecting winloop==0.6.3 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 198))
+  Downloading winloop-0.6.3-cp313-cp313-win_amd64.whl.metadata (13 kB)
+Collecting yarl==1.24.2 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 200))
+  Downloading yarl-1.24.2-cp313-cp313-win_amd64.whl.metadata (97 kB)
+Collecting yfinance==1.5.1 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 204))
+  Downloading yfinance-1.5.1-py2.py3-none-any.whl.metadata (6.2 kB)
+Collecting zlib-ng==1.0.0 (from -r D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\flowmap-reqs.txt (line 206))
+  Downloading zlib_ng-1.0.0-cp313-cp313-win_amd64.whl.metadata (7.0 kB)
+Downloading aiohappyeyeballs-2.7.1-py3-none-any.whl (15 kB)
+Downloading aiohttp-3.14.1-cp313-cp313-win_amd64.whl (479 kB)
+Downloading aiohttp_fast_zlib-0.3.0-py3-none-any.whl (8.6 kB)
+Downloading aiosignal-1.4.0-py3-none-any.whl (7.5 kB)
+Downloading annotated_doc-0.0.4-py3-none-any.whl (5.3 kB)
+Downloading annotated_types-0.7.0-py3-none-any.whl (13 kB)
+Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
+Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+Downloading beautifulsoup4-4.15.0-py3-none-any.whl (109 kB)
+Downloading ccxt-4.5.69-py3-none-any.whl (6.5 MB)
+   ---------------------------------------- 6.5/6.5 MB 21.5 MB/s  0:00:00
+Downloading certifi-2026.6.17-py3-none-any.whl (133 kB)
+Downloading cffi-2.0.0-cp313-cp313-win_amd64.whl (183 kB)
+Downloading charset_normalizer-3.4.7-cp313-cp313-win_amd64.whl (158 kB)
+Downloading click-8.4.2-py3-none-any.whl (119 kB)
+Downloading coincurve-21.0.0-cp313-cp313-win_amd64.whl (1.3 MB)
+   ---------------------------------------- 1.3/1.3 MB 41.5 MB/s  0:00:00
+Downloading colorama-0.4.6-py2.py3-none-any.whl (25 kB)
+Downloading cryptography-49.0.0-cp311-abi3-win_amd64.whl (3.8 MB)
+   ---------------------------------------- 3.8/3.8 MB 89.3 MB/s  0:00:00
+Downloading curl_cffi-0.15.0-cp310-abi3-win_amd64.whl (1.7 MB)
+   ---------------------------------------- 1.7/1.7 MB 51.3 MB/s  0:00:00
+Downloading duckdb-1.5.4-cp313-cp313-win_amd64.whl (13.1 MB)
+   ---------------------------------------- 13.1/13.1 MB 136.0 MB/s  0:00:00
+Downloading fastapi-0.139.2-py3-none-any.whl (130 kB)
+Downloading frozenlist-1.8.0-cp313-cp313-win_amd64.whl (43 kB)
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Downloading idna-3.18-py3-none-any.whl (65 kB)
+Downloading markdown_it_py-4.2.0-py3-none-any.whl (91 kB)
+Downloading mdurl-0.1.2-py3-none-any.whl (10.0 kB)
+Downloading mmh3-5.2.1-cp313-cp313-win_amd64.whl (41 kB)
+Downloading msgspec-0.21.1-cp313-cp313-win_amd64.whl (189 kB)
+Downloading multidict-6.7.1-cp313-cp313-win_amd64.whl (45 kB)
+Downloading multitasking-0.0.13-py3-none-any.whl (16 kB)
+Downloading numpy-2.5.1-cp313-cp313-win_amd64.whl (12.4 MB)
+   ---------------------------------------- 12.4/12.4 MB 127.9 MB/s  0:00:00
+Downloading orjson-3.11.9-cp313-cp313-win_amd64.whl (127 kB)
+Downloading pandas-3.0.3-cp313-cp313-win_amd64.whl (9.8 MB)
+   ---------------------------------------- 9.8/9.8 MB 139.6 MB/s  0:00:00
+Downloading peewee-4.2.5-py3-none-any.whl (173 kB)
+Downloading platformdirs-4.10.0-py3-none-any.whl (22 kB)
+Downloading polars-1.42.1-py3-none-any.whl (837 kB)
+   ---------------------------------------- 837.6/837.6 kB 21.2 MB/s  0:00:00
+Downloading polars_runtime_32-1.42.1-cp310-abi3-win_amd64.whl (52.7 MB)
+   ---------------------------------------- 52.7/52.7 MB 65.7 MB/s  0:00:00
+Downloading prompt_toolkit-3.0.52-py3-none-any.whl (391 kB)
+Downloading propcache-0.5.2-cp313-cp313-win_amd64.whl (41 kB)
+Downloading protobuf-7.35.1-cp310-abi3-win_amd64.whl (439 kB)
+Downloading pyarrow-25.0.0-cp313-cp313-win_amd64.whl (27.9 MB)
+   ---------------------------------------- 27.9/27.9 MB 63.5 MB/s  0:00:00
+Downloading pycparser-3.0-py3-none-any.whl (48 kB)
+Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
+Downloading pydantic_core-2.46.4-cp313-cp313-win_amd64.whl (2.1 MB)
+   ---------------------------------------- 2.1/2.1 MB 56.0 MB/s  0:00:00
+Downloading pygments-2.20.0-py3-none-any.whl (1.2 MB)
+   ---------------------------------------- 1.2/1.2 MB 35.6 MB/s  0:00:00
+Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Downloading pytz-2026.2-py2.py3-none-any.whl (510 kB)
+Downloading requests-2.34.2-py3-none-any.whl (73 kB)
+Downloading rich-15.0.0-py3-none-any.whl (310 kB)
+Downloading setuptools-83.0.0-py3-none-any.whl (1.0 MB)
+   ---------------------------------------- 1.0/1.0 MB 33.5 MB/s  0:00:00
+Downloading shellingham-1.5.4-py2.py3-none-any.whl (9.8 kB)
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Downloading soupsieve-2.8.4-py3-none-any.whl (37 kB)
+Downloading starlette-1.3.1-py3-none-any.whl (73 kB)
+Downloading typer-0.27.0-py3-none-any.whl (122 kB)
+Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+Downloading tzdata-2026.3-py2.py3-none-any.whl (348 kB)
+Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
+Downloading uvicorn-0.51.0-py3-none-any.whl (73 kB)
+Downloading wcwidth-0.8.2-py3-none-any.whl (323 kB)
+Downloading websockets-16.1-cp313-cp313-win_amd64.whl (180 kB)
+Downloading winloop-0.6.3-cp313-cp313-win_amd64.whl (644 kB)
+   ---------------------------------------- 644.5/644.5 kB 17.4 MB/s  0:00:00
+Downloading yarl-1.24.2-cp313-cp313-win_amd64.whl (92 kB)
+Downloading yfinance-1.5.1-py2.py3-none-any.whl (144 kB)
+Downloading zlib_ng-1.0.0-cp313-cp313-win_amd64.whl (93 kB)
+Installing collected packages: yfinance, pytz, peewee, multitasking, zlib-ng, yarl, winloop, websockets, wcwidth, uvicorn, urllib3, tzdata, typing-inspection, typing-extensions, typer, starlette, soupsieve, six, shellingham, setuptools, rich, requests, python-dateutil, pygments, pydantic-core, pydantic, pycparser, pyarrow, protobuf, propcache, prompt-toolkit, polars-runtime-32, polars, platformdirs, pandas, orjson, numpy, multidict, msgspec, mmh3, mdurl, markdown-it-py, idna, h11, frozenlist, fastapi, duckdb, curl-cffi, cryptography, crocodile, colorama, coincurve, click, charset-normalizer, cffi, certifi, ccxt, beautifulsoup4, attrs, anyio, annotated-types, annotated-doc, aiosignal, aiohttp-fast-zlib, aiohttp, aiohappyeyeballs
+
+Successfully installed aiohappyeyeballs-2.7.1 aiohttp-3.14.1 aiohttp-fast-zlib-0.3.0 aiosignal-1.4.0 annotated-doc-0.0.4 annotated-types-0.7.0 anyio-4.14.2 attrs-26.1.0 beautifulsoup4-4.15.0 ccxt-4.5.69 certifi-2026.6.17 cffi-2.0.0 charset-normalizer-3.4.7 click-8.4.2 coincurve-21.0.0 colorama-0.4.6 crocodile-0.3.2 cryptography-49.0.0 curl-cffi-0.15.0 duckdb-1.5.4 fastapi-0.139.2 frozenlist-1.8.0 h11-0.16.0 idna-3.18 markdown-it-py-4.2.0 mdurl-0.1.2 mmh3-5.2.1 msgspec-0.21.1 multidict-6.7.1 multitasking-0.0.13 numpy-2.5.1 orjson-3.11.9 pandas-3.0.3 peewee-4.2.5 platformdirs-4.10.0 polars-1.42.1 polars-runtime-32-1.42.1 prompt-toolkit-3.0.52 propcache-0.5.2 protobuf-7.35.1 pyarrow-25.0.0 pycparser-3.0 pydantic-2.13.4 pydantic-core-2.46.4 pygments-2.20.0 python-dateutil-2.9.0.post0 pytz-2026.2 requests-2.34.2 rich-15.0.0 setuptools-83.0.0 shellingham-1.5.4 six-1.17.0 soupsieve-2.8.4 starlette-1.3.1 typer-0.27.0 typing-extensions-4.16.0 typing-inspection-0.4.2 tzdata-2026.3 urllib3-2.7.0 uvicorn-0.51.0 wcwidth-0.8.2 websockets-16.1 winloop-0.6.3 yarl-1.24.2 yfinance-1.5.1 zlib-ng-1.0.0
+==> Building + installing flowmap-server wheel
+Building wheel...
+Successfully built D:\a\flowmap\flowmap\flowmap\app\src-tauri\resources\.cache\wheel\flowmap_server-1.5.1-py3-none-any.whl
+Processing .\app\src-tauri\resources\.cache\wheel\flowmap_server-1.5.1-py3-none-any.whl
+Installing collected packages: flowmap-server
+Successfully installed flowmap-server-1.5.1
+==> Slimming runtime (pyc caches, test cruft)
+==> Removing unused Tk/tkinter (headless server; breaks AppImage deps)
+==> Verifying bundled runtime
+    flowmap_server 1.5.1
+    flowmap_server.__main__ imports OK
+    imports OK (27): flowmap_server, numpy, polars, fastapi, uvicorn, msgspec, crocodile, ccxt, aiohttp, certifi, crocodile.core.connector, crocodile.core.ingest.transport, crocodile.core.schema.records, crocodile.core.scheduler.calendar, crocodile.core.sink.memory, crocodile.crypto.exchanges.factory, crocodile.crypto.client.backfill, crocodile.crypto.exchanges.ccxt_universal.connector, crocodile.crypto.exchanges.binance.backfill, crocodile.equity.providers.factory, crocodile.equity.providers.yahoo.client, crocodile.equity.client.collect, crocodile.equity.depth.vap, pandas, pyarrow, yfinance, bs4
+==> Done. Bundled runtime size: 628M
+    symlinks in tree: 0
+     Android Creating mipmap-xhdpi/ic_launcher.png
+     Android Creating mipmap-xxhdpi/ic_launcher_round.png
+     Android Creating mipmap-xxhdpi/ic_launcher.png
+     Android Creating mipmap-xxxhdpi/ic_launcher_round.png
+     Android Creating mipmap-xxxhdpi/ic_launcher.png
+        Info Looking up installed tauri packages to check mismatched versions...
+[1m[92m    Updating[0m crates.io index
+[1m[92m     Locking[0m 60 packages to highest compatible versions
+[1m[92m    Updating[0m alloc-no-stdlib v2.0.4 -> v3.0.0
+[1m[92m    Updating[0m alloc-stdlib v0.2.4 -> v0.3.0
+[1m[92m      Adding[0m base64 v0.23.1
+[1m[92m    Updating[0m brotli v8.0.4 -> v9.1.1
+[1m[92m    Updating[0m brotli-decompressor v5.0.3 -> v6.2.0
+[1m[92m    Updating[0m cargo_toml v0.22.3 -> v1.0.1
+[1m[92m    Updating[0m cfb v0.7.3 -> v0.14.0
+[1m[92m    Updating[0m cssparser v0.36.0 -> v0.37.0
+[1m[92m    Updating[0m cssparser-macros v0.6.1 -> v0.7.1
+[1m[92m    Updating[0m ctor v0.8.0 -> v1.0.13
+[1m[92m    Updating[0m dirs v6.0.0 -> v7.0.0
+[1m[92m    Updating[0m dom_query v0.27.0 -> v0.28.0
+[1m[92m    Updating[0m html5ever v0.38.0 -> v0.39.0
+[1m[92m    Updating[0m ico v0.5.0 -> v0.6.0
+[1m[92m    Updating[0m infer v0.19.0 -> v0.22.0
+[1m[92m    Updating[0m json-patch v3.0.1 -> v4.2.0
+[1m[92m    Updating[0m jsonptr v0.6.3 -> v0.7.1
+[1m[92m    Updating[0m keyboard-types v0.7.0 -> v0.8.3
+[1m[92m    Updating[0m markup5ever v0.38.0 -> v0.39.0
+[1m[92m    Updating[0m muda v0.19.3 -> v0.20.0
+[1m[92m      Adding[0m ndk-context v0.1.1
+[1m[92m      Adding[0m rfd v0.17.2
+[1m[92m      Adding[0m ring v0.17.14
+[1m[92m      Adding[0m rustls v0.23.46
+[1m[92m      Adding[0m rustls-pki-types v1.15.1
+[1m[92m      Adding[0m rustls-webpki v0.103.16
+[1m[92m    Updating[0m selectors v0.36.1 -> v0.38.0
+[1m[92m      Adding[0m static_vcruntime v3.0.0
+[1m[92m      Adding[0m subtle v2.6.1
+[1m[92m    Updating[0m swift-rs v1.0.7 -> v1.0.9
+[1m[92m    Updating[0m tao v0.35.3 -> v0.37.2
+[1m[92m    Updating[0m tao-macros v0.1.3 -> v0.1.4
+[1m[92m    Updating[0m tauri v2.11.5 -> v2.12.5
+[1m[92m    Updating[0m tauri-build v2.6.3 -> v2.7.4
+[1m[92m    Updating[0m tauri-codegen v2.6.3 -> v2.7.4
+[1m[92m    Updating[0m tauri-macros v2.6.3 -> v2.7.4
+[1m[92m      Adding[0m tauri-plugin v2.7.2
+[1m[92m      Adding[0m tauri-plugin-dialog v2.8.4
+[1m[92m      Adding[0m tauri-plugin-fs v2.7.1
+[1m[92m    Updating[0m tauri-runtime v2.11.3 -> v2.12.2
+[1m[92m    Updating[0m tauri-runtime-wry v2.11.4 -> v2.12.3
+[1m[92m    Updating[0m tauri-utils v2.9.3 -> v2.10.2
+[1m[92m    Updating[0m tray-icon v0.24.1 -> v0.25.1
+[1m[92m      Adding[0m untrusted v0.9.0
+[1m[92m      Adding[0m ureq v2.12.1 [1m[93m(available: v3.5.0)[0m
+[1m[92m    Updating[0m urlpattern v0.3.0 -> v0.6.0
+[1m[92m      Adding[0m web-time v1.1.0
+[1m[92m      Adding[0m webpki-roots v0.26.11
+[1m[92m      Adding[0m webpki-roots v1.0.11
+[1m[92m    Updating[0m webview2-com v0.38.2 -> v0.39.1
+[1m[92m    Updating[0m webview2-com-sys v0.38.2 -> v0.39.1
+[1m[92m    Updating[0m window-vibrancy v0.6.0 -> v0.8.1
+[1m[92m      Adding[0m windows v0.62.2
+[1m[92m      Adding[0m windows-collections v0.3.2
+[1m[92m      Adding[0m windows-future v0.3.2
+[1m[92m      Adding[0m windows-numerics v0.3.1
+[1m[92m      Adding[0m windows-sys v0.52.0
+[1m[92m      Adding[0m windows-threading v0.2.1
+[1m[92m    Updating[0m wry v0.55.1 -> v0.57.1
+[1m[92m      Adding[0m zeroize v1.9.1
+[1m[92m   Compiling[0m flowmap v2.0.11 (D:\a\flowmap\flowmap\flowmap\app\src-tauri)
+[1m[92m    Finished[0m `release` profile [optimized] target(s) in 2m 38s
+       Built application at: D:\a\flowmap\flowmap\flowmap\app\src-tauri\target\release\VPFM.exe
+        Info Patching D:\a\flowmap\flowmap\flowmap\app\src-tauri\target\release\VPFM.exe with bundle type information: nsis
+        Info Verifying NSIS package
+ Downloading https://github.com/tauri-apps/binary-releases/releases/download/nsis-3.13/nsis-3.13.zip
+        Info validating hash
+        Info extracting NSIS
+ Downloading https://github.com/tauri-apps/nsis-tauri-utils/releases/download/nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll
+        Info validating hash
+        Info Target: x64
+     Running makensis to produce D:\a\flowmap\flowmap\flowmap\app\src-tauri\target\release\bundle\nsis\VPFM_2.0.11_x64-setup.exe
+    Finished 1 bundle at:
+        D:\a\flowmap\flowmap\flowmap\app\src-tauri\target\release\bundle\nsis\VPFM_2.0.11_x64-setup.exe (127.86 MiB)
+
+安装测试通过：677M
+[多窗口] 启动后的窗口：VPFM
+[多窗口] 打开衍生品：{"ok":true}
+[多窗口] 打开后：状态 {"open":["derivs"]}；窗口 VPFM · 衍生品数据|VPFM
+[多窗口] 关闭衍生品：{"ok":true}
+[多窗口] 关闭后：状态 {"open":[]}；主程序还在 200；窗口 VPFM
+[多窗口] 打开期权：{"ok":true}
+[多窗口] 关主窗口：closed: VPFM
+[多窗口] 退出后进程数：0
+[多窗口] 保存的窗口状态：{"main":{"x":0,"y":0,"w":1028,"h":729,"max":false},"mods":{"derivs":{"open":false,"geo":{"x":36,"y":36,"w":1028,"h":749,"max":false}},"options":{"open":true,"geo":{"x":36,"y":36,"w":1028,"h":749,"max":false}}}}
+[多窗口] 第二次启动后：状态 {"open":["options"]}；窗口 VPFM|VPFM · 期权 GEX
+flowmap 资源 /wb/flowmap/assets/index-C5wdIcrJ.js -> 200
+flowmap 资源 /wb/flowmap/assets/index-fo-LCjC3.css -> 200
+aggr 资源 /wb/aggr/vpfm/zh-aggr.js -> 200
+aggr 资源 /wb/aggr/vpfm/fonts.css -> 200
+aggr 资源 /wb/aggr/index.5c4cb14.js -> 200
+aggr 资源 /wb/aggr/index.5c4cb14.css -> 200
+lmap 资源 ./assets/index-BiaB-acS.js -> 200
+lmap 资源 ./assets/lazy-BrD_9qGB.js -> 200
+shell.js content-type: text/javascript; charset=utf-8
+{"app":"VPFM","build":{"version":"2.0.11","built":"2026-10-31T07:31:19Z","upstreams":{"flowmap":{"sha":"48f8baf0bf05513a2b39f09515806be4e8628f29","date":"2026-10-30"},"aggr":{"sha":"41c1609ea3ac7c2dcf12ffba94ac78027e1c0012","date":"2026-05-03"},"lmap":{"sha":"682c17e86b9770f32f9b56ed6bd63b908e2eaa28","date":"2026-10-30"}}},"wbDir":"D:\\a\\flowmap\\flowmap\\flowmap\\app\\src-tauri\\resources\\wb","proxy":"","proxySource":"none","dataDir":"C:\\Users\\runneradmin\\AppData\\Local\\Temp\\tmp.rApgz7dz4p","python":"3.13.14","platform":"win32","uptime":3}
+proxy https://www.deribit.com/api/v2/public/get_time -> 200
+proxy https://www.okx.com/api/v5/public/time -> 200
+proxy https://api.bybit.com/v5/market/time -> 403
+冒烟测试通过
+已发布 vpfm-v2.0.11
+升级通道 zh-v2.0.0 已更新到 2.0.11
