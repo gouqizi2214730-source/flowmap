@@ -55,15 +55,19 @@ def i18n(s):
     s = sub1(r"(export function isLocale\([^)]*\)[^{]*\{\n\s*return )", r"\1value === 'zh' || ", s, what='isLocale')
     s = sub1(r"const TABLES: Record<Locale, Record<string, string>> = \{ ([^}]*)\};",
              lambda m: f"const TABLES: Record<Locale, Record<string, string>> = {{ {m.group(1).strip()}, zh }};", s, what='TABLES')
+    if "from './zh'" not in s: s = "import { zh } from './zh';\n" + s
     return s
 
 
 edit('client/src/i18n/index.ts', i18n)
 
-edit('client/src/main.tsx', lambda s: sub1(
-    r"(\ninitLocale\(\);\n)", r"\1installZhDom();\n",
-    sub1(r"(import \{ initLocale \} from './i18n';)", r"\1\nimport { installZhDom } from './i18n/zhDom';", s, what='import initLocale'),
-    what='initLocale();'))
+def main_tsx(s):
+    s = sub1(r"(import \{ initLocale \} from './i18n';)", r"\1\nimport { installZhDom } from './i18n/zhDom';", s, what='import initLocale')
+    s = sub1(r"(\ninitLocale\(\);\n)", r"\1installZhDom();\n", s, what='initLocale();')
+    if "from './i18n/zhDom'" not in s: s = "import { installZhDom } from './i18n/zhDom';\n" + s
+    return s
+edit('client/src/main.tsx', main_tsx)
+
 
 
 def html(s):
