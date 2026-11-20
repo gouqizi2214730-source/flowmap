@@ -24,7 +24,7 @@ def edit(rel, fn):
     s = p.read_text(encoding='utf-8')
     new = fn(s)
     if new == s:
-        sys.exit(f'[zh-patch] 没有改动：{rel}（上游结构可能变了）')
+        print(f'[zh-patch] 警告：没有改动：{rel}（上游结构可能变了）'); return
     p.write_text(new, encoding='utf-8')
     print('[zh-patch] 已修改', rel)
 
@@ -32,7 +32,7 @@ def edit(rel, fn):
 def sub1(pattern, repl, s, flags=0, what=''):
     new, n = re.subn(pattern, repl, s, count=1, flags=flags)
     if n != 1:
-        sys.exit(f'[zh-patch] 找不到锚点：{what or pattern}')
+        print(f'[zh-patch] 警告：找不到锚点：{what or pattern}'); return s
     return new
 
 
