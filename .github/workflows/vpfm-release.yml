@@ -55,7 +55,7 @@ jobs:
           set -euo pipefail
           FM=$(git ls-remote "https://github.com/$FLOWMAP.git" HEAD | cut -f1)
           AG=$(git ls-remote "https://github.com/$AGGR.git" HEAD | cut -f1)
-          LM=$(git ls-remote "https://github.com/$LMAP.git" HEAD | cut -f1)
+          LM="6cb88d6407590bc9956e2dfeaf0ccdfc14f9dd8b"
           PATCH=$(find vpfm zh-patch .github/workflows/vpfm-release.yml -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-10)
           KEY="${FM:0:10}-${AG:0:10}-${LM:0:10}-$PATCH"
           LAST_TAG=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 60 --json tagName -q '.[].tagName' 2>/dev/null | grep '^vpfm-v' | head -1 || true)
