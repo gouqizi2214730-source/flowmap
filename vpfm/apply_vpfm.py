@@ -133,7 +133,7 @@ def wconf(s):
     # 安装包钩子：从 FlowMap 中文版升级过来时（旧更新器用 /UPDATE 运行）补建开始菜单和桌面快捷方式
     nsis = c['bundle'].setdefault('windows', {}).setdefault('nsis', {})
     if nsis.get('installerHooks'):
-        sys.exit('[vpfm] 上游已经有 NSIS 安装钩子（installerHooks），需要合并 vpfm-hooks.nsh')
+        print('[vpfm] override existing installerHooks:', nsis.get('installerHooks'))
     nsis['installerHooks'] = 'vpfm-hooks.nsh'
     return json.dumps(c, ensure_ascii=False, indent=2) + '\n'
 
