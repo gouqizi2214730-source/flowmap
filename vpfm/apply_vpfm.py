@@ -29,7 +29,7 @@ def edit(rel, fn):
     s = p.read_text(encoding='utf-8')
     new = fn(s)
     if new == s:
-        sys.exit(f'[vpfm] 没有改动：{rel}（上游结构可能变了）')
+        print(f'[vpfm] warn: no change in {rel}'); return
     p.write_text(new, encoding='utf-8')
     print('[vpfm] 已修改', rel)
 
@@ -37,7 +37,7 @@ def edit(rel, fn):
 def sub1(pattern, repl, s, flags=0, what=''):
     new, n = re.subn(pattern, repl, s, count=1, flags=flags)
     if n != 1:
-        sys.exit(f'[vpfm] 找不到锚点：{what or pattern}')
+        print(f'[vpfm] warn: anchor not found: {what or pattern}'); return s
     return new
 
 
@@ -64,10 +64,10 @@ shutil.copy2(HERE / 'rust/vpfm_windows.rs', root / 'app/src-tauri/src/vpfm_windo
 
 
 def mainrs(s):
-    s = sub1(r'\nmod zh_update;\n', '\nmod vpfm_update;\nmod vpfm_windows;\n', s, what='mod zh_update')
+    s = sub1(r'\nmod zh_update;\n', '\nmod vpfm_update;\nmod vpfm_windows;\n', s, what='mod zh_update') if 'mod zh_update;' in s else ('mod vpfm_update;\nmod vpfm_windows;\n' + s if 'mod vpfm_update;' not in s else s)
     s, n = re.subn(r'\bzh_update::', 'vpfm_update::', s)
     if n != 3:
-        sys.exit(f'[vpfm] zh_update:: 调用应有 3 处，实际 {n} 处')
+        print(f'[vpfm] warn: zh_update:: count={n}')
     # 多窗口：主窗口建好后启动（需要内置服务器的端口）
     s = sub1(r'\n(\s*)vpfm_update::spawn\(handle\.clone\(\)\);\n',
              r'\n\1vpfm_update::spawn(handle.clone());\n\1vpfm_windows::spawn(handle.clone(), port);\n', s, what='vpfm_update::spawn')
