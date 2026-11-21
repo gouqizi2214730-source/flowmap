@@ -226,7 +226,7 @@ fn check_once(app: &AppHandle, manual: bool) -> Res<()> {
         state.0.store(true, Ordering::Relaxed);
     }
     if let Some(state) = app.try_state::<crate::SidecarState>() {
-        crate::kill_sidecar(&state);
+        crate::kill_sidecar(&state, Duration::from_secs(3));
     }
     crate::release_instance_lock(app);
     // /P 显示进度但不需要点击；/UPDATE 覆盖安装；/R 装完自动重新打开。
